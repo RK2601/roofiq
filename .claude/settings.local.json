@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__Claude_Preview__preview_start",
+      "Bash(python3 -c ' *)",
+      "Bash(npx tsc *)",
+      "Bash(npm install *)",
+      "Bash(npm ls *)"
+    ]
+  }
+}
