@@ -45,6 +45,12 @@ export default function App() {
     initDb().catch(console.error);
   }, []);
 
+  useEffect(() => {
+    if (!user && view !== 'landing' && view !== 'login') {
+      setView('landing');
+    }
+  }, [user, view]);
+
   const handleAddressSelect = (addr: string, coords: Coordinates) => {
     if (!user) {
       setPendingAddr(addr);
@@ -115,10 +121,13 @@ export default function App() {
     <LoginPage onLogin={handleLogin} onBack={() => setView('landing')} />
   );
 
-  // Authenticated dashboard views (user should be set, but guard just in case)
+  // Authenticated routes without a user (stale state): effect resets view; show placeholder instead of a blank frame
   if (!user) {
-    setView('landing');
-    return null;
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50 text-slate-500 text-sm">
+        Loading…
+      </div>
+    );
   }
 
   const isAnalysisView = view === 'analysis' || view === 'marketing';

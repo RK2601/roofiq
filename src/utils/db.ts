@@ -2,10 +2,26 @@ import { neon } from '@neondatabase/serverless';
 import { Coordinates } from '../types';
 import { QuoteData } from '../types';
 
-const sql = neon(import.meta.env.VITE_DATABASE_URL);
+const dbUrl = import.meta.env.VITE_DATABASE_URL;
+/** Undefined URL must not be passed to `neon()` — it throws immediately and breaks the whole app (e.g. Vercel without env). */
+const neonSql = dbUrl ? neon(dbUrl) : null;
+
+function requireNeon() {
+  if (!neonSql) {
+    throw new Error(
+      'Database is not configured. Set VITE_DATABASE_URL in your environment (e.g. Vercel → Project → Settings → Environment Variables) to your Neon connection string.'
+    );
+  }
+  return neonSql;
+}
+
+export function isDbConfigured(): boolean {
+  return Boolean(neonSql);
+}
 
 export async function initDb() {
-  await sql`
+  if (!neonSql) return;
+  await neonSql`
     CREATE TABLE IF NOT EXISTS projects (
       id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       address     TEXT NOT NULL,
@@ -15,7 +31,7 @@ export async function initDb() {
       created_at  TIMESTAMPTZ DEFAULT NOW()
     )
   `;
-  await sql`
+  await neonSql`
     CREATE TABLE IF NOT EXISTS roof_sections (
       id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       project_id       UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -29,7 +45,7 @@ export async function initDb() {
       created_at       TIMESTAMPTZ DEFAULT NOW()
     )
   `;
-  await sql`
+  await neonSql`
     CREATE TABLE IF NOT EXISTS project_snapshots (
       id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       project_id   UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -38,7 +54,7 @@ export async function initDb() {
       created_at   TIMESTAMPTZ DEFAULT NOW()
     )
   `;
-  await sql`
+  await neonSql`
     CREATE TABLE IF NOT EXISTS quotes (
       id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       project_id       UUID REFERENCES projects(id) ON DELETE CASCADE,
@@ -78,6 +94,7 @@ export async function saveProject(
   snapshots: ProjectSnapshot[],
   sections: SectionToSave[]
 ): Promise<string> {
+  const sql = requireNeon();
   const primaryUrl = snapshots[0]?.url ?? null;
 
   const [project] = await sql`
@@ -115,6 +132,7 @@ export async function saveProject(
 }
 
 export async function getProjectSnapshots(projectId: string) {
+  const sql = requireNeon();
   return await sql`
     SELECT id, label, snapshot_url, created_at
     FROM project_snapshots
@@ -124,6 +142,7 @@ export async function getProjectSnapshots(projectId: string) {
 }
 
 export async function getProjectDetails(projectId: string) {
+  const sql = requireNeon();
   const rows = await sql`
     SELECT p.id, p.address, p.lat, p.lng, p.snapshot_url, p.created_at,
            COUNT(rs.id)::int    AS section_count,
@@ -141,6 +160,7 @@ export async function getProjectDetails(projectId: string) {
 }
 
 export async function getProjectSections(projectId: string) {
+  const sql = requireNeon();
   return await sql`
     SELECT id, name, flat_area, pitch, pitch_multiplier, actual_area, color
     FROM roof_sections
@@ -150,6 +170,7 @@ export async function getProjectSections(projectId: string) {
 }
 
 export async function saveQuote(projectId: string | null, quote: QuoteData): Promise<string> {
+  const sql = requireNeon();
   const [row] = await sql`
     INSERT INTO quotes
       (project_id, material_id, material_name, total_squares,
@@ -172,6 +193,7 @@ export async function saveQuote(projectId: string | null, quote: QuoteData): Pro
 }
 
 export async function getStats() {
+  const sql = requireNeon();
   const rows = await sql`
     SELECT
       (SELECT COUNT(*)::int FROM projects) as total_projects,
@@ -183,6 +205,7 @@ export async function getStats() {
 }
 
 export async function getRecentProjects(limit = 8) {
+  const sql = requireNeon();
   return await sql`
     SELECT p.id, p.address, p.lat, p.lng, p.snapshot_url, p.created_at,
            COUNT(rs.id)::int as section_count,
@@ -200,6 +223,7 @@ export async function updateQuote(quoteId: string, updates: {
   additional_costs: Array<{ label: string; amount: number }>;
   subtotal: number; tax: number; total: number;
 }) {
+  const sql = requireNeon();
   await sql`
     UPDATE quotes SET
       material_cost    = ${updates.material_cost},
@@ -213,6 +237,7 @@ export async function updateQuote(quoteId: string, updates: {
 }
 
 export async function getQuoteDetails(quoteId: string) {
+  const sql = requireNeon();
   const rows = await sql`
     SELECT q.id, q.material_id, q.material_name, q.total_squares,
            q.material_cost, q.labor_cost, q.additional_costs,
@@ -232,6 +257,7 @@ export async function getQuoteDetails(quoteId: string) {
 }
 
 export async function getRecentQuotes(limit = 8) {
+  const sql = requireNeon();
   return await sql`
     SELECT q.id, q.material_name, q.total_squares, q.total, q.generated_at,
            p.address
