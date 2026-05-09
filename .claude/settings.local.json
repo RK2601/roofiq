@@ -5,7 +5,22 @@
       "Bash(python3 -c ' *)",
       "Bash(npx tsc *)",
       "Bash(npm install *)",
-      "Bash(npm ls *)"
+      "Bash(npm ls *)",
+      "WebFetch(domain:roofr.com)",
+      "WebSearch",
+      "WebFetch(domain:roofrhelp.zendesk.com)",
+      "Bash(git add *)",
+      "Bash(git -C /Users/rupesh/roofing-app status)",
+      "Bash(git -C /Users/rupesh/roofing-app branch)",
+      "Bash(git -C /Users/rupesh/roofing-app log --oneline -5)",
+      "Bash(git -C /Users/rupesh/roofing-app fetch origin)",
+      "Bash(git -C /Users/rupesh/roofing-app log --oneline origin/claude/loving-cray-e11997 -6)",
+      "Bash(cd /Users/rupesh/roofing-app && npm install 2>&1 | tail -5)",
+      "Bash(npm run *)",
+      "Bash(curl -s http://localhost:5173)",
+      "Bash(echo \"EXIT: $?\")",
+      "Bash(git -C /Users/rupesh/roofing-app show 04557ef -- src/App.tsx)",
+      "Bash(git -C /Users/rupesh/roofing-app diff 04557ef~1 04557ef)"
     ]
   }
 }
