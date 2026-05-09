@@ -42,7 +42,7 @@ export default function MarketingPage({ apiKey }: MarketingPageProps) {
 
   useEffect(() => {
     if (!apiKey) {
-      setMapError('Google Maps API key is required.');
+      setMapError('Map is not available. Add your Maps key in Settings or configure it for this app.');
       return;
     }
 
@@ -63,6 +63,7 @@ export default function MarketingPage({ apiKey }: MarketingPageProps) {
         streetViewControl: false,
         fullscreenControl: false,
         mapTypeControl: false,
+        gestureHandling: 'greedy',
         zoomControlOptions: {
           position: google.maps.ControlPosition.RIGHT_CENTER,
         },
@@ -198,28 +199,34 @@ export default function MarketingPage({ apiKey }: MarketingPageProps) {
   const doneProspects = prospects.filter(p => p.status === 'done');
 
   return (
-    <div className="flex h-full overflow-hidden">
-      {/* Map area */}
-      <div className="flex-1 relative">
+    <div className="flex h-full min-h-0 flex-col lg:flex-row overflow-hidden">
+      {/* Map area — top portion on phone, full flex on desktop */}
+      <div className="relative w-full h-[38%] min-h-[200px] max-h-[45dvh] shrink-0 lg:h-auto lg:max-h-none lg:flex-1 lg:min-h-0">
         {/* Search overlay */}
-        <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10 w-full max-w-md px-4">
-          <div className="flex items-center gap-2 bg-white rounded-xl shadow-lg border border-slate-200 px-3 py-2.5">
-            <Search size={16} className="text-slate-400 flex-shrink-0" />
+        <div className="absolute top-[max(0.5rem,env(safe-area-inset-top,0px))] left-2 right-2 z-10 lg:top-4 lg:left-1/2 lg:right-auto lg:-translate-x-1/2 lg:w-full lg:max-w-md lg:px-4">
+          <div className="flex items-center gap-2 bg-white rounded-xl shadow-lg border border-slate-200 px-3 py-2 min-h-[48px]">
+            <Search size={18} className="text-slate-400 shrink-0" aria-hidden />
             <input
               id="mkt-search"
               type="text"
-              placeholder="Search a neighborhood or address…"
-              className="flex-1 text-sm text-slate-800 placeholder-slate-400 outline-none bg-transparent"
+              inputMode="search"
+              enterKeyHint="search"
+              autoComplete="street-address"
+              placeholder="Search area or address…"
+              className="flex-1 min-w-0 text-base lg:text-sm text-slate-800 placeholder-slate-400 outline-none bg-transparent"
             />
           </div>
         </div>
 
         {/* Instructions overlay */}
         {prospects.length === 0 && !mapError && (
-          <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-10">
-            <div className="bg-slate-900/80 backdrop-blur-sm text-white text-sm px-4 py-2.5 rounded-xl flex items-center gap-2">
-              <Target size={15} className="text-blue-400 flex-shrink-0" />
-              Click any rooftop on the map to start AI analysis
+          <div className="absolute bottom-[max(0.75rem,env(safe-area-inset-bottom,0px))] left-2 right-2 z-10 lg:bottom-6 lg:left-1/2 lg:right-auto lg:-translate-x-1/2 lg:max-w-lg">
+            <div className="bg-slate-900/90 backdrop-blur-sm text-white text-xs sm:text-sm px-3 py-2.5 sm:px-4 sm:py-3 rounded-xl flex items-start gap-2 leading-snug shadow-lg">
+              <Target size={16} className="text-blue-400 shrink-0 mt-0.5" aria-hidden />
+              <span>
+                <span className="lg:hidden">Tap a rooftop on the map to run AI analysis.</span>
+                <span className="hidden lg:inline">Click any rooftop on the map to start AI analysis.</span>
+              </span>
             </div>
           </div>
         )}
@@ -233,51 +240,65 @@ export default function MarketingPage({ apiKey }: MarketingPageProps) {
             </div>
           </div>
         ) : (
-          <div ref={mapRef} className="w-full h-full" />
+          <div ref={mapRef} className="w-full h-full min-h-[200px] touch-manipulation" />
         )}
       </div>
 
-      {/* Right panel */}
-      <div className="w-96 flex flex-col bg-white border-l border-slate-200 flex-shrink-0">
+      {/* Panel — full width under map on phone */}
+      <div className="flex w-full flex-1 min-h-0 max-h-[62%] lg:max-h-none lg:w-96 lg:flex-none flex-col bg-white border-t border-slate-200 lg:border-l lg:border-t-0 shadow-[0_-4px_20px_rgba(0,0,0,0.06)] lg:shadow-none">
         {/* Panel header */}
-        <div className="px-4 py-4 border-b border-slate-200 flex-shrink-0">
-          <div className="flex items-center gap-2 mb-3">
-            <Megaphone size={16} className="text-blue-600" />
-            <h2 className="font-bold text-slate-900 text-base">Marketing Intelligence</h2>
+        <div className="px-3 sm:px-4 py-3 sm:py-4 border-b border-slate-200 shrink-0 bg-white z-[1]">
+          <div className="flex items-center gap-2 mb-2 sm:mb-3">
+            <Megaphone size={18} className="text-blue-600 shrink-0" aria-hidden />
+            <h2 className="font-bold text-slate-900 text-[15px] sm:text-base leading-tight">Marketing Intelligence</h2>
           </div>
 
           {geminiKeyMissing && (
-            <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-xs text-amber-700 mb-3">
-              <strong>AI key missing.</strong> Go to <strong>Settings → Gemini AI Key</strong> to add your free Google AI key and enable roof analysis.
+            <div className="bg-amber-50 border border-amber-200 rounded-xl px-3 py-2.5 text-xs sm:text-sm text-amber-900 mb-3 leading-relaxed">
+              <strong className="font-semibold">AI key missing.</strong>{' '}
+              Open <strong className="font-semibold">Settings</strong> and add your Gemini key to enable roof analysis.
             </div>
           )}
 
           {/* Tabs */}
-          <div className="flex rounded-lg bg-slate-100 p-0.5 gap-0.5">
+          <div className="flex rounded-xl bg-slate-100 p-1 gap-1">
             {(['prospects', 'campaign'] as const).map(tab => (
               <button
+                type="button"
                 key={tab}
                 onClick={() => setActiveTab(tab)}
-                className={`flex-1 py-1.5 rounded-md text-xs font-semibold capitalize transition-colors ${
+                className={`touch-manipulation flex-1 min-h-[44px] sm:min-h-[40px] px-1.5 rounded-lg text-[11px] sm:text-xs font-semibold capitalize transition-colors leading-tight ${
                   activeTab === tab
                     ? 'bg-white text-slate-900 shadow-sm'
-                    : 'text-slate-500 hover:text-slate-700'
+                    : 'text-slate-500 hover:text-slate-700 active:bg-slate-200/50'
                 }`}
               >
-                {tab === 'prospects' ? `Prospects (${prospects.length})` : `Campaign (${campaignProspects.length})`}
+                {tab === 'prospects' ? (
+                  <span className="block text-center">
+                    Prospects
+                    <span className="block text-[10px] font-bold text-slate-500 tabular-nums mt-0.5">{prospects.length}</span>
+                  </span>
+                ) : (
+                  <span className="block text-center">
+                    Campaign
+                    <span className="block text-[10px] font-bold text-slate-500 tabular-nums mt-0.5">{campaignProspects.length}</span>
+                  </span>
+                )}
               </button>
             ))}
           </div>
         </div>
 
         {/* Panel body */}
-        <div className="flex-1 overflow-y-auto">
+        <div className="flex-1 min-h-0 overflow-y-auto overscroll-y-contain [-webkit-overflow-scrolling:touch]">
           {activeTab === 'prospects' ? (
             prospects.length === 0 ? (
-              <div className="flex flex-col items-center justify-center h-full text-center px-6 py-12">
-                <MapPin size={40} className="text-slate-200 mb-3" />
-                <p className="text-slate-400 text-sm font-medium">No prospects yet</p>
-                <p className="text-slate-400 text-xs mt-1">Click rooftops on the map to analyze them</p>
+              <div className="flex flex-col items-center justify-center min-h-[12rem] py-10 px-4 text-center">
+                <MapPin size={40} className="text-slate-200 mb-3" aria-hidden />
+                <p className="text-slate-500 text-sm font-medium">No prospects yet</p>
+                <p className="text-slate-400 text-xs mt-2 leading-relaxed max-w-xs">
+                  Tap rooftops on the map above to analyze them.
+                </p>
               </div>
             ) : (
               <div className="divide-y divide-slate-100">
@@ -293,20 +314,25 @@ export default function MarketingPage({ apiKey }: MarketingPageProps) {
             )
           ) : (
             campaignProspects.length === 0 ? (
-              <div className="flex flex-col items-center justify-center h-full text-center px-6 py-12">
-                <Megaphone size={40} className="text-slate-200 mb-3" />
-                <p className="text-slate-400 text-sm font-medium">No campaign targets yet</p>
-                <p className="text-slate-400 text-xs mt-1">Click "Add to Campaign" on analyzed prospects</p>
+              <div className="flex flex-col items-center justify-center min-h-[12rem] py-10 px-4 text-center">
+                <Megaphone size={36} className="text-slate-200 mb-3" aria-hidden />
+                <p className="text-slate-500 text-sm font-medium">No campaign targets yet</p>
+                <p className="text-slate-400 text-xs mt-2 leading-relaxed max-w-xs">
+                  Use <strong className="font-medium text-slate-500">Add to Campaign</strong> on analyzed prospects.
+                </p>
               </div>
             ) : (
               <div>
-                <div className="px-4 py-3 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
-                  <p className="text-xs text-slate-500 font-medium">{campaignProspects.length} target{campaignProspects.length !== 1 ? 's' : ''}</p>
+                <div className="px-3 sm:px-4 py-3 bg-slate-50 border-b border-slate-200 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                  <p className="text-xs text-slate-600 font-medium">
+                    {campaignProspects.length} target{campaignProspects.length !== 1 ? 's' : ''}
+                  </p>
                   <button
+                    type="button"
                     onClick={exportCsv}
-                    className="flex items-center gap-1.5 text-xs font-semibold text-blue-600 hover:text-blue-700 bg-blue-50 hover:bg-blue-100 px-2.5 py-1.5 rounded-lg transition-colors"
+                    className="touch-manipulation inline-flex w-full sm:w-auto items-center justify-center gap-2 min-h-[44px] text-xs font-semibold text-blue-700 bg-blue-50 hover:bg-blue-100 active:bg-blue-100 px-4 rounded-xl transition-colors"
                   >
-                    <Download size={12} />
+                    <Download size={16} aria-hidden />
                     Export CSV
                   </button>
                 </div>
@@ -326,16 +352,16 @@ export default function MarketingPage({ apiKey }: MarketingPageProps) {
 
         {/* Footer stats */}
         {doneProspects.length > 0 && (
-          <div className="px-4 py-3 border-t border-slate-200 bg-slate-50 flex-shrink-0">
-            <div className="flex items-center justify-between text-xs text-slate-500">
-              <span>{doneProspects.length} analyzed</span>
-              <div className="flex items-center gap-2">
+          <div className="px-3 sm:px-4 py-3 border-t border-slate-200 bg-slate-50 shrink-0 pb-[max(0.75rem,env(safe-area-inset-bottom,0px))] lg:pb-3">
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between text-xs text-slate-600">
+              <span className="font-medium">{doneProspects.length} analyzed</span>
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                 {(['Poor', 'Critical'] as const).map(c => {
                   const count = doneProspects.filter(p => p.analysis?.condition === c).length;
                   return count > 0 ? (
-                    <span key={c} className="flex items-center gap-1">
-                      <span className="w-2 h-2 rounded-full inline-block" style={{ backgroundColor: CONDITION_COLORS[c] }} />
-                      {count} {c}
+                    <span key={c} className="inline-flex items-center gap-1.5">
+                      <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: CONDITION_COLORS[c] }} />
+                      <span className="tabular-nums">{count}</span> {c}
                     </span>
                   ) : null;
                 })}
@@ -358,45 +384,50 @@ function ProspectCard({
   onToggleCampaign: () => void;
 }) {
   return (
-    <div className="p-4">
+    <div className="p-3 sm:p-4">
       {/* Thumbnail + address row */}
       <div className="flex gap-3 mb-3">
         <img
           src={p.snapshot_url}
-          alt={p.address}
-          className="w-16 h-12 rounded-lg object-cover border border-slate-200 flex-shrink-0"
+          alt=""
+          className="w-20 h-14 sm:w-16 sm:h-12 rounded-lg object-cover border border-slate-200 shrink-0"
         />
         <div className="flex-1 min-w-0">
-          <p className="text-xs font-medium text-slate-700 leading-snug line-clamp-2">{p.address}</p>
+          <p className="text-xs font-medium text-slate-800 leading-snug line-clamp-3 sm:line-clamp-2">{p.address}</p>
           {p.status === 'analyzing' && (
-            <div className="flex items-center gap-1.5 mt-1 text-xs text-blue-500">
-              <Loader2 size={11} className="animate-spin" />
+            <div className="flex items-center gap-1.5 mt-1.5 text-xs text-blue-600">
+              <Loader2 size={14} className="animate-spin shrink-0" aria-hidden />
               Analyzing roof…
             </div>
           )}
           {p.status === 'error' && (
-            <div className="flex items-center gap-1.5 mt-1 text-xs text-red-500">
-              <AlertTriangle size={11} />
-              {p.error === 'GOOGLE_AI_KEY_MISSING' ? 'AI key not configured' : 'Analysis failed'}
+            <div className="flex items-start gap-1.5 mt-1.5 text-xs text-red-600 leading-snug">
+              <AlertTriangle size={14} className="shrink-0 mt-0.5" aria-hidden />
+              <span>{p.error === 'GOOGLE_AI_KEY_MISSING' ? 'AI key not configured' : 'Analysis failed'}</span>
             </div>
           )}
         </div>
-        <button onClick={onRemove} className="text-slate-300 hover:text-red-400 transition-colors flex-shrink-0">
-          <Trash2 size={14} />
+        <button
+          type="button"
+          onClick={onRemove}
+          className="touch-manipulation shrink-0 min-w-[44px] min-h-[44px] flex items-center justify-center rounded-xl text-slate-400 hover:text-red-500 hover:bg-red-50 active:bg-red-100 transition-colors -mr-1"
+          aria-label="Remove prospect"
+        >
+          <Trash2 size={18} aria-hidden />
         </button>
       </div>
 
       {p.status === 'done' && p.analysis && (
         <>
           {/* Condition + urgency badges */}
-          <div className="flex items-center gap-2 mb-2">
-            <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${CONDITION_BG[p.analysis.condition]}`}>
+          <div className="flex flex-wrap items-center gap-2 mb-2">
+            <span className={`text-xs font-bold px-2 py-1 rounded-full ${CONDITION_BG[p.analysis.condition]}`}>
               {p.analysis.condition}
             </span>
-            <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${URGENCY_BG[p.analysis.urgency]}`}>
+            <span className={`text-xs font-medium px-2 py-1 rounded-full ${URGENCY_BG[p.analysis.urgency]}`}>
               {p.analysis.urgency} urgency
             </span>
-            <span className="ml-auto text-xs text-slate-400">{p.analysis.condition_score}/10</span>
+            <span className="text-xs text-slate-500 font-semibold tabular-nums sm:ml-auto">{p.analysis.condition_score}/10</span>
           </div>
 
           {/* Score bar */}
@@ -434,17 +465,18 @@ function ProspectCard({
 
           {/* Campaign button */}
           <button
+            type="button"
             onClick={onToggleCampaign}
-            className={`w-full flex items-center justify-center gap-1.5 text-xs font-semibold py-1.5 rounded-lg transition-colors ${
+            className={`touch-manipulation w-full flex items-center justify-center gap-2 text-xs font-semibold min-h-[48px] rounded-xl transition-colors ${
               p.inCampaign
-                ? 'bg-green-50 text-green-700 hover:bg-red-50 hover:text-red-600'
-                : 'bg-blue-50 text-blue-600 hover:bg-blue-100'
+                ? 'bg-green-50 text-green-800 hover:bg-red-50 hover:text-red-700 active:bg-red-100'
+                : 'bg-blue-600 text-white hover:bg-blue-700 active:bg-blue-800'
             }`}
           >
             {p.inCampaign ? (
-              <><MinusCircle size={12} /> Remove from Campaign</>
+              <><MinusCircle size={16} aria-hidden /> Remove from campaign</>
             ) : (
-              <><PlusCircle size={12} /> Add to Campaign</>
+              <><PlusCircle size={16} aria-hidden /> Add to campaign</>
             )}
           </button>
         </>
@@ -456,20 +488,27 @@ function ProspectCard({
 function CampaignCard({ prospect: p, onRemove }: { prospect: Prospect; onRemove: () => void }) {
   const a = p.analysis;
   return (
-    <div className="px-4 py-3">
-      <div className="flex items-start justify-between gap-2 mb-1">
-        <p className="text-xs font-semibold text-slate-700 line-clamp-1 flex-1">{p.address}</p>
-        {a && (
-          <span className={`text-xs font-bold px-1.5 py-0.5 rounded-full flex-shrink-0 ${CONDITION_BG[a.condition]}`}>
-            {a.condition}
-          </span>
-        )}
-        <button onClick={onRemove} className="text-slate-300 hover:text-red-400 transition-colors flex-shrink-0">
-          <MinusCircle size={13} />
+    <div className="px-3 sm:px-4 py-3">
+      <div className="flex items-start gap-2 mb-2">
+        <div className="flex-1 min-w-0">
+          <p className="text-xs font-semibold text-slate-800 line-clamp-2 leading-snug">{p.address}</p>
+          {a && (
+            <span className={`inline-block mt-2 text-xs font-bold px-2 py-0.5 rounded-full ${CONDITION_BG[a.condition]}`}>
+              {a.condition}
+            </span>
+          )}
+        </div>
+        <button
+          type="button"
+          onClick={onRemove}
+          className="touch-manipulation shrink-0 min-w-[44px] min-h-[44px] flex items-center justify-center rounded-xl text-slate-400 hover:text-red-600 hover:bg-red-50 active:bg-red-100 transition-colors -mr-1"
+          aria-label="Remove from campaign"
+        >
+          <MinusCircle size={18} aria-hidden />
         </button>
       </div>
       {a && (
-        <p className="text-xs text-slate-500 italic leading-relaxed">"{a.marketing_message}"</p>
+        <p className="text-xs text-slate-600 italic leading-relaxed pl-0.5 border-l-2 border-blue-200 pl-2.5">&ldquo;{a.marketing_message}&rdquo;</p>
       )}
     </div>
   );

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { AppView, Coordinates, RoofSection, User } from './types';
 import LandingPage from './components/LandingPage';
 import AnalysisPage from './components/AnalysisPage';
@@ -14,6 +14,7 @@ import ReportsPage from './components/ReportsPage';
 import MarketingPage from './components/MarketingPage';
 import { initDb, isDbConfigured } from './utils/db';
 import { readMapsApiKey } from './utils/googleMapsKey';
+import { readAuthSession, writeAuthSession, clearAuthSession } from './utils/authSession';
 
 function getStoredUser(): User | null {
   try {
@@ -25,14 +26,20 @@ function getStoredUser(): User | null {
 }
 
 export default function App() {
-  const [view, setView] = useState<AppView>(() => getStoredUser() ? 'dashboard' : 'landing');
-  const [address, setAddress] = useState('');
-  const [coordinates, setCoordinates] = useState<Coordinates>({ lat: 37.422, lng: -122.084 });
-  const [roofSections, setRoofSections] = useState<Omit<RoofSection, 'polygon'>[]>([]);
+  const initial = useMemo(() => {
+    const u = getStoredUser();
+    const s = readAuthSession(u);
+    return { user: u, ...s };
+  }, []);
+
+  const [view, setView] = useState<AppView>(() => initial.view);
+  const [address, setAddress] = useState(() => initial.address);
+  const [coordinates, setCoordinates] = useState<Coordinates>(() => initial.coordinates);
+  const [roofSections, setRoofSections] = useState<Omit<RoofSection, 'polygon'>[]>(() => initial.roofSections);
   const [apiKey, setApiKey] = useState(() => readMapsApiKey());
   const [showKeySetup, setShowKeySetup] = useState(false);
-  const [projectId, setProjectId] = useState<string | null>(null);
-  const [user, setUser] = useState<User | null>(() => getStoredUser());
+  const [projectId, setProjectId] = useState<string | null>(() => initial.projectId);
+  const [user, setUser] = useState<User | null>(() => initial.user);
   // pending address/coords saved before login
   const [pendingAddr, setPendingAddr] = useState('');
   const [pendingCoords, setPendingCoords] = useState<Coordinates>({ lat: 37.422, lng: -122.084 });
@@ -58,8 +65,17 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!user && view !== 'landing' && view !== 'login') {
-      setView('landing');
+    if (!user) return;
+    if (view === 'landing' || view === 'login') return;
+    writeAuthSession({ view, address, coordinates, roofSections, projectId });
+  }, [user, view, address, coordinates, roofSections, projectId]);
+
+  useEffect(() => {
+    if (!user) {
+      clearAuthSession();
+      if (view !== 'landing' && view !== 'login') {
+        setView('landing');
+      }
     }
   }, [user, view]);
 
@@ -99,6 +115,7 @@ export default function App() {
   const handleLogout = () => {
     setUser(null);
     localStorage.removeItem('roofiq_user');
+    clearAuthSession();
     setAddress('');
     setRoofSections([]);
     setProjectId(null);
@@ -178,7 +195,7 @@ export default function App() {
         />
       )}
       {view === 'quote' && (
-        <div className="flex-1 bg-slate-50 py-6">
+        <div className="flex-1 min-h-0 overflow-y-auto overscroll-y-contain bg-slate-50 py-4 sm:py-6 [-webkit-overflow-scrolling:touch]">
           <QuotePage
             address={address}
             coordinates={coordinates}
