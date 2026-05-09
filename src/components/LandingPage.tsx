@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import { Loader } from '@googlemaps/js-api-loader';
 import { Coordinates } from '../types';
-import { Search, MapPin, Zap, FileText, Shield, ArrowRight, Star, CheckCircle2, Settings } from 'lucide-react';
+import { Search, MapPin, Zap, FileText, Shield, ArrowRight, Star } from 'lucide-react';
 
 interface LandingPageProps {
+  /** Maps key from env or storage — never shown on this page. */
   apiKey: string;
   onAddressSelect: (address: string, coords: Coordinates) => void;
-  onNeedApiKey: () => void;
   onSignIn: () => void;
 }
 
@@ -44,9 +44,8 @@ const stats = [
   { value: '$2.4M', label: 'Quotes Generated' },
 ];
 
-export default function LandingPage({ apiKey, onAddressSelect, onNeedApiKey, onSignIn }: LandingPageProps) {
+export default function LandingPage({ apiKey, onAddressSelect, onSignIn }: LandingPageProps) {
   const inputRef = useRef<HTMLInputElement>(null);
-  const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [inputValue, setInputValue] = useState('');
   const autocompleteRef = useRef<google.maps.places.Autocomplete | null>(null);
@@ -81,20 +80,20 @@ export default function LandingPage({ apiKey, onAddressSelect, onNeedApiKey, onS
         onAddressSelect(place.formatted_address || inputRef.current?.value || '', coords);
       });
     }).catch(() => {
-      setError('Failed to load Google Maps. Please check your API key.');
+      setError('Address search could not load. Try again in a moment or refresh the page.');
     });
   }, [apiKey]);
 
   const handleSearch = () => {
     if (!apiKey) {
-      onNeedApiKey();
+      onSignIn();
       return;
     }
     if (!inputValue.trim()) {
       setError('Please enter a property address.');
       return;
     }
-    setError('Select an address from the dropdown suggestions.');
+    setError('Choose an address from the suggestions list.');
   };
 
   return (
@@ -163,10 +162,11 @@ export default function LandingPage({ apiKey, onAddressSelect, onNeedApiKey, onS
                   autoComplete="street-address"
                   enterKeyHint="search"
                   value={inputValue}
+                  disabled={!apiKey}
                   onChange={e => { setInputValue(e.target.value); setError(''); }}
                   onKeyDown={e => e.key === 'Enter' && handleSearch()}
-                  placeholder="Enter property address..."
-                  className="w-full min-h-[48px] pl-10 sm:pl-11 pr-3 py-3.5 sm:py-4 text-slate-800 bg-transparent outline-none placeholder-slate-400 text-base font-medium rounded-xl border border-slate-200 sm:border-0 sm:rounded-none"
+                  placeholder={apiKey ? 'Enter property address…' : 'Sign in to search addresses'}
+                  className="w-full min-h-[48px] pl-10 sm:pl-11 pr-3 py-3.5 sm:py-4 text-slate-800 bg-transparent outline-none placeholder-slate-400 text-base font-medium rounded-xl border border-slate-200 sm:border-0 sm:rounded-none disabled:cursor-not-allowed disabled:opacity-60"
                 />
               </div>
               <button
@@ -174,44 +174,19 @@ export default function LandingPage({ apiKey, onAddressSelect, onNeedApiKey, onS
                 onClick={handleSearch}
                 className="touch-manipulation flex w-full sm:w-auto shrink-0 items-center justify-center gap-2 min-h-[48px] bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white font-semibold px-5 py-3 rounded-xl transition-all duration-200 text-base sm:text-sm"
               >
-                {loading ? (
-                  <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" aria-hidden />
-                ) : (
-                  <Search size={18} aria-hidden />
-                )}
-                Analyze roof
+                <Search size={18} aria-hidden />
+                {apiKey ? 'Analyze roof' : 'Sign in to start'}
               </button>
             </div>
+            {!apiKey && (
+              <p className="mt-3 text-slate-400 text-sm leading-relaxed px-1 text-center">
+                Sign in to search for a property and open satellite measurements.
+              </p>
+            )}
             {error && (
               <p className="mt-3 text-orange-400 text-sm text-left sm:text-center leading-snug flex items-start sm:items-center gap-1.5 justify-start sm:justify-center px-0.5">
                 <span className="shrink-0" aria-hidden>⚠</span>
                 <span>{error}</span>
-              </p>
-            )}
-            {apiKey ? (
-              <p className="mt-3 text-slate-400 text-sm flex flex-wrap items-center justify-center gap-x-2 gap-y-2">
-                <span className="inline-flex items-center gap-1.5">
-                  <CheckCircle2 size={15} className="text-green-400 shrink-0" aria-hidden />
-                  <span className="text-green-400 font-medium">API key saved</span>
-                </span>
-                <button
-                  type="button"
-                  onClick={onNeedApiKey}
-                  className="touch-manipulation inline-flex items-center gap-1 min-h-[44px] px-2 -mx-2 rounded-lg text-slate-400 hover:text-white"
-                >
-                  <Settings size={15} aria-hidden /> Change key
-                </button>
-              </p>
-            ) : (
-              <p className="mt-3 text-slate-400 text-sm leading-relaxed px-1">
-                No API key configured.{' '}
-                <button
-                  type="button"
-                  onClick={onNeedApiKey}
-                  className="text-blue-400 underline underline-offset-2 hover:text-blue-300 min-h-[44px] inline-flex items-center"
-                >
-                  Set up Google Maps API key
-                </button>
               </p>
             )}
           </div>
@@ -228,13 +203,15 @@ export default function LandingPage({ apiKey, onAddressSelect, onNeedApiKey, onS
                 <button
                   type="button"
                   key={addr}
+                  disabled={!apiKey}
                   onClick={() => {
+                    if (!apiKey) return;
                     if (inputRef.current) {
                       inputRef.current.value = addr;
                       setInputValue(addr);
                     }
                   }}
-                  className="touch-manipulation shrink-0 text-left text-xs text-slate-300 max-w-[11rem] sm:max-w-none sm:text-center sm:text-slate-400 hover:text-blue-300 sm:hover:text-blue-400 transition-colors bg-white/5 hover:bg-white/10 border border-white/10 px-3 py-2.5 rounded-xl leading-snug"
+                  className="touch-manipulation shrink-0 text-left text-xs text-slate-300 max-w-[11rem] sm:max-w-none sm:text-center sm:text-slate-400 hover:text-blue-300 sm:hover:text-blue-400 transition-colors bg-white/5 hover:bg-white/10 border border-white/10 px-3 py-2.5 rounded-xl leading-snug disabled:opacity-40 disabled:pointer-events-none"
                 >
                   {addr.split(',')[0]}
                 </button>

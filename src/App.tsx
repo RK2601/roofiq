@@ -131,7 +131,6 @@ export default function App() {
     <LandingPage
       apiKey={apiKey}
       onAddressSelect={handleAddressSelect}
-      onNeedApiKey={() => setShowKeySetup(true)}
       onSignIn={() => setView('login')}
     />
   );
