@@ -462,6 +462,8 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
 
   const importSolarSegments = useCallback(() => {
     if (!solarData || !mapInstanceRef.current) return;
+    const segments = solarData.roofSegmentStats ?? [];
+    if (segments.length === 0) return;
 
     // Clear existing sections
     sectionsRef.current.forEach(s => {
@@ -472,13 +474,15 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
     });
     labelsRef.current.forEach(l => l.close());
     labelsRef.current = [];
-    setSections([]);
+    sectionsRef.current = [];
 
-    (solarData.roofSegmentStats ?? []).forEach((segment, idx) => {
+    // Build all sections first, then set state once
+    const newSections: RoofSection[] = segments.map((segment, idx) => {
       const path = segmentToBoundingPolygon(segment);
       const color = SECTION_COLORS[idx % SECTION_COLORS.length];
       const pitchOption = pitchDegreesToOption(segment.pitchDegrees);
       const flatAreaSqFt = segment.stats.areaMeters2 * 10.7639;
+      const id = `solar-${Date.now()}-${idx}`;
 
       const polygon = new google.maps.Polygon({
         paths: path,
@@ -492,9 +496,7 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
         map: mapInstanceRef.current,
       });
 
-      const id = `solar-${Date.now()}-${idx}`;
-
-      google.maps.event.addListener(polygon.getPath(), 'set_at', () => {
+      const onAreaChange = () => {
         const newArea = google.maps.geometry.spherical.computeArea(polygon.getPath()) * 10.7639;
         setSections(prev =>
           prev.map(s =>
@@ -503,20 +505,12 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
               : s
           )
         );
-      });
-      google.maps.event.addListener(polygon.getPath(), 'insert_at', () => {
-        const newArea = google.maps.geometry.spherical.computeArea(polygon.getPath()) * 10.7639;
-        setSections(prev =>
-          prev.map(s =>
-            s.id === id
-              ? { ...s, flatArea: newArea, actualArea: computeActualArea(newArea, s.pitchMultiplier) }
-              : s
-          )
-        );
-      });
+      };
+      google.maps.event.addListener(polygon.getPath(), 'set_at', onAreaChange);
+      google.maps.event.addListener(polygon.getPath(), 'insert_at', onAreaChange);
       polygon.addListener('click', () => setSelectedSection(id));
 
-      const newSection: RoofSection = {
+      return {
         id,
         name: `Section ${idx + 1}`,
         polygon,
@@ -526,14 +520,11 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
         actualArea: computeActualArea(flatAreaSqFt, pitchOption.multiplier),
         color,
       };
-
-      setSections(prev => {
-        const updated = [...prev, newSection];
-        sectionsRef.current = updated;
-        return updated;
-      });
-      setTimeout(() => updateLabel(newSection), 50);
     });
+
+    sectionsRef.current = newSections;
+    setSections(newSections);
+    newSections.forEach(s => setTimeout(() => updateLabel(s), 50));
   }, [solarData, updateLabel]);
 
   const totalFlat = sections.reduce((s, r) => s + r.flatArea, 0);
@@ -901,7 +892,7 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
                 {(solarData.roofSegmentStats ?? []).length} roof segment{(solarData.roofSegmentStats ?? []).length !== 1 ? 's' : ''} detected
                 · imagery {formatImageryDate(solarData.imageryDate)}
               </p>
-              {mapLoaded && (
+              {mapLoaded && (solarData.roofSegmentStats ?? []).length > 0 && (
                 <button
                   type="button"
                   onClick={importSolarSegments}
