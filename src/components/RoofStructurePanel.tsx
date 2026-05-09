@@ -147,6 +147,12 @@ export default function RoofStructurePanel({ analysis, onClose }: RoofStructureP
                 </div>
               ))}
             </div>
+            <p className="mt-2 text-[11px] text-slate-500">
+              Height source: {analysis.dataSources.heightSource ?? (analysis.dataSources.hasDsm ? 'dsm' : 'none')}
+              {typeof analysis.dataSources.heightQuality === 'number'
+                ? ` · quality ${Math.round(analysis.dataSources.heightQuality * 100)}%`
+                : ''}
+            </p>
             {analysis.qualityFlags.length > 0 && (
               <div className="mt-2 space-y-1">
                 {analysis.qualityFlags.map(flag => (

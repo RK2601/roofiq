@@ -4,6 +4,7 @@ import {
   type SolarLatLng,
   type SolarRoofSegment,
 } from './solar';
+import type { HeightModel } from './heightModel';
 
 const METERS_PER_DEG_LAT = 111_320;
 const M2FT = 3.28084;
@@ -29,6 +30,7 @@ export interface AiRoofCue {
 export interface RoofStructureContext {
   imageryQuality?: 'HIGH' | 'MEDIUM' | 'LOW';
   hasDsm?: boolean;
+  heightModel?: HeightModel;
   aiCues?: AiRoofCue[];
 }
 
@@ -57,6 +59,8 @@ export interface DataSourceMeta {
   imageryQuality: 'HIGH' | 'MEDIUM' | 'LOW';
   hasSolarSegments: boolean;
   hasDsm: boolean;
+  heightSource?: HeightModel['source'];
+  heightQuality?: number;
   hasAiCues: boolean;
   sourceTimestampIso: string;
 }
@@ -200,9 +204,16 @@ function inferContactSide(from: RoofFacet, to: RoofFacet): FacetSide {
   return alongPerp > 0 ? 'right' : 'left';
 }
 
-function classifyPair(a: RoofFacet, b: RoofFacet): { kind: PairAdjacency['kind']; confidence: number } {
+function classifyPair(
+  a: RoofFacet,
+  b: RoofFacet,
+  context?: RoofStructureContext
+): { kind: PairAdjacency['kind']; confidence: number } {
   const azDiff = smallestAngleDiff(a.azimuthDegrees, b.azimuthDegrees);
   const heightDiff = Math.abs((a.planeHeightAtCenterMeters ?? 0) - (b.planeHeightAtCenterMeters ?? 0));
+  const hasDsm = !!context?.hasDsm || context?.heightModel?.source === 'dsm';
+  const heightQuality = context?.heightModel?.quality ?? (hasDsm ? 0.9 : 0.35);
+  const stepThreshold = hasDsm ? 0.45 : 0.75;
 
   if (azDiff >= 150) {
     return { kind: 'ridge', confidence: clamp((azDiff - 150) / 30, 0.4, 1) };
@@ -210,10 +221,10 @@ function classifyPair(a: RoofFacet, b: RoofFacet): { kind: PairAdjacency['kind']
   if (azDiff >= 60) {
     return { kind: 'hip', confidence: clamp(1 - Math.abs(90 - azDiff) / 45, 0.35, 1) };
   }
-  if (heightDiff < 0.75) {
-    return { kind: 'step', confidence: 0.4 };
+  if (heightDiff < stepThreshold) {
+    return { kind: 'step', confidence: clamp(0.35 + 0.25 * heightQuality, 0.35, 0.7) };
   }
-  return { kind: 'valley', confidence: clamp(heightDiff / 3, 0.35, 1) };
+  return { kind: 'valley', confidence: clamp(heightDiff / 3 + 0.2 * heightQuality, 0.4, 1) };
 }
 
 function extractFacet(segment: SolarRoofSegment, index: number, center: SolarLatLng): RoofFacet {
@@ -266,7 +277,7 @@ function extractFacet(segment: SolarRoofSegment, index: number, center: SolarLat
   };
 }
 
-function buildPairAdjacencies(facets: RoofFacet[]): PairAdjacency[] {
+function buildPairAdjacencies(facets: RoofFacet[], context?: RoofStructureContext): PairAdjacency[] {
   const pairs: PairAdjacency[] = [];
   for (let i = 0; i < facets.length; i += 1) {
     for (let j = i + 1; j < facets.length; j += 1) {
@@ -293,7 +304,7 @@ function buildPairAdjacencies(facets: RoofFacet[]): PairAdjacency[] {
 
       const sideI = inferContactSide(a, b);
       const sideJ = inferContactSide(b, a);
-      const { kind, confidence } = classifyPair(a, b);
+      const { kind, confidence } = classifyPair(a, b, context);
       pairs.push({ i, j, sideI, sideJ, sharedLengthFt, kind, confidence });
     }
   }
@@ -589,8 +600,9 @@ function computeSegmentCoverageScore(facets: RoofFacet[]): number {
   return clamp(facets.length / 10, 0.35, 1);
 }
 
-function computeHeightScore(facets: RoofFacet[], hasDsm: boolean): number {
-  if (hasDsm) return 0.9;
+function computeHeightScore(facets: RoofFacet[], context?: RoofStructureContext): number {
+  if (context?.heightModel) return clamp(context.heightModel.quality, 0, 1);
+  if (context?.hasDsm) return 0.9;
   const withPlaneHeight = facets.filter(facet => facet.planeHeightAtCenterMeters !== undefined).length;
   if (withPlaneHeight > 0) return clamp(withPlaneHeight / facets.length, 0.45, 0.75);
   return 0.2;
@@ -683,10 +695,10 @@ function computeConfidence(
   dataSources: DataSourceMeta;
 } {
   const imageryQuality = context?.imageryQuality ?? 'MEDIUM';
-  const hasDsm = !!context?.hasDsm;
+  const hasDsm = !!context?.hasDsm || context?.heightModel?.source === 'dsm';
   const imagery = computeImageryScore(imageryQuality);
   const topology = computeTopologyScore(facets);
-  const height = computeHeightScore(facets, hasDsm);
+  const height = computeHeightScore(facets, context);
   const aiAgreement = computeAiAgreement(facets, context?.aiCues);
   const segmentCoverage = computeSegmentCoverageScore(facets);
   const overall = clamp(
@@ -711,6 +723,8 @@ function computeConfidence(
     imageryQuality,
     hasSolarSegments: facets.length > 0,
     hasDsm,
+    heightSource: context?.heightModel?.source,
+    heightQuality: context?.heightModel?.quality,
     hasAiCues: !!context?.aiCues?.length,
     sourceTimestampIso: new Date().toISOString(),
   };
@@ -743,7 +757,7 @@ function emptyAnalysis(context?: RoofStructureContext): RoofStructureAnalysis {
       overall: 0,
       imagery: computeImageryScore(imageryQuality),
       topology: 0,
-      height: context?.hasDsm ? 0.9 : 0.2,
+      height: context?.heightModel?.quality ?? (context?.hasDsm ? 0.9 : 0.2),
       aiAgreement: context?.aiCues?.length ? 0.2 : 0.5,
       segmentCoverage: 0,
     },
@@ -757,7 +771,9 @@ function emptyAnalysis(context?: RoofStructureContext): RoofStructureAnalysis {
     dataSources: {
       imageryQuality,
       hasSolarSegments: false,
-      hasDsm: !!context?.hasDsm,
+      hasDsm: !!context?.hasDsm || context?.heightModel?.source === 'dsm',
+      heightSource: context?.heightModel?.source,
+      heightQuality: context?.heightModel?.quality,
       hasAiCues: !!context?.aiCues?.length,
       sourceTimestampIso: new Date().toISOString(),
     },
@@ -775,7 +791,7 @@ export function analyzeSolarSegments(
   if (!segments.length) return emptyAnalysis(context);
 
   const facets = segments.map((segment, index) => extractFacet(segment, index, buildingCenter));
-  const pairAdjacencies = buildPairAdjacencies(facets);
+  const pairAdjacencies = buildPairAdjacencies(facets, context);
   buildEdges(facets, pairAdjacencies);
   const measurements = computeMeasurements(facets);
   const laidOutFacets = layoutFacets(facets);

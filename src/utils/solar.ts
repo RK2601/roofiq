@@ -96,16 +96,19 @@ export async function fetchDataLayers(
       imageryDate?: { year: number; month: number; day: number };
       imageryQuality?: 'HIGH' | 'MEDIUM' | 'LOW';
       dsmUrl?: string;
+      dsmLayer?: { geoTiffUrl?: string };
       rgbUrl?: string;
+      rgbLayer?: { geoTiffUrl?: string; imageUrl?: string };
       annualFluxUrl?: string;
+      annualFluxLayer?: { geoTiffUrl?: string };
     };
     if (!json.imageryDate || !json.imageryQuality) return null;
     return {
       imageryDate: json.imageryDate,
       imageryQuality: json.imageryQuality,
-      dsmUrl: json.dsmUrl,
-      rgbUrl: json.rgbUrl,
-      annualFluxUrl: json.annualFluxUrl,
+      dsmUrl: json.dsmUrl ?? json.dsmLayer?.geoTiffUrl,
+      rgbUrl: json.rgbUrl ?? json.rgbLayer?.geoTiffUrl ?? json.rgbLayer?.imageUrl,
+      annualFluxUrl: json.annualFluxUrl ?? json.annualFluxLayer?.geoTiffUrl,
     };
   };
 

@@ -42,13 +42,16 @@ import { analyzeRoofImage, analyzeRoofImageFromFile, RoofAnalysis, CONDITION_BG,
 import { readGeminiApiKey } from '../utils/googleAiKey';
 import {
   fetchBuildingInsights,
+  fetchDataLayers,
   segmentToBoundingPolygon,
   pitchDegreesToOption,
   formatImageryDate,
   type SolarBuildingInsights,
+  type SolarDataLayersResponse,
 } from '../utils/solar';
 import { computeRoofMeasurements, formatFt } from '../utils/measurements';
 import { analyzeSolarSegments, type RoofStructureAnalysis } from '../utils/roofStructure';
+import { buildHeightModel, type HeightModel } from '../utils/heightModel';
 import RoofStructurePanel from './RoofStructurePanel';
 
 interface AnalysisPageProps {
@@ -85,6 +88,8 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
 
   const [solarStatus, setSolarStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
   const [solarData, setSolarData] = useState<SolarBuildingInsights | null>(null);
+  const [solarDataLayers, setSolarDataLayers] = useState<SolarDataLayersResponse | null>(null);
+  const [heightModel, setHeightModel] = useState<HeightModel | null>(null);
   const [solarError, setSolarError] = useState<string | null>(null);
   const [roofStructure, setRoofStructure] = useState<RoofStructureAnalysis | null>(null);
   const [showRoofStructure, setShowRoofStructure] = useState(false);
@@ -92,11 +97,13 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
   const roofStructurePreview = useMemo(() => {
     const segments = solarData?.roofSegmentStats ?? [];
     if (solarStatus !== 'ready' || !solarData || segments.length === 0) return null;
+    const model = heightModel ?? buildHeightModel(segments, solarDataLayers);
     return analyzeSolarSegments(segments, solarData.center, {
       imageryQuality: solarData.imageryQuality,
-      hasDsm: false,
+      hasDsm: !!solarDataLayers?.dsmUrl,
+      heightModel: model,
     });
-  }, [solarData, solarStatus]);
+  }, [solarData, solarStatus, solarDataLayers, heightModel]);
 
   // Map view controls
   const [mapType, setMapType] = useState<'satellite' | 'hybrid'>('satellite');
@@ -314,19 +321,36 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
     if (!apiKey) return;
     setSolarStatus('loading');
     setSolarData(null);
+    setSolarDataLayers(null);
+    setHeightModel(null);
     setSolarError(null);
     setRoofStructure(null);
     setShowRoofStructure(false);
-    fetchBuildingInsights(coordinates.lat, coordinates.lng, apiKey)
-      .then(data => {
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await fetchBuildingInsights(coordinates.lat, coordinates.lng, apiKey);
+        if (cancelled) return;
         setSolarData(data);
+
+        const segments = data?.roofSegmentStats ?? [];
+        const layers = await fetchDataLayers(coordinates.lat, coordinates.lng, 120, apiKey).catch(() => null);
+        if (cancelled) return;
+        setSolarDataLayers(layers);
+        setHeightModel(buildHeightModel(segments, layers));
         setSolarStatus('ready');
-      })
-      .catch(err => {
+      } catch (err) {
+        if (cancelled) return;
         const msg = err instanceof Error ? err.message : String(err);
         setSolarError(msg.includes('404') ? 'No Solar data for this address' : msg.slice(0, 100));
         setSolarStatus('error');
-      });
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [coordinates.lat, coordinates.lng]);
 
@@ -907,6 +931,9 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
                 {(solarData.roofSegmentStats ?? []).length} roof segment{(solarData.roofSegmentStats ?? []).length !== 1 ? 's' : ''} detected
                 · imagery {formatImageryDate(solarData.imageryDate)}
               </p>
+              <p className="text-[10px] text-amber-800/80">
+                Height source: {heightModel?.source === 'dsm' ? 'DSM (data layers)' : heightModel?.source === 'solar-plane' ? 'Solar plane heights' : 'none'}
+              </p>
               {mapLoaded && (solarData.roofSegmentStats ?? []).length > 0 && (
                 <div className="space-y-1.5">
                   <button
@@ -926,7 +953,8 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
                         setRoofStructure(
                           analyzeSolarSegments(segments, solarData.center, {
                             imageryQuality: solarData.imageryQuality,
-                            hasDsm: false,
+                            hasDsm: !!solarDataLayers?.dsmUrl,
+                            heightModel: heightModel ?? buildHeightModel(segments, solarDataLayers),
                           })
                         );
                       }
