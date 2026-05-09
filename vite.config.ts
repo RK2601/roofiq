@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import type { Plugin } from 'vite'
 import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
 
@@ -49,9 +50,62 @@ function resolveDatabaseUrl(mode: string): string {
   )
 }
 
+/** Gemini / Google AI Studio keys use several names; only VITE_GOOGLE_AI_KEY is auto-exposed by Vite. */
+function resolveGeminiKey(mode: string): string {
+  const fromProcess =
+    (process.env.VITE_GOOGLE_AI_KEY || '').trim() ||
+    (process.env.GEMINI_API_KEY || '').trim() ||
+    (process.env.GOOGLE_GENERATIVE_AI_API_KEY || '').trim()
+  if (fromProcess) return fromProcess
+  const fromVite = (loadEnv(mode, projectRoot).VITE_GOOGLE_AI_KEY || '').trim()
+  if (fromVite) return fromVite
+  const file = loadDotEnvFiles()
+  return (
+    (file.VITE_GOOGLE_AI_KEY || '').trim() ||
+    (file.GEMINI_API_KEY || '').trim() ||
+    (file.GOOGLE_GENERATIVE_AI_API_KEY || '').trim()
+  )
+}
+
+const STATIC_MAP_URL_RE = /^https:\/\/maps\.googleapis\.com\/maps\/api\/staticmap\?/
+
+/** Dev-only: same-origin proxy so `fetch(staticMapUrl)` works (Google often omits browser CORS on Static Maps). */
+function staticMapProxyDevPlugin(): Plugin {
+  return {
+    name: 'roofiq-proxy-static-map',
+    configureServer(server) {
+      server.middlewares.use('/api/proxy-static-map', async (req, res, next) => {
+        res.setHeader('Access-Control-Allow-Origin', '*')
+        if (req.method === 'OPTIONS') {
+          res.statusCode = 204
+          return res.end()
+        }
+        if (req.method !== 'GET') return next()
+        try {
+          const host = req.headers.host || 'localhost'
+          const target = new URL(req.url || '', `http://${host}`).searchParams.get('u')
+          if (!target || !STATIC_MAP_URL_RE.test(target)) {
+            res.statusCode = 400
+            return res.end('bad request')
+          }
+          const upstream = await fetch(target)
+          res.statusCode = upstream.status
+          res.setHeader('Content-Type', upstream.headers.get('content-type') || 'image/png')
+          const buf = Buffer.from(await upstream.arrayBuffer())
+          return res.end(buf)
+        } catch {
+          res.statusCode = 502
+          return res.end('proxy error')
+        }
+      })
+    },
+  }
+}
+
 export default defineConfig(({ mode }) => {
   const viteEnv = loadEnv(mode, projectRoot)
   const resolvedDbUrl = resolveDatabaseUrl(mode)
+  const resolvedGeminiKey = resolveGeminiKey(mode)
 
   if (process.env.VERCEL) {
     const db = (
@@ -59,6 +113,7 @@ export default defineConfig(({ mode }) => {
       (viteEnv.VITE_DATABASE_URL || process.env.VITE_DATABASE_URL || process.env.DATABASE_URL || '').trim()
     ).trim()
     const maps = (viteEnv.VITE_GOOGLE_MAPS_API_KEY || process.env.VITE_GOOGLE_MAPS_API_KEY || '').trim()
+    const gemini = resolvedGeminiKey.trim()
     if (!db) {
       console.warn(
         '[roofiq] No database URL for this Vercel cloud build. Use `DATABASE_URL` or `VITE_DATABASE_URL` (shell / Vercel env), or deploy with `npm run deploy:vercel` from a machine that has `.env`.'
@@ -69,14 +124,19 @@ export default defineConfig(({ mode }) => {
         '[roofiq] VITE_GOOGLE_MAPS_API_KEY missing on this Vercel cloud build. Use local `npm run deploy:vercel` or set the variable on Vercel, then redeploy.'
       )
     }
+    if (!gemini) {
+      console.warn(
+        '[roofiq] No Gemini API key for this build. Set `VITE_GOOGLE_AI_KEY` or `GEMINI_API_KEY` in Vercel (or local .env), then redeploy.'
+      )
+    }
   }
 
   return {
-    plugins: [react()],
+    plugins: [react(), staticMapProxyDevPlugin()],
     envDir: projectRoot,
     define: {
-      // Client bundle cannot read DATABASE_URL from import.meta.env; merge both names at build time.
       __ROOFIQ_DATABASE_URL__: JSON.stringify(resolvedDbUrl),
+      __ROOFIQ_GEMINI_API_KEY__: JSON.stringify(resolvedGeminiKey),
     },
   }
 })

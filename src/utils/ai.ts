@@ -49,18 +49,44 @@ Analyze the visible roof condition and return ONLY a valid JSON object — no ma
 
 Assess based on: discoloration, missing/damaged shingles, moss/algae, sagging, flashing damage, debris, granule loss, storm damage. If image resolution is insufficient, use "Fair" as the condition.`;
 
-async function urlToBase64(url: string): Promise<{ data: string; mimeType: string }> {
-  const response = await fetch(url);
-  const blob = await response.blob();
+const STATIC_MAP_URL_RE = /^https:\/\/maps\.googleapis\.com\/maps\/api\/staticmap\?/;
+
+function staticMapProxyUrl(original: string): string {
+  if (typeof window === 'undefined') return original;
+  if (!STATIC_MAP_URL_RE.test(original)) return original;
+  return `${window.location.origin}/api/proxy-static-map?u=${encodeURIComponent(original)}`;
+}
+
+async function blobToBase64(blob: Blob): Promise<{ data: string; mimeType: string }> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onloadend = () => {
-      const base64 = (reader.result as string).split(',')[1];
-      resolve({ data: base64, mimeType: blob.type || 'image/png' });
+      const raw = reader.result as string;
+      const base64 = raw.includes(',') ? raw.split(',')[1] : raw;
+      if (!base64) reject(new Error('IMAGE_EMPTY'));
+      else resolve({ data: base64, mimeType: blob.type || 'image/png' });
     };
-    reader.onerror = reject;
+    reader.onerror = () => reject(new Error('IMAGE_READ_FAILED'));
     reader.readAsDataURL(blob);
   });
+}
+
+/** Fetch image bytes; retry via same-origin proxy (dev + Vercel `/api`) when Static Maps blocks browser CORS. */
+async function urlToBase64(url: string): Promise<{ data: string; mimeType: string }> {
+  const fetchOne = async (u: string) => {
+    const response = await fetch(u);
+    if (!response.ok) throw new Error(`IMAGE_HTTP_${response.status}`);
+    const blob = await response.blob();
+    return blobToBase64(blob);
+  };
+
+  try {
+    return await fetchOne(url);
+  } catch (first) {
+    const proxied = staticMapProxyUrl(url);
+    if (proxied === url) throw first;
+    return await fetchOne(proxied);
+  }
 }
 
 export async function analyzeRoofImage(imageUrl: string): Promise<RoofAnalysis> {
@@ -72,12 +98,25 @@ export async function analyzeRoofImage(imageUrl: string): Promise<RoofAnalysis> 
   const genAI = new GoogleGenerativeAI(apiKey);
   const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
 
-  const result = await model.generateContent([
-    { inlineData: imageData },
-    ANALYSIS_PROMPT,
-  ]);
+  let result;
+  try {
+    result = await model.generateContent([
+      { inlineData: imageData },
+      ANALYSIS_PROMPT,
+    ]);
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/API[_ ]?key|API_KEY|403|401|permission|PERMISSION_DENIED/i.test(msg)) {
+      throw new Error('GEMINI_AUTH_FAILED');
+    }
+    throw e;
+  }
 
   const text = result.response.text();
   const cleaned = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-  return JSON.parse(cleaned) as RoofAnalysis;
+  try {
+    return JSON.parse(cleaned) as RoofAnalysis;
+  } catch {
+    throw new Error('GEMINI_BAD_JSON');
+  }
 }

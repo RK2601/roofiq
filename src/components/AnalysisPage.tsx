@@ -55,6 +55,7 @@ export default function AnalysisPage({ apiKey, address, coordinates, onComplete 
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saved' | 'error'>('idle');
   const [aiStatus, setAiStatus] = useState<'idle' | 'analyzing' | 'done' | 'error'>('idle');
   const [aiResult, setAiResult] = useState<RoofAnalysis | null>(null);
+  const [aiError, setAiError] = useState<string | null>(null);
   const [aiExpanded, setAiExpanded] = useState(true);
   const hasGeminiKey = !!readGeminiApiKey();
   const labelsRef = useRef<google.maps.InfoWindow[]>([]);
@@ -333,14 +334,27 @@ export default function AnalysisPage({ apiKey, address, coordinates, onComplete 
   const analyzeWithAI = async () => {
     setAiStatus('analyzing');
     setAiResult(null);
+    setAiError(null);
     setAiExpanded(true);
     const url = `https://maps.googleapis.com/maps/api/staticmap?center=${coordinates.lat},${coordinates.lng}&zoom=20&size=640x640&maptype=satellite&scale=2&key=${apiKey}`;
     try {
       const result = await analyzeRoofImage(url);
       setAiResult(result);
       setAiStatus('done');
-    } catch {
+    } catch (err) {
       setAiStatus('error');
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg === 'GOOGLE_AI_KEY_MISSING') {
+        setAiError('No Gemini key. Add it in Settings, or set VITE_GOOGLE_AI_KEY or GEMINI_API_KEY for this deployment, then rebuild.');
+      } else if (msg === 'GEMINI_AUTH_FAILED') {
+        setAiError('Gemini rejected the API key. Confirm the key in Google AI Studio, enable Generative Language API, and check billing.');
+      } else if (msg.startsWith('IMAGE_HTTP_')) {
+        setAiError('Could not download the satellite image. Check Maps Static API and that your Maps key allows this domain.');
+      } else if (msg === 'GEMINI_BAD_JSON') {
+        setAiError('The model response was not valid JSON. Try Run again.');
+      } else {
+        setAiError(msg.length > 180 ? `${msg.slice(0, 180)}…` : msg);
+      }
     }
   };
 
@@ -613,9 +627,9 @@ export default function AnalysisPage({ apiKey, address, coordinates, onComplete 
                   </div>
                 )}
                 {aiStatus === 'error' && (
-                  <div className="text-xs text-red-500 text-center py-1">
-                    Analysis failed. Check your API key.
-                    <button onClick={analyzeWithAI} className="block mx-auto mt-1 underline">Retry</button>
+                  <div className="text-xs text-red-600 text-center py-1 space-y-1">
+                    <p className="leading-snug">{aiError || 'Analysis failed.'}</p>
+                    <button type="button" onClick={analyzeWithAI} className="text-purple-700 underline font-medium">Retry</button>
                   </div>
                 )}
                 {aiStatus === 'done' && aiResult && (
