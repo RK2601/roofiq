@@ -28,7 +28,7 @@ export interface SolarBuildingInsights {
   boundingBox: SolarBoundingBox;
   imageryDate: { year: number; month: number; day: number };
   imageryQuality: 'HIGH' | 'MEDIUM' | 'LOW';
-  roofSegmentStats: SolarRoofSegment[];
+  roofSegmentStats?: SolarRoofSegment[];
 }
 
 const SOLAR_API_BASE = 'https://solar.googleapis.com/v1';

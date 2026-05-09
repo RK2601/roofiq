@@ -47,7 +47,7 @@ Analyze the visible roof condition and return a JSON object with the required fi
 Assess based on: discoloration, missing/damaged shingles, moss/algae, sagging, flashing damage, debris, granule loss, storm damage. If image resolution is insufficient, use "Fair" as the condition.`;
 
 function buildSolarContext(solar: SolarBuildingInsights): string {
-  const segments = solar.roofSegmentStats
+  const segments = (solar.roofSegmentStats ?? [])
     .map((s, i) => {
       const areaSqFt = Math.round(s.stats.areaMeters2 * 10.7639);
       return `  Segment ${i + 1}: ${areaSqFt} sq ft, pitch ~${Math.round(s.pitchDegrees)}°, facing ${azimuthLabel(s.azimuthDegrees)}`;

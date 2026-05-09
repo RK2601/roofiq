@@ -474,7 +474,7 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
     labelsRef.current = [];
     setSections([]);
 
-    solarData.roofSegmentStats.forEach((segment, idx) => {
+    (solarData.roofSegmentStats ?? []).forEach((segment, idx) => {
       const path = segmentToBoundingPolygon(segment);
       const color = SECTION_COLORS[idx % SECTION_COLORS.length];
       const pitchOption = pitchDegreesToOption(segment.pitchDegrees);
@@ -898,7 +898,7 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
                 </span>
               </div>
               <p className="text-amber-700">
-                {solarData.roofSegmentStats.length} roof segment{solarData.roofSegmentStats.length !== 1 ? 's' : ''} detected
+                {(solarData.roofSegmentStats ?? []).length} roof segment{(solarData.roofSegmentStats ?? []).length !== 1 ? 's' : ''} detected
                 · imagery {formatImageryDate(solarData.imageryDate)}
               </p>
               {mapLoaded && (
