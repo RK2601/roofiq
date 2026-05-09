@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { AppView, Coordinates, RoofSection, User } from './types';
 import LandingPage from './components/LandingPage';
 import AnalysisPage from './components/AnalysisPage';
@@ -62,6 +62,12 @@ export default function App() {
       setView('landing');
     }
   }, [user, view]);
+
+  const handleAnalysisPropertySelect = useCallback((addr: string, coords: Coordinates) => {
+    setAddress(addr);
+    setCoordinates(coords);
+    setRoofSections([]);
+  }, []);
 
   const handleAddressSelect = (addr: string, coords: Coordinates) => {
     if (!user) {
@@ -159,6 +165,7 @@ export default function App() {
           apiKey={apiKey}
           address={address}
           coordinates={coordinates}
+          onPropertySelect={handleAnalysisPropertySelect}
           onComplete={handleAnalysisComplete}
         />
       )}

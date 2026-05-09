@@ -26,6 +26,8 @@ import {
   Brain,
   Loader2,
   ChevronUp,
+  Search,
+  MapPin,
 } from 'lucide-react';
 import { saveProject } from '../utils/db';
 import { analyzeRoofImage, RoofAnalysis, CONDITION_BG, URGENCY_BG, CONDITION_COLORS } from '../utils/ai';
@@ -35,10 +37,12 @@ interface AnalysisPageProps {
   apiKey: string;
   address: string;
   coordinates: Coordinates;
+  /** Called when the user picks a new address from the in-tab search (updates map + clears work in progress). */
+  onPropertySelect: (address: string, coordinates: Coordinates) => void;
   onComplete: (sections: Omit<RoofSection, 'polygon'>[], projectId: string | null) => void;
 }
 
-export default function AnalysisPage({ apiKey, address, coordinates, onComplete }: AnalysisPageProps) {
+export default function AnalysisPage({ apiKey, address, coordinates, onPropertySelect, onComplete }: AnalysisPageProps) {
   const mapRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<google.maps.Map | null>(null);
   const drawingManagerRef = useRef<google.maps.drawing.DrawingManager | null>(null);
@@ -59,6 +63,7 @@ export default function AnalysisPage({ apiKey, address, coordinates, onComplete 
   const [aiExpanded, setAiExpanded] = useState(true);
   const hasGeminiKey = !!readGeminiApiKey();
   const labelsRef = useRef<google.maps.InfoWindow[]>([]);
+  const searchInputRef = useRef<HTMLInputElement>(null);
 
   // Keep ref in sync
   useEffect(() => {
@@ -147,6 +152,8 @@ export default function AnalysisPage({ apiKey, address, coordinates, onComplete 
   useEffect(() => {
     if (!apiKey || !mapRef.current) return;
 
+    let cancelled = false;
+
     const loader = new Loader({
       apiKey,
       version: 'weekly',
@@ -154,7 +161,7 @@ export default function AnalysisPage({ apiKey, address, coordinates, onComplete 
     });
 
     loader.load().then(() => {
-      if (!mapRef.current) return;
+      if (cancelled || !mapRef.current) return;
       try {
 
       const map = new google.maps.Map(mapRef.current, {
@@ -219,13 +226,69 @@ export default function AnalysisPage({ apiKey, address, coordinates, onComplete 
 
       setMapLoaded(true);
       } catch (err) {
-        setMapError('Failed to initialize map. Please verify your API key and enabled APIs.');
+        if (!cancelled) setMapError('Failed to initialize map. Please verify your API key and enabled APIs.');
       }
     }).catch(() => {
-      setMapError('Failed to load Google Maps. Please verify your API key.');
+      if (!cancelled) setMapError('Failed to load Google Maps. Please verify your API key.');
     });
+
+    return () => {
+      cancelled = true;
+      labelsRef.current.forEach(l => l.close());
+      labelsRef.current = [];
+      sectionsRef.current.forEach(s => {
+        if (s.polygon) {
+          if (typeof google !== 'undefined' && google.maps?.event) {
+            google.maps.event.clearInstanceListeners(s.polygon);
+          }
+          s.polygon.setMap(null);
+        }
+      });
+      setSections([]);
+      if (drawingManagerRef.current) {
+        if (typeof google !== 'undefined' && google.maps?.event) {
+          google.maps.event.clearInstanceListeners(drawingManagerRef.current);
+        }
+        drawingManagerRef.current.setMap(null);
+        drawingManagerRef.current = null;
+      }
+      mapInstanceRef.current = null;
+      if (mapRef.current) mapRef.current.innerHTML = '';
+      setMapLoaded(false);
+      setIsDrawing(false);
+      setSelectedSection(null);
+      setAiResult(null);
+      setAiStatus('idle');
+      setAiError(null);
+      setSaveStatus('idle');
+    };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [apiKey, coordinates.lat, coordinates.lng]);
+
+  useEffect(() => {
+    if (!mapLoaded || !searchInputRef.current) return;
+    if (!google.maps?.places) return;
+
+    const input = searchInputRef.current;
+    const ac = new google.maps.places.Autocomplete(input, {
+      types: ['address'],
+      fields: ['formatted_address', 'geometry'],
+    });
+    const listener = ac.addListener('place_changed', () => {
+      const place = ac.getPlace();
+      if (!place.geometry?.location) return;
+      const loc = place.geometry.location;
+      onPropertySelect(place.formatted_address || input.value.trim(), {
+        lat: loc.lat(),
+        lng: loc.lng(),
+      });
+      input.value = '';
+    });
+
+    return () => {
+      google.maps.event.removeListener(listener);
+    };
+  }, [mapLoaded, onPropertySelect]);
 
   // Toggle tilt
   useEffect(() => {
@@ -350,8 +413,16 @@ export default function AnalysisPage({ apiKey, address, coordinates, onComplete 
         setAiError('Gemini rejected the API key. Confirm the key in Google AI Studio, enable Generative Language API, and check billing.');
       } else if (msg.startsWith('IMAGE_HTTP_')) {
         setAiError('Could not download the satellite image. Check Maps Static API and that your Maps key allows this domain.');
+      } else if (msg === 'IMAGE_TOO_SMALL' || msg === 'IMAGE_NOT_MAP') {
+        setAiError('The map image from Google was empty or invalid (often a key or Static Maps API issue). Check your Maps key and enabled APIs.');
+      } else if (msg.startsWith('GEMINI_BLOCKED')) {
+        setAiError('The model blocked this request (safety). Try again or use a clearer satellite view.');
+      } else if (msg.startsWith('GEMINI_FINISH')) {
+        setAiError('The model stopped early (finish reason). Try Run AI Analysis again.');
       } else if (msg === 'GEMINI_BAD_JSON') {
         setAiError('The model response was not valid JSON. Try Run again.');
+      } else if (msg === 'GEMINI_MODEL_UNAVAILABLE') {
+        setAiError('No Gemini model responded. Check your network and that your AI Studio key can use Gemini 2.5 / Flash models.');
       } else {
         setAiError(msg.length > 180 ? `${msg.slice(0, 180)}…` : msg);
       }
@@ -394,10 +465,10 @@ export default function AnalysisPage({ apiKey, address, coordinates, onComplete 
   };
 
   return (
-    <div className="flex h-full overflow-hidden">
-      {/* Map area */}
-      <div className="relative flex-1">
-        <div ref={mapRef} className="w-full h-full" />
+    <div className="flex h-full min-h-0 flex-col lg:flex-row overflow-hidden">
+      {/* Map area — fixed share of height on phones; full flex on desktop */}
+      <div className="relative w-full h-[42%] min-h-[200px] shrink-0 lg:h-auto lg:flex-1 lg:min-h-0">
+        <div ref={mapRef} className="w-full h-full min-h-[200px]" />
 
         {/* Loading overlay */}
         {!mapLoaded && !mapError && (
@@ -418,51 +489,55 @@ export default function AnalysisPage({ apiKey, address, coordinates, onComplete 
 
         {/* Map toolbar */}
         {mapLoaded && (
-          <div className="absolute top-3 left-3 flex gap-2 z-10">
+          <div className="absolute top-[max(0.5rem,env(safe-area-inset-top,0px))] left-2 right-2 lg:top-3 lg:left-3 lg:right-auto flex flex-wrap gap-2 z-10 max-w-full">
             <button
+              type="button"
               onClick={centerOnProperty}
               title="Center on property"
-              className="flex items-center gap-1.5 bg-white text-slate-700 hover:bg-slate-50 text-xs font-medium px-3 py-2 rounded-xl shadow-md border border-slate-200 transition-all"
+              className="touch-manipulation flex items-center gap-1.5 bg-white text-slate-700 hover:bg-slate-50 text-xs font-medium px-3 py-2.5 min-h-[44px] rounded-xl shadow-md border border-slate-200 transition-all"
             >
-              <Maximize2 size={13} />
-              Re-center
+              <Maximize2 size={14} />
+              <span className="hidden sm:inline">Re-center</span>
             </button>
             <button
+              type="button"
               onClick={() => setTilt(t => !t)}
               title="Toggle 3D tilt"
-              className={`flex items-center gap-1.5 text-xs font-medium px-3 py-2 rounded-xl shadow-md border transition-all ${
+              className={`touch-manipulation flex items-center gap-1.5 text-xs font-medium px-3 py-2.5 min-h-[44px] rounded-xl shadow-md border transition-all ${
                 tilt
                   ? 'bg-blue-600 text-white border-blue-600'
                   : 'bg-white text-slate-700 hover:bg-slate-50 border-slate-200'
               }`}
             >
-              <Satellite size={13} />
-              3D View
+              <Satellite size={14} />
+              <span className="hidden sm:inline">3D</span>
             </button>
             <button
+              type="button"
               onClick={() => setShowLabels(l => !l)}
               title="Toggle labels"
-              className={`flex items-center gap-1.5 text-xs font-medium px-3 py-2 rounded-xl shadow-md border transition-all ${
+              className={`touch-manipulation flex items-center gap-1.5 text-xs font-medium px-3 py-2.5 min-h-[44px] rounded-xl shadow-md border transition-all ${
                 showLabels
                   ? 'bg-white text-slate-700 border-slate-200'
                   : 'bg-slate-700 text-white border-slate-700'
               }`}
             >
-              {showLabels ? <Eye size={13} /> : <EyeOff size={13} />}
-              Labels
+              {showLabels ? <Eye size={14} /> : <EyeOff size={14} />}
+              <span className="hidden sm:inline">Labels</span>
             </button>
           </div>
         )}
 
         {/* Drawing hint */}
         {isDrawing && (
-          <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10">
-            <div className="bg-slate-900/90 text-white text-sm font-medium px-4 py-2.5 rounded-2xl shadow-xl flex items-center gap-2 backdrop-blur">
-              <div className="w-2 h-2 rounded-full bg-orange-400 animate-pulse" />
-              Click to add points · Double-click to close polygon
+          <div className="absolute bottom-[max(0.75rem,env(safe-area-inset-bottom,0px))] left-2 right-2 sm:left-1/2 sm:right-auto sm:-translate-x-1/2 z-10 sm:max-w-[min(92vw,28rem)]">
+            <div className="bg-slate-900/90 text-white text-[11px] sm:text-sm font-medium px-3 py-2 sm:px-4 sm:py-2.5 rounded-2xl shadow-xl flex flex-wrap items-center gap-2 backdrop-blur">
+              <div className="w-2 h-2 shrink-0 rounded-full bg-orange-400 animate-pulse" />
+              <span className="min-w-0 flex-1 leading-snug">Tap to add points · Double-tap to close</span>
               <button
+                type="button"
                 onClick={cancelDrawing}
-                className="ml-3 text-slate-400 hover:text-white text-xs border-l border-slate-600 pl-3"
+                className="touch-manipulation shrink-0 text-slate-400 hover:text-white text-xs border border-slate-600 rounded-lg px-2.5 py-1.5 sm:border-0 sm:border-l sm:rounded-none sm:pl-3 sm:ml-0"
               >
                 Cancel
               </button>
@@ -472,7 +547,7 @@ export default function AnalysisPage({ apiKey, address, coordinates, onComplete 
       </div>
 
       {/* Sidebar */}
-      <aside className="w-80 bg-white border-l border-slate-100 flex flex-col overflow-hidden shadow-xl">
+      <aside className="w-full flex-1 min-h-0 max-h-[58%] lg:max-h-none lg:w-80 lg:flex-none bg-white border-t border-slate-100 lg:border-l lg:border-t-0 flex flex-col overflow-hidden shadow-xl">
         {/* Sidebar header */}
         <div className="p-4 border-b border-slate-100 bg-slate-50">
           <div className="flex items-center gap-2 mb-1">
@@ -485,6 +560,32 @@ export default function AnalysisPage({ apiKey, address, coordinates, onComplete 
             )}
           </div>
           <p className="text-xs text-slate-500">Draw polygons on the map to measure each roof section</p>
+
+          <div className="mt-3 pt-3 border-t border-slate-200 space-y-2">
+            <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+              <MapPin size={12} className="text-blue-600 shrink-0" aria-hidden />
+              Current property
+            </div>
+            <p className="text-xs text-slate-800 leading-snug line-clamp-3" title={address}>
+              {address || '—'}
+            </p>
+            <label htmlFor="analysis-property-search" className="sr-only">
+              Search for another property address
+            </label>
+            <div className="relative">
+              <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" aria-hidden />
+              <input
+                id="analysis-property-search"
+                ref={searchInputRef}
+                type="text"
+                autoComplete="off"
+                disabled={!mapLoaded}
+                placeholder={mapLoaded ? 'Search another address…' : 'Loading map…'}
+                className="touch-manipulation w-full min-h-[44px] rounded-xl border border-slate-200 bg-white pl-10 pr-3 py-2.5 text-base text-slate-800 placeholder:text-slate-400 shadow-sm outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-100 disabled:text-slate-400"
+              />
+            </div>
+            <p className="text-[11px] text-slate-400 leading-snug">Choose a suggestion from the dropdown to load that roof.</p>
+          </div>
         </div>
 
         {/* Sections list */}
@@ -660,20 +761,22 @@ export default function AnalysisPage({ apiKey, address, coordinates, onComplete 
         )}
 
         {/* Actions */}
-        <div className="p-3 border-t border-slate-100 space-y-2">
+        <div className="p-3 pb-[max(0.75rem,env(safe-area-inset-bottom,0px))] border-t border-slate-100 space-y-2">
           {!isDrawing ? (
             <button
+              type="button"
               onClick={startDrawing}
               disabled={!mapLoaded}
-              className="w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-200 disabled:text-slate-400 text-white font-semibold px-4 py-2.5 rounded-xl transition-all text-sm shadow-sm"
+              className="touch-manipulation w-full flex items-center justify-center gap-2 min-h-[48px] bg-blue-600 hover:bg-blue-700 active:bg-blue-800 disabled:bg-slate-200 disabled:text-slate-400 text-white font-semibold px-4 py-3 rounded-xl transition-all text-sm shadow-sm"
             >
               <Pencil size={14} />
               Draw Roof Section
             </button>
           ) : (
             <button
+              type="button"
               onClick={cancelDrawing}
-              className="w-full flex items-center justify-center gap-2 bg-orange-500 hover:bg-orange-600 text-white font-semibold px-4 py-2.5 rounded-xl transition-all text-sm"
+              className="touch-manipulation w-full flex items-center justify-center gap-2 min-h-[48px] bg-orange-500 hover:bg-orange-600 active:bg-orange-700 text-white font-semibold px-4 py-3 rounded-xl transition-all text-sm"
             >
               <RotateCcw size={14} />
               Cancel Drawing
@@ -681,9 +784,10 @@ export default function AnalysisPage({ apiKey, address, coordinates, onComplete 
           )}
 
           <button
+            type="button"
             onClick={handleComplete}
             disabled={sections.length === 0 || saving}
-            className="w-full flex items-center justify-center gap-2 bg-slate-900 hover:bg-slate-800 disabled:bg-slate-100 disabled:text-slate-400 text-white font-semibold px-4 py-2.5 rounded-xl transition-all text-sm"
+            className="touch-manipulation w-full flex items-center justify-center gap-2 min-h-[48px] bg-slate-900 hover:bg-slate-800 active:bg-slate-950 disabled:bg-slate-100 disabled:text-slate-400 text-white font-semibold px-4 py-3 rounded-xl transition-all text-sm"
           >
             {saving ? (
               <>
