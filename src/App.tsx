@@ -173,7 +173,9 @@ export default function App() {
     );
   }
 
-  const isAnalysisView = view === 'analysis' || view === 'marketing';
+  /** Flex column + overflow-hidden on main so children can use flex-1 min-h-0 and scroll (mobile Safari). */
+  const fullHeightMain =
+    view === 'analysis' || view === 'marketing' || view === 'quote';
 
   return (
     <DashboardLayout
@@ -181,7 +183,7 @@ export default function App() {
       user={user}
       onNavigate={setView}
       onLogout={handleLogout}
-      fullHeight={isAnalysisView}
+      fullHeight={fullHeightMain}
       dbBanner={dbBanner}
     >
       {view === 'dashboard' && <DashboardHome onNewAnalysis={handleNewAnalysisFromPanel} />}
@@ -195,7 +197,7 @@ export default function App() {
         />
       )}
       {view === 'quote' && (
-        <div className="flex-1 min-h-0 overflow-y-auto overscroll-y-contain bg-slate-50 py-4 sm:py-6 [-webkit-overflow-scrolling:touch]">
+        <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-y-contain bg-slate-50 py-4 sm:py-6 [-webkit-overflow-scrolling:touch]">
           <QuotePage
             address={address}
             coordinates={coordinates}
