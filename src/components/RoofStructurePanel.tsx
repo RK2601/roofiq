@@ -1,16 +1,20 @@
-import { X, Ruler, Info } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { X, Ruler, Info, RotateCcw, Check } from 'lucide-react';
 import { SECTION_COLORS, formatArea } from '../utils/roofCalculations';
 import { formatFt } from '../utils/measurements';
 import type {
+  EdgeKind,
   FacetEdge,
   FacetSide,
   RoofStructureAnalysis,
   RoofStructureFacet,
 } from '../utils/roofStructure';
+import { recomputeMeasurementsFromFacets } from '../utils/roofStructure';
 
 interface RoofStructurePanelProps {
   analysis: RoofStructureAnalysis;
   onClose: () => void;
+  onApply?: (next: RoofStructureAnalysis) => void;
 }
 
 const EDGE_STYLES: Record<
@@ -54,7 +58,13 @@ function edgeSegment(
   };
 }
 
-function renderEdges(facets: RoofStructureFacet[], pxPerFt: number) {
+const EDITABLE_EDGE_KINDS: EdgeKind[] = ['ridge', 'hip', 'valley', 'eave', 'rake', 'step'];
+
+function renderEdges(
+  facets: RoofStructureFacet[],
+  pxPerFt: number,
+  onEdgeClick?: (facetIndex: number, edgeIndex: number) => void
+) {
   const lines: JSX.Element[] = [];
   facets.forEach(facet => {
     facet.edges.forEach((edge, idx) => {
@@ -73,6 +83,8 @@ function renderEdges(facets: RoofStructureFacet[], pxPerFt: number) {
           strokeWidth={lowConfidence ? Math.max(style.width, 2.2) : style.width}
           strokeDasharray={lowConfidence ? '5 4' : style.dash}
           strokeLinecap="round"
+          onClick={() => onEdgeClick?.(facet.index, idx)}
+          className={onEdgeClick ? 'cursor-pointer' : undefined}
         />
       );
     });
@@ -80,8 +92,21 @@ function renderEdges(facets: RoofStructureFacet[], pxPerFt: number) {
   return lines;
 }
 
-export default function RoofStructurePanel({ analysis, onClose }: RoofStructurePanelProps) {
-  const m = analysis.measurements;
+export default function RoofStructurePanel({ analysis, onClose, onApply }: RoofStructurePanelProps) {
+  const [editableFacets, setEditableFacets] = useState<RoofStructureFacet[]>(analysis.facets);
+  const [edited, setEdited] = useState(false);
+
+  useEffect(() => {
+    setEditableFacets(analysis.facets);
+    setEdited(false);
+  }, [analysis]);
+
+  const editableMeasurements = useMemo(
+    () => recomputeMeasurementsFromFacets(editableFacets),
+    [editableFacets]
+  );
+
+  const m = editableMeasurements;
   const confidencePercent = Math.round((analysis.confidence.overall || 0) * 100);
   const metricCards = [
     { label: 'Roof Area', value: formatArea(m.totalRoofAreaSqFt) },
@@ -100,6 +125,29 @@ export default function RoofStructurePanel({ analysis, onClose }: RoofStructureP
     { label: 'Ground Area', value: formatArea(m.totalGroundAreaSqFt) },
   ];
 
+  const handleEdgeCycle = (facetIndex: number, edgeIndex: number) => {
+    setEditableFacets(prev => {
+      const facets = prev.map(facet => ({
+        ...facet,
+        edges: facet.edges.map(edge => ({ ...edge })),
+      }));
+      const facet = facets.find(item => item.index === facetIndex);
+      if (!facet) return prev;
+      const edge = facet.edges[edgeIndex];
+      if (!edge) return prev;
+      const currentIdx = EDITABLE_EDGE_KINDS.indexOf(edge.kind);
+      edge.kind = EDITABLE_EDGE_KINDS[(currentIdx + 1) % EDITABLE_EDGE_KINDS.length];
+
+      if (edge.adjacentFacetIndex !== null) {
+        const adjacent = facets.find(item => item.index === edge.adjacentFacetIndex);
+        const reciprocal = adjacent?.edges.find(candidate => candidate.adjacentFacetIndex === facetIndex);
+        if (reciprocal) reciprocal.kind = edge.kind;
+      }
+      return facets;
+    });
+    setEdited(true);
+  };
+
   return (
     <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm p-2 sm:p-4">
       <div className="mx-auto flex h-full max-w-[1200px] flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
@@ -117,6 +165,43 @@ export default function RoofStructurePanel({ analysis, onClose }: RoofStructureP
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto p-3 sm:p-4 space-y-4">
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                setEditableFacets(analysis.facets);
+                setEdited(false);
+              }}
+              className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-600 hover:bg-slate-100"
+            >
+              <RotateCcw size={12} />
+              Reset edits
+            </button>
+            <button
+              type="button"
+              disabled={!edited}
+              onClick={() => {
+                if (!edited) return;
+                const next: RoofStructureAnalysis = {
+                  ...analysis,
+                  facets: editableFacets,
+                  measurements: editableMeasurements,
+                  notes: [
+                    ...analysis.notes,
+                    'Manual edge edits applied in roof structure panel.',
+                  ],
+                };
+                onApply?.(next);
+                setEdited(false);
+              }}
+              className="inline-flex items-center gap-1 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 text-xs text-emerald-700 hover:bg-emerald-100 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <Check size={12} />
+              Apply edits
+            </button>
+            {edited && <span className="text-[11px] text-amber-700">Manual edge edits pending</span>}
+          </div>
+
           <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-xs font-semibold text-slate-700">Report confidence</span>
@@ -181,9 +266,9 @@ export default function RoofStructurePanel({ analysis, onClose }: RoofStructureP
               className="w-full h-auto rounded-lg bg-white border border-slate-200"
               xmlns="http://www.w3.org/2000/svg"
             >
-              {renderEdges(analysis.facets, analysis.svg.pxPerFt)}
+              {renderEdges(editableFacets, analysis.svg.pxPerFt, handleEdgeCycle)}
 
-              {analysis.facets.map(facet => (
+              {editableFacets.map(facet => (
                 <g key={facet.index} transform={`translate(${facet.placement.x}, ${facet.placement.y})`}>
                   <rect
                     width={facet.placement.w}

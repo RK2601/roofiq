@@ -413,6 +413,15 @@ function computeMeasurements(facets: RoofFacet[]): RoofStructureMeasurements {
   };
 }
 
+export function recomputeMeasurementsFromFacets(
+  facets: Array<Pick<RoofFacet, 'index' | 'edges' | 'pitchDegrees' | 'pitchLabel' | 'actualAreaSqFt' | 'groundAreaSqFt'>>
+): RoofStructureMeasurements {
+  const normalized = facets.map(facet => ({
+    ...facet,
+  })) as RoofFacet[];
+  return computeMeasurements(normalized);
+}
+
 function overlapsAny(rect: UnfoldedFacetPlacement, existing: UnfoldedFacetPlacement[]): boolean {
   return existing.some(other => {
     const separated =

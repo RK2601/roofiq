@@ -1312,6 +1312,7 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
       {showRoofStructure && roofStructure && (
         <RoofStructurePanel
           analysis={roofStructure}
+          onApply={next => setRoofStructure(next)}
           onClose={() => setShowRoofStructure(false)}
         />
       )}
