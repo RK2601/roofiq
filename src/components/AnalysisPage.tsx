@@ -60,7 +60,7 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
   const [aiStatus, setAiStatus] = useState<'idle' | 'analyzing' | 'done' | 'error'>('idle');
   const [aiResult, setAiResult] = useState<RoofAnalysis | null>(null);
   const [aiError, setAiError] = useState<string | null>(null);
-  const [aiExpanded, setAiExpanded] = useState(true);
+  const [aiExpanded, setAiExpanded] = useState(false);
   const hasGeminiKey = !!readGeminiApiKey();
   const labelsRef = useRef<google.maps.InfoWindow[]>([]);
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -467,8 +467,8 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
   return (
     <div className="flex h-full min-h-0 flex-col lg:flex-row overflow-hidden">
       {/* Map area — fixed share of height on phones; full flex on desktop */}
-      <div className="relative w-full h-[42%] min-h-[200px] shrink-0 lg:h-auto lg:flex-1 lg:min-h-0">
-        <div ref={mapRef} className="w-full h-full min-h-[200px]" />
+      <div className="relative w-full h-[38%] min-h-[170px] shrink-0 lg:h-auto lg:min-h-0 lg:flex-1">
+        <div ref={mapRef} className="h-full w-full min-h-0 lg:min-h-[200px]" />
 
         {/* Loading overlay */}
         {!mapLoaded && !mapError && (
@@ -547,33 +547,33 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
       </div>
 
       {/* Sidebar */}
-      <aside className="w-full flex-1 min-h-0 max-h-[58%] lg:max-h-none lg:w-80 lg:flex-none bg-white border-t border-slate-100 lg:border-l lg:border-t-0 flex flex-col overflow-hidden shadow-xl">
-        {/* Sidebar header */}
-        <div className="p-4 border-b border-slate-100 bg-slate-50">
-          <div className="flex items-center gap-2 mb-1">
+      <aside className="flex w-full min-h-0 flex-1 flex-col overflow-hidden border-t border-slate-100 bg-white shadow-xl lg:w-80 lg:flex-none lg:border-l lg:border-t-0">
+        {/* Sidebar header — fixed; scroll lives below so CTAs stay reachable on short phones */}
+        <div className="shrink-0 border-b border-slate-100 bg-slate-50 p-3 sm:p-4">
+          <div className="mb-0.5 flex items-center gap-2 sm:mb-1">
             <Layers size={15} className="text-blue-600" />
-            <h2 className="font-semibold text-slate-900 text-sm">Roof Sections</h2>
+            <h2 className="text-sm font-semibold text-slate-900">Roof Sections</h2>
             {sections.length > 0 && (
-              <span className="ml-auto bg-blue-100 text-blue-700 text-xs font-semibold px-2 py-0.5 rounded-full">
+              <span className="ml-auto rounded-full bg-blue-100 px-2 py-0.5 text-xs font-semibold text-blue-700">
                 {sections.length}
               </span>
             )}
           </div>
-          <p className="text-xs text-slate-500">Draw polygons on the map to measure each roof section</p>
+          <p className="hidden text-xs text-slate-500 sm:block">Draw polygons on the map to measure each roof section</p>
 
-          <div className="mt-3 pt-3 border-t border-slate-200 space-y-2">
+          <div className="mt-2 space-y-2 border-t border-slate-200 pt-2 sm:mt-3 sm:pt-3">
             <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-              <MapPin size={12} className="text-blue-600 shrink-0" aria-hidden />
+              <MapPin size={12} className="shrink-0 text-blue-600" aria-hidden />
               Current property
             </div>
-            <p className="text-xs text-slate-800 leading-snug line-clamp-3" title={address}>
+            <p className="line-clamp-2 text-xs leading-snug text-slate-800 sm:line-clamp-3" title={address}>
               {address || '—'}
             </p>
             <label htmlFor="analysis-property-search" className="sr-only">
               Search for another property address
             </label>
             <div className="relative">
-              <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" aria-hidden />
+              <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" aria-hidden />
               <input
                 id="analysis-property-search"
                 ref={searchInputRef}
@@ -581,15 +581,18 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
                 autoComplete="off"
                 disabled={!mapLoaded}
                 placeholder={mapLoaded ? 'Search another address…' : 'Loading map…'}
-                className="touch-manipulation w-full min-h-[44px] rounded-xl border border-slate-200 bg-white pl-10 pr-3 py-2.5 text-base text-slate-800 placeholder:text-slate-400 shadow-sm outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-100 disabled:text-slate-400"
+                className="touch-manipulation w-full min-h-[44px] rounded-xl border border-slate-200 bg-white py-2.5 pl-10 pr-3 text-base text-slate-800 shadow-sm outline-none placeholder:text-slate-400 focus:border-blue-400 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-100 disabled:text-slate-400"
               />
             </div>
-            <p className="text-[11px] text-slate-400 leading-snug">Choose a suggestion from the dropdown to load that roof.</p>
+            <p className="hidden text-[11px] leading-snug text-slate-400 sm:block">
+              Choose a suggestion from the dropdown to load that roof.
+            </p>
           </div>
         </div>
 
+        <div className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-y-contain">
         {/* Sections list */}
-        <div className="flex-1 overflow-y-auto p-3 space-y-2">
+        <div className="space-y-2 p-3 pb-1">
           {sections.length === 0 && !isDrawing && (
             <div className="flex flex-col items-center justify-center py-12 text-center px-4">
               <div className="w-12 h-12 bg-blue-50 rounded-2xl flex items-center justify-center mb-3">
@@ -661,7 +664,7 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
           ))}
         </div>
 
-        {/* Totals */}
+        {/* Totals — inside same scroll region as sections + actions (mobile) */}
         {sections.length > 0 && (
           <div className="border-t border-slate-100 p-3 bg-slate-50 space-y-2">
             <div className="flex items-center gap-1.5 mb-2">
@@ -703,7 +706,7 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
               )}
               {aiStatus !== 'done' && (
                 <span className="ml-auto text-purple-400">
-                  {aiExpanded ? <ChevronUp size={12} /> : <Brain size={12} />}
+                  {aiExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
                 </span>
               )}
             </button>
@@ -810,6 +813,7 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
           {saveStatus === 'error' && (
             <p className="text-xs text-red-500 text-center">Saved locally — DB save failed</p>
           )}
+        </div>
         </div>
       </aside>
     </div>
