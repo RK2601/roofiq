@@ -1,4 +1,4 @@
-import { useState, useEffect, useLayoutEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { AppView, Coordinates, RoofSection, User } from './types';
 import LandingPage from './components/LandingPage';
 import AnalysisPage from './components/AnalysisPage';
@@ -30,21 +30,15 @@ export default function App() {
   const [coordinates, setCoordinates] = useState<Coordinates>({ lat: 37.422, lng: -122.084 });
   const [roofSections, setRoofSections] = useState<Omit<RoofSection, 'polygon'>[]>([]);
   const [apiKey, setApiKey] = useState(() => readMapsApiKey());
-  const [showKeySetup, setShowKeySetup] = useState(() => !readMapsApiKey());
+  const [showKeySetup, setShowKeySetup] = useState(false);
   const [projectId, setProjectId] = useState<string | null>(null);
   const [user, setUser] = useState<User | null>(() => getStoredUser());
   // pending address/coords saved before login
   const [pendingAddr, setPendingAddr] = useState('');
   const [pendingCoords, setPendingCoords] = useState<Coordinates>({ lat: 37.422, lng: -122.084 });
 
-  useLayoutEffect(() => {
-    const k = readMapsApiKey();
-    setApiKey(k);
-    if (k) setShowKeySetup(false);
-    else setShowKeySetup(true);
-  }, []);
-
   useEffect(() => {
+    setApiKey(readMapsApiKey());
     initDb().catch(console.error);
   }, []);
 
