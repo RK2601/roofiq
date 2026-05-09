@@ -8,7 +8,7 @@ function trimDatabaseUrl(raw: unknown): string | undefined {
   return t.length ? t : undefined;
 }
 
-const dbUrl = trimDatabaseUrl(import.meta.env.VITE_DATABASE_URL);
+const dbUrl = trimDatabaseUrl(__ROOFIQ_DATABASE_URL__ || import.meta.env.VITE_DATABASE_URL);
 /** Undefined URL must not be passed to `neon()` — it throws immediately and breaks the whole app (e.g. Vercel without env). */
 const neonSql = dbUrl
   ? neon(dbUrl, { disableWarningInBrowsers: true })
@@ -17,7 +17,7 @@ const neonSql = dbUrl
 function requireNeon() {
   if (!neonSql) {
     throw new Error(
-      'Database is not configured. Set VITE_DATABASE_URL in your environment (e.g. Vercel → Project → Settings → Environment Variables) to your Neon connection string.'
+      'Database is not configured. Add `VITE_DATABASE_URL` or `DATABASE_URL` (Neon connection string) to `.env`, or set either on the host at build time.'
     );
   }
   return neonSql;

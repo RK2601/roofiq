@@ -44,7 +44,7 @@ export default function App() {
       setDbBanner(
         import.meta.env.DEV
           ? null
-          : 'Not connected. Git-based Vercel builds cannot read your local .env. From this project run `npm run deploy:vercel` (builds locally with .env, then uploads), or store VITE_DATABASE_URL on Vercel for cloud builds.'
+          : 'Not connected. Use `DATABASE_URL` or `VITE_DATABASE_URL` in `.env` (Neon). Git-based Vercel builds cannot read your laptop `.env` — run `npm run deploy:vercel` from this machine, or set one of those variables for the build on Vercel.'
       );
       return;
     }
