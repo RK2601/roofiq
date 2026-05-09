@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { Loader } from '@googlemaps/js-api-loader';
 import { Coordinates, RoofSection } from '../types';
 import {
@@ -48,6 +48,8 @@ import {
   type SolarBuildingInsights,
 } from '../utils/solar';
 import { computeRoofMeasurements, formatFt } from '../utils/measurements';
+import { analyzeSolarSegments, type RoofStructureAnalysis } from '../utils/roofStructure';
+import RoofStructurePanel from './RoofStructurePanel';
 
 interface AnalysisPageProps {
   apiKey: string;
@@ -84,6 +86,17 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
   const [solarStatus, setSolarStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
   const [solarData, setSolarData] = useState<SolarBuildingInsights | null>(null);
   const [solarError, setSolarError] = useState<string | null>(null);
+  const [roofStructure, setRoofStructure] = useState<RoofStructureAnalysis | null>(null);
+  const [showRoofStructure, setShowRoofStructure] = useState(false);
+
+  const roofStructurePreview = useMemo(() => {
+    const segments = solarData?.roofSegmentStats ?? [];
+    if (solarStatus !== 'ready' || !solarData || segments.length === 0) return null;
+    return analyzeSolarSegments(segments, solarData.center, {
+      imageryQuality: solarData.imageryQuality,
+      hasDsm: false,
+    });
+  }, [solarData, solarStatus]);
 
   // Map view controls
   const [mapType, setMapType] = useState<'satellite' | 'hybrid'>('satellite');
@@ -302,6 +315,8 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
     setSolarStatus('loading');
     setSolarData(null);
     setSolarError(null);
+    setRoofStructure(null);
+    setShowRoofStructure(false);
     fetchBuildingInsights(coordinates.lat, coordinates.lng, apiKey)
       .then(data => {
         setSolarData(data);
@@ -893,14 +908,59 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
                 · imagery {formatImageryDate(solarData.imageryDate)}
               </p>
               {mapLoaded && (solarData.roofSegmentStats ?? []).length > 0 && (
-                <button
-                  type="button"
-                  onClick={importSolarSegments}
-                  className="touch-manipulation w-full flex items-center justify-center gap-1.5 bg-amber-500 hover:bg-amber-600 text-white text-xs font-semibold px-3 py-2 rounded-lg transition-colors"
-                >
-                  <Zap size={12} />
-                  Auto-import roof segments
-                </button>
+                <div className="space-y-1.5">
+                  <button
+                    type="button"
+                    onClick={importSolarSegments}
+                    className="touch-manipulation w-full flex items-center justify-center gap-1.5 bg-amber-500 hover:bg-amber-600 text-white text-xs font-semibold px-3 py-2 rounded-lg transition-colors"
+                  >
+                    <Zap size={12} />
+                    Auto-import roof segments
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const segments = solarData.roofSegmentStats ?? [];
+                      if (segments.length === 0) return;
+                      if (!roofStructure) {
+                        setRoofStructure(
+                          analyzeSolarSegments(segments, solarData.center, {
+                            imageryQuality: solarData.imageryQuality,
+                            hasDsm: false,
+                          })
+                        );
+                      }
+                      setShowRoofStructure(true);
+                    }}
+                    className="touch-manipulation w-full flex items-center justify-center gap-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold px-3 py-2 rounded-lg transition-colors"
+                  >
+                    <Ruler size={12} />
+                    View Roof Structure
+                  </button>
+                  {(roofStructurePreview || roofStructure) && (
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between rounded-md border border-blue-200 bg-blue-50 px-2 py-1">
+                        <span className="text-[10px] font-semibold uppercase tracking-wide text-blue-700">Structure confidence</span>
+                        <span
+                          className={`text-[10px] font-bold rounded-full px-1.5 py-0.5 ${
+                            (roofStructure ?? roofStructurePreview)?.confidenceBand === 'high'
+                              ? 'bg-green-100 text-green-700'
+                              : (roofStructure ?? roofStructurePreview)?.confidenceBand === 'medium'
+                                ? 'bg-amber-100 text-amber-700'
+                                : 'bg-red-100 text-red-700'
+                          }`}
+                        >
+                          {(roofStructure ?? roofStructurePreview)?.confidenceBand.toUpperCase()}
+                        </span>
+                      </div>
+                      {(roofStructure ?? roofStructurePreview)?.confidenceBand === 'low' && (
+                        <p className="text-[10px] text-amber-700 leading-snug">
+                          Add 2-4 property photos to improve ridge/valley accuracy.
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
               )}
             </div>
           )}
@@ -1220,6 +1280,13 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
           )}
         </div>
       </aside>
+
+      {showRoofStructure && roofStructure && (
+        <RoofStructurePanel
+          analysis={roofStructure}
+          onClose={() => setShowRoofStructure(false)}
+        />
+      )}
     </div>
   );
 }

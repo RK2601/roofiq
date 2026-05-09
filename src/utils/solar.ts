@@ -31,6 +31,14 @@ export interface SolarBuildingInsights {
   roofSegmentStats?: SolarRoofSegment[];
 }
 
+export interface SolarDataLayersResponse {
+  imageryDate: { year: number; month: number; day: number };
+  imageryQuality: 'HIGH' | 'MEDIUM' | 'LOW';
+  dsmUrl?: string;
+  rgbUrl?: string;
+  annualFluxUrl?: string;
+}
+
 const SOLAR_API_BASE = 'https://solar.googleapis.com/v1';
 const SOLAR_URL_RE = /^https:\/\/solar\.googleapis\.com\//;
 
@@ -63,6 +71,51 @@ export async function fetchBuildingInsights(
       return await tryFetch(url);
     } catch {
       throw proxyErr;
+    }
+  }
+}
+
+/** Phase 2 prep: fetches Solar data layer metadata (DSM/RGB URLs when available). */
+export async function fetchDataLayers(
+  lat: number,
+  lng: number,
+  radiusMeters: number,
+  apiKey: string
+): Promise<SolarDataLayersResponse | null> {
+  const url =
+    `${SOLAR_API_BASE}/dataLayers:get?location.latitude=${lat}` +
+    `&location.longitude=${lng}&radiusMeters=${radiusMeters}&requiredQuality=LOW&key=${apiKey}`;
+
+  const tryFetch = async (u: string): Promise<SolarDataLayersResponse | null> => {
+    const res = await fetch(u);
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new Error(`SOLAR_DATALAYERS_HTTP_${res.status}: ${body.slice(0, 120)}`);
+    }
+    const json = (await res.json()) as {
+      imageryDate?: { year: number; month: number; day: number };
+      imageryQuality?: 'HIGH' | 'MEDIUM' | 'LOW';
+      dsmUrl?: string;
+      rgbUrl?: string;
+      annualFluxUrl?: string;
+    };
+    if (!json.imageryDate || !json.imageryQuality) return null;
+    return {
+      imageryDate: json.imageryDate,
+      imageryQuality: json.imageryQuality,
+      dsmUrl: json.dsmUrl,
+      rgbUrl: json.rgbUrl,
+      annualFluxUrl: json.annualFluxUrl,
+    };
+  };
+
+  try {
+    return await tryFetch(solarProxyUrl(url));
+  } catch {
+    try {
+      return await tryFetch(url);
+    } catch {
+      return null;
     }
   }
 }
