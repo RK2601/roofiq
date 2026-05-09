@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { X, MapPin, Layers, Ruler, Calendar, ZoomIn, ChevronLeft, ChevronRight, Image, Brain, Loader2, AlertTriangle } from 'lucide-react';
 import { getProjectDetails, getProjectSnapshots, getProjectSections } from '../utils/db';
 import { analyzeRoofImage, RoofAnalysis, CONDITION_BG, URGENCY_BG, CONDITION_COLORS } from '../utils/ai';
+import { readGeminiApiKey } from '../utils/googleAiKey';
 
 interface Props {
   projectId: string;
@@ -48,7 +49,7 @@ export default function ProjectDetailModal({ projectId, onClose }: Props) {
   const [loading, setLoading] = useState(true);
   const [lightboxIdx, setLightboxIdx] = useState<number | null>(null);
   const [snapAI, setSnapAI] = useState<Record<string, SnapAI>>({});
-  const hasGeminiKey = !!(import.meta.env.VITE_GOOGLE_AI_KEY || localStorage.getItem('roofiq_gemini_key'));
+  const hasGeminiKey = !!readGeminiApiKey();
 
   const analyzeSnap = async (snapId: string, url: string) => {
     setSnapAI(prev => ({ ...prev, [snapId]: { status: 'analyzing' } }));

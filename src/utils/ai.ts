@@ -1,4 +1,5 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import { readGeminiApiKey } from './googleAiKey';
 
 export interface RoofAnalysis {
   condition: 'Excellent' | 'Good' | 'Fair' | 'Poor' | 'Critical';
@@ -63,7 +64,7 @@ async function urlToBase64(url: string): Promise<{ data: string; mimeType: strin
 }
 
 export async function analyzeRoofImage(imageUrl: string): Promise<RoofAnalysis> {
-  const apiKey = import.meta.env.VITE_GOOGLE_AI_KEY || localStorage.getItem('roofiq_gemini_key') || '';
+  const apiKey = readGeminiApiKey();
   if (!apiKey) throw new Error('GOOGLE_AI_KEY_MISSING');
 
   const imageData = await urlToBase64(imageUrl);

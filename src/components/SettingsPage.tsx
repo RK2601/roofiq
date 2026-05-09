@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Eye, EyeOff, CheckCircle2, ExternalLink } from 'lucide-react';
 import { User } from '../types';
+import { readGeminiApiKey } from '../utils/googleAiKey';
 
 interface SettingsPageProps {
   apiKey: string;
@@ -15,12 +16,8 @@ function maskApiKey(key: string): string {
   return key.slice(0, 7) + '...' + key.slice(-4);
 }
 
-function getStoredGeminiKey(): string {
-  return import.meta.env.VITE_GOOGLE_AI_KEY || localStorage.getItem('roofiq_gemini_key') || '';
-}
-
 export default function SettingsPage({ apiKey, user, onNeedApiKey, onLogout }: SettingsPageProps) {
-  const [geminiKey, setGeminiKey] = useState(getStoredGeminiKey);
+  const [geminiKey, setGeminiKey] = useState(() => readGeminiApiKey());
   const [geminiInput, setGeminiInput] = useState('');
   const [geminiEditing, setGeminiEditing] = useState(false);
   const [geminiVisible, setGeminiVisible] = useState(false);

@@ -5,6 +5,7 @@ import {
   PlusCircle, MinusCircle, Download, MapPin, Megaphone,
 } from 'lucide-react';
 import { analyzeRoofImage, RoofAnalysis, CONDITION_COLORS, CONDITION_BG, URGENCY_BG } from '../utils/ai';
+import { readGeminiApiKey } from '../utils/googleAiKey';
 
 interface MarketingPageProps {
   apiKey: string;
@@ -37,7 +38,7 @@ export default function MarketingPage({ apiKey }: MarketingPageProps) {
   const [prospects, setProspects] = useState<Prospect[]>([]);
   const [activeTab, setActiveTab] = useState<'prospects' | 'campaign'>('prospects');
   const [mapError, setMapError] = useState('');
-  const anthropicKeyMissing = !(import.meta.env.VITE_GOOGLE_AI_KEY || localStorage.getItem('roofiq_gemini_key'));
+  const geminiKeyMissing = !readGeminiApiKey();
 
   useEffect(() => {
     if (!apiKey) {
@@ -245,7 +246,7 @@ export default function MarketingPage({ apiKey }: MarketingPageProps) {
             <h2 className="font-bold text-slate-900 text-base">Marketing Intelligence</h2>
           </div>
 
-          {anthropicKeyMissing && (
+          {geminiKeyMissing && (
             <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-xs text-amber-700 mb-3">
               <strong>AI key missing.</strong> Go to <strong>Settings → Gemini AI Key</strong> to add your free Google AI key and enable roof analysis.
             </div>

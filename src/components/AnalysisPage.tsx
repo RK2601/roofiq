@@ -29,6 +29,7 @@ import {
 } from 'lucide-react';
 import { saveProject } from '../utils/db';
 import { analyzeRoofImage, RoofAnalysis, CONDITION_BG, URGENCY_BG, CONDITION_COLORS } from '../utils/ai';
+import { readGeminiApiKey } from '../utils/googleAiKey';
 
 interface AnalysisPageProps {
   apiKey: string;
@@ -55,7 +56,7 @@ export default function AnalysisPage({ apiKey, address, coordinates, onComplete 
   const [aiStatus, setAiStatus] = useState<'idle' | 'analyzing' | 'done' | 'error'>('idle');
   const [aiResult, setAiResult] = useState<RoofAnalysis | null>(null);
   const [aiExpanded, setAiExpanded] = useState(true);
-  const hasGeminiKey = !!(import.meta.env.VITE_GOOGLE_AI_KEY || localStorage.getItem('roofiq_gemini_key'));
+  const hasGeminiKey = !!readGeminiApiKey();
   const labelsRef = useRef<google.maps.InfoWindow[]>([]);
 
   // Keep ref in sync
