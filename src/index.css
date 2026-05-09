@@ -100,6 +100,11 @@
   overflow: hidden !important;
 }
 
+/* Places Autocomplete — stay above landing hero / nav on mobile */
+.pac-container {
+  z-index: 10050 !important;
+}
+
 /* Print styles */
 @media print {
   .no-print {
