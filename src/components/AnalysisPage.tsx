@@ -664,7 +664,7 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
           ))}
         </div>
 
-        {/* Totals — inside same scroll region as sections + actions (mobile) */}
+        {/* Totals — scroll with sections */}
         {sections.length > 0 && (
           <div className="border-t border-slate-100 p-3 bg-slate-50 space-y-2">
             <div className="flex items-center gap-1.5 mb-2">
@@ -763,57 +763,62 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
           </div>
         )}
 
-        {/* Actions */}
-        <div className="p-3 pb-[max(0.75rem,env(safe-area-inset-bottom,0px))] border-t border-slate-100 space-y-2">
+        </div>
+
+        {/* Primary actions — outside scroll region so Draw / Save stay visible without scrolling (mobile + desktop sidebar) */}
+        <div className="shrink-0 border-t border-slate-200 bg-white p-2.5 pb-[max(0.5rem,env(safe-area-inset-bottom,0px))] shadow-[0_-6px_20px_-8px_rgba(15,23,42,0.12)] lg:p-3 lg:shadow-none">
           {!isDrawing ? (
-            <button
-              type="button"
-              onClick={startDrawing}
-              disabled={!mapLoaded}
-              className="touch-manipulation w-full flex items-center justify-center gap-2 min-h-[48px] bg-blue-600 hover:bg-blue-700 active:bg-blue-800 disabled:bg-slate-200 disabled:text-slate-400 text-white font-semibold px-4 py-3 rounded-xl transition-all text-sm shadow-sm"
-            >
-              <Pencil size={14} />
-              Draw Roof Section
-            </button>
+            <div className="grid grid-cols-2 gap-2 lg:flex lg:w-full lg:flex-col lg:gap-2">
+              <button
+                type="button"
+                onClick={startDrawing}
+                disabled={!mapLoaded}
+                className="touch-manipulation flex min-h-[44px] w-full items-center justify-center gap-1.5 rounded-xl bg-blue-600 px-2 py-2.5 text-xs font-semibold text-white shadow-sm transition-all hover:bg-blue-700 active:bg-blue-800 disabled:bg-slate-200 disabled:text-slate-400 lg:min-h-[48px] lg:gap-2 lg:px-4 lg:py-3 lg:text-sm"
+              >
+                <Pencil size={14} className="shrink-0" aria-hidden />
+                <span className="min-w-0 text-center leading-tight">Draw section</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleComplete}
+                disabled={sections.length === 0 || saving}
+                className="touch-manipulation flex min-h-[44px] w-full items-center justify-center gap-1 rounded-xl bg-slate-900 px-2 py-2.5 text-xs font-semibold text-white transition-all hover:bg-slate-800 active:bg-slate-950 disabled:bg-slate-100 disabled:text-slate-400 lg:min-h-[48px] lg:gap-2 lg:px-4 lg:py-3 lg:text-sm"
+              >
+                {saving ? (
+                  <>
+                    <div className="h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-2 border-white/30 border-t-white" aria-hidden />
+                    <span className="min-w-0 leading-tight">Saving…</span>
+                  </>
+                ) : saveStatus === 'saved' ? (
+                  <>
+                    <CheckCircle2 size={14} className="shrink-0" aria-hidden />
+                    <span className="min-w-0 leading-tight lg:hidden">Saved ✓</span>
+                    <span className="min-w-0 hidden leading-tight lg:inline">
+                      Saved · Generate quote
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <Save size={14} className="shrink-0" aria-hidden />
+                    <span className="min-w-0 text-center leading-tight">Save &amp; Quote</span>
+                    <ArrowRight size={14} className="hidden shrink-0 lg:inline" aria-hidden />
+                  </>
+                )}
+              </button>
+            </div>
           ) : (
             <button
               type="button"
               onClick={cancelDrawing}
-              className="touch-manipulation w-full flex items-center justify-center gap-2 min-h-[48px] bg-orange-500 hover:bg-orange-600 active:bg-orange-700 text-white font-semibold px-4 py-3 rounded-xl transition-all text-sm"
+              className="touch-manipulation flex w-full min-h-[44px] lg:min-h-[48px] items-center justify-center gap-2 rounded-xl bg-orange-500 px-4 py-2.5 text-sm font-semibold text-white transition-all hover:bg-orange-600 active:bg-orange-700"
             >
-              <RotateCcw size={14} />
-              Cancel Drawing
+              <RotateCcw size={14} aria-hidden />
+              Cancel drawing
             </button>
           )}
-
-          <button
-            type="button"
-            onClick={handleComplete}
-            disabled={sections.length === 0 || saving}
-            className="touch-manipulation w-full flex items-center justify-center gap-2 min-h-[48px] bg-slate-900 hover:bg-slate-800 active:bg-slate-950 disabled:bg-slate-100 disabled:text-slate-400 text-white font-semibold px-4 py-3 rounded-xl transition-all text-sm"
-          >
-            {saving ? (
-              <>
-                <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                Saving…
-              </>
-            ) : saveStatus === 'saved' ? (
-              <>
-                <CheckCircle2 size={14} />
-                Saved · Generate Quote
-              </>
-            ) : (
-              <>
-                <Save size={14} />
-                Save & Quote
-                <ArrowRight size={14} />
-              </>
-            )}
-          </button>
           {saveStatus === 'error' && (
-            <p className="text-xs text-red-500 text-center">Saved locally — DB save failed</p>
+            <p className="mt-1.5 text-center text-[11px] leading-snug text-red-500">Saved locally — DB save failed</p>
           )}
-        </div>
         </div>
       </aside>
     </div>

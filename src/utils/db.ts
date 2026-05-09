@@ -75,9 +75,11 @@ export async function initDb() {
       subtotal         DOUBLE PRECISION NOT NULL,
       tax              DOUBLE PRECISION NOT NULL,
       total            DOUBLE PRECISION NOT NULL,
+      quote_address    TEXT,
       generated_at     TIMESTAMPTZ DEFAULT NOW()
     )
   `;
+  await neonSql`ALTER TABLE quotes ADD COLUMN IF NOT EXISTS quote_address TEXT`;
 }
 
 export interface SectionToSave {
@@ -179,10 +181,11 @@ export async function getProjectSections(projectId: string) {
 
 export async function saveQuote(projectId: string | null, quote: QuoteData): Promise<string> {
   const sql = requireNeon();
+  const addressSnapshot = quote.address?.trim() || null;
   const [row] = await sql`
     INSERT INTO quotes
       (project_id, material_id, material_name, total_squares,
-       material_cost, labor_cost, additional_costs, subtotal, tax, total)
+       material_cost, labor_cost, additional_costs, subtotal, tax, total, quote_address)
     VALUES (
       ${projectId},
       ${quote.material.id},
@@ -193,7 +196,8 @@ export async function saveQuote(projectId: string | null, quote: QuoteData): Pro
       ${JSON.stringify(quote.additionalCosts)},
       ${quote.subtotal},
       ${quote.tax},
-      ${quote.total}
+      ${quote.total},
+      ${addressSnapshot}
     )
     RETURNING id
   `;
@@ -250,7 +254,8 @@ export async function getQuoteDetails(quoteId: string) {
     SELECT q.id, q.material_id, q.material_name, q.total_squares,
            q.material_cost, q.labor_cost, q.additional_costs,
            q.subtotal, q.tax, q.total, q.generated_at,
-           p.address, p.id as project_id
+           COALESCE(p.address, q.quote_address) AS address,
+           p.id as project_id
     FROM quotes q
     LEFT JOIN projects p ON p.id = q.project_id
     WHERE q.id = ${quoteId}
@@ -268,7 +273,7 @@ export async function getRecentQuotes(limit = 8) {
   const sql = requireNeon();
   return await sql`
     SELECT q.id, q.material_name, q.total_squares, q.total, q.generated_at,
-           p.address
+           COALESCE(p.address, q.quote_address) AS address
     FROM quotes q
     LEFT JOIN projects p ON p.id = q.project_id
     ORDER BY q.generated_at DESC

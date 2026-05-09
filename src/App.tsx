@@ -175,7 +175,7 @@ export default function App() {
 
   /** Flex column + overflow-hidden on main so children can use flex-1 min-h-0 and scroll (mobile Safari). */
   const fullHeightMain =
-    view === 'analysis' || view === 'marketing' || view === 'quote';
+    view === 'analysis' || view === 'marketing' || view === 'quote' || view === 'projects';
 
   return (
     <DashboardLayout
@@ -208,7 +208,11 @@ export default function App() {
           />
         </div>
       )}
-      {view === 'projects' && <ProjectsPage onNewAnalysis={handleNewAnalysisFromPanel} />}
+      {view === 'projects' && (
+        <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-y-contain [-webkit-overflow-scrolling:touch]">
+          <ProjectsPage onNewAnalysis={handleNewAnalysisFromPanel} />
+        </div>
+      )}
       {view === 'marketing' && <MarketingPage apiKey={apiKey} />}
       {view === 'quotes-list' && <QuotesListPage />}
       {view === 'reports' && <ReportsPage />}

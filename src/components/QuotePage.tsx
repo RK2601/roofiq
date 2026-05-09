@@ -1,9 +1,8 @@
-import { useState, useRef } from 'react';
+import { useCallback, useState, useRef } from 'react';
 import { QuoteData, Material } from '../types';
 import { MATERIALS, generateQuote, formatArea, formatCurrency } from '../utils/roofCalculations';
 import { RoofSection, Coordinates } from '../types';
 import {
-  FileText,
   Printer,
   ChevronRight,
   CheckCircle2,
@@ -19,8 +18,9 @@ import {
   Mail,
   MapPin,
   Save,
+  AlertTriangle,
 } from 'lucide-react';
-import { saveQuote } from '../utils/db';
+import { saveQuote, isDbConfigured } from '../utils/db';
 
 interface QuotePageProps {
   address: string;
@@ -36,35 +36,42 @@ function MaterialCard({ material, selected, onSelect }: { material: Material; se
     <button
       type="button"
       onClick={onSelect}
-      className={`touch-manipulation relative w-full text-left rounded-2xl border-2 p-4 min-h-[52px] transition-all duration-200 active:scale-[0.99] ${
+      className={`touch-manipulation relative w-full min-h-[52px] rounded-2xl border-2 p-3 text-left transition-all duration-200 active:scale-[0.99] sm:min-h-[52px] sm:p-4 ${
         selected
           ? 'border-blue-500 bg-blue-50 shadow-md shadow-blue-100'
           : 'border-slate-100 bg-white hover:border-slate-200 hover:shadow-sm'
       }`}
     >
       {selected && (
-        <div className="absolute top-3 right-3 w-5 h-5 bg-blue-600 rounded-full flex items-center justify-center">
-          <Check size={11} className="text-white" strokeWidth={3} />
+        <div className="absolute right-2.5 top-2.5 flex h-6 w-6 items-center justify-center rounded-full bg-blue-600 sm:right-3 sm:top-3 sm:h-5 sm:w-5">
+          <Check size={11} className="text-white" strokeWidth={3} aria-hidden />
         </div>
       )}
-      <div className="flex items-start gap-3">
-        <span className="text-2xl">{material.icon}</span>
-        <div className="flex-1 min-w-0">
-          <div className="font-semibold text-slate-900 text-sm">{material.name}</div>
-          <div className="text-slate-500 text-xs mt-0.5 leading-relaxed">{material.description}</div>
-          <div className="flex flex-wrap gap-1 mt-2">
+      <div className="flex items-start gap-2.5 sm:gap-3">
+        <span className="text-xl shrink-0 sm:text-2xl" aria-hidden>{material.icon}</span>
+        <div className="min-w-0 flex-1 pr-6 sm:pr-5">
+          <div className="text-sm font-semibold text-slate-900">{material.name}</div>
+          <div className="mt-0.5 line-clamp-2 text-xs leading-relaxed text-slate-500 sm:line-clamp-none">{material.description}</div>
+          <div className="mt-2 flex flex-wrap gap-1">
             {material.pros.map(p => (
-              <span key={p} className="text-[10px] bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full font-medium">
+              <span key={p} className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-600">
                 {p}
               </span>
             ))}
           </div>
-          <div className="mt-2 flex items-center gap-3 text-xs">
-            <span className="text-blue-600 font-bold">{formatCurrency(material.pricePerSquare)}<span className="text-slate-400 font-normal">/sq</span></span>
-            <span className="text-slate-400">·</span>
-            <span className="text-slate-500">{material.lifespan}</span>
-            <span className="text-slate-400">·</span>
-            <span className="text-slate-500">{material.warranty} warranty</span>
+          <div className="mt-2 flex flex-wrap gap-x-1.5 gap-y-0.5 text-[11px] leading-snug text-slate-500 sm:text-xs">
+            <span className="shrink-0 font-bold text-blue-600 tabular-nums">
+              {formatCurrency(material.pricePerSquare)}
+              <span className="font-normal text-slate-400">/sq</span>
+            </span>
+            <span aria-hidden className="hidden text-slate-300 sm:inline">
+              ·
+            </span>
+            <span className="tabular-nums">{material.lifespan}</span>
+            <span aria-hidden className="text-slate-300">
+              ·
+            </span>
+            <span className="tabular-nums">{material.warranty} warranty</span>
           </div>
         </div>
       </div>
@@ -78,54 +85,84 @@ export default function QuotePage({ address, coordinates, sections, projectId, o
   const [generating, setGenerating] = useState(false);
   const [quoteSaving, setQuoteSaving] = useState(false);
   const [quoteSaved, setQuoteSaved] = useState(false);
+  const [quotePersistError, setQuotePersistError] = useState<string | null>(null);
   const reportRef = useRef<HTMLDivElement>(null);
+
+  const clearDraftQuote = useCallback(() => {
+    setQuote(null);
+    setQuoteSaved(false);
+    setQuotePersistError(null);
+  }, []);
+
+  /** Persists one quote row to Neon (optional project link). Silent no-op if DB is not configured. */
+  const persistQuoteToDb = useCallback(
+    async (q: QuoteData) => {
+      if (!isDbConfigured()) return;
+      setQuoteSaving(true);
+      setQuotePersistError(null);
+      try {
+        await saveQuote(projectId, q);
+        setQuoteSaved(true);
+      } catch (err: unknown) {
+        console.error('[QuotePage] save quote failed', err);
+        setQuoteSaved(false);
+        const msg = err instanceof Error ? err.message : String(err);
+        setQuotePersistError(msg.length > 200 ? `${msg.slice(0, 200)}…` : msg);
+      } finally {
+        setQuoteSaving(false);
+      }
+    },
+    [projectId]
+  );
 
   const handleGenerate = () => {
     setGenerating(true);
-    setTimeout(() => {
-      const q = generateQuote(address, coordinates, sections, selectedMaterial);
-      setQuote(q);
-      setGenerating(false);
-      setTimeout(() => reportRef.current?.scrollIntoView({ behavior: 'smooth' }), 100);
+    setQuotePersistError(null);
+    window.setTimeout(() => {
+      void (async () => {
+        const q = generateQuote(address, coordinates, sections, selectedMaterial);
+        setQuote(q);
+        setQuoteSaved(false);
+        setGenerating(false);
+        await persistQuoteToDb(q);
+        requestAnimationFrame(() => {
+          reportRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        });
+      })();
     }, 1200);
   };
 
   const handlePrint = () => window.print();
 
-  const handleSaveQuote = async () => {
-    if (!quote) return;
-    setQuoteSaving(true);
-    try {
-      await saveQuote(projectId, quote);
-      setQuoteSaved(true);
-    } catch (err) {
-      console.error('Failed to save quote:', err);
-    } finally {
-      setQuoteSaving(false);
-    }
+  /** Used when auto-save failed or DB was offline; skips if already persisted. */
+  const handleManualSaveQuote = async () => {
+    if (!quote || quoteSaving || quoteSaved) return;
+    await persistQuoteToDb(quote);
   };
 
   const totalFlat = sections.reduce((s, r) => s + r.flatArea, 0);
   const totalActual = sections.reduce((s, r) => s + r.actualArea, 0);
 
   return (
-    <div className="max-w-4xl mx-auto px-3 sm:px-4 py-6 sm:py-8 pb-[max(1.5rem,env(safe-area-inset-bottom,0px))] animate-fade-in">
-      {/* Back */}
-      <button
-        type="button"
-        onClick={onBack}
-        className="touch-manipulation no-print flex items-center gap-2 min-h-[44px] -mx-1 px-2 text-slate-500 hover:text-slate-800 active:text-slate-900 text-sm font-medium mb-4 sm:mb-6 rounded-xl transition-colors"
-      >
-        <ArrowLeft size={18} className="shrink-0" aria-hidden />
-        Back to analysis
-      </button>
-
-      {/* Page title */}
-      <div className="mb-6 sm:mb-8 no-print">
-        <h1 className="text-xl sm:text-2xl font-bold text-slate-900 leading-tight">Generate Quote</h1>
-        <p className="text-slate-500 text-sm sm:text-base mt-1.5 leading-relaxed">
-          Select a roofing material and generate your itemized estimate
-        </p>
+    <div
+      className={`animate-fade-in mx-auto max-w-4xl px-3 pt-4 sm:px-4 sm:py-8 ${
+        quote
+          ? 'pb-[max(11rem,calc(env(safe-area-inset-bottom,0px)+9.5rem))] lg:pb-[max(1.5rem,env(safe-area-inset-bottom,0px))]'
+          : 'pb-[max(9rem,calc(env(safe-area-inset-bottom,0px)+7.5rem))] lg:pb-[max(1.5rem,env(safe-area-inset-bottom,0px))]'
+      }`}
+    >
+      <div className="no-print mb-5 space-y-2 sm:mb-8">
+        <button
+          type="button"
+          onClick={onBack}
+          className="tap-target touch-manipulation -ml-1 flex items-center gap-2 rounded-xl px-1 py-1 text-sm font-medium text-slate-500 hover:text-slate-800 active:text-slate-900"
+        >
+          <ArrowLeft size={18} className="shrink-0" aria-hidden />
+          Back to analysis
+        </button>
+        <h1 className="text-xl font-bold leading-tight text-slate-900 sm:text-2xl">Generate Quote</h1>
+        <p className="hidden text-slate-500 sm:block sm:text-base">Select a roofing material and generate your itemized estimate.</p>
+        <p className="text-xs leading-relaxed text-slate-500 sm:hidden">Tap a material, then use Generate below.</p>
       </div>
 
       {/* Measurement Summary */}
@@ -224,53 +261,110 @@ export default function QuotePage({ address, coordinates, sections, projectId, o
               />
             ))}
           </div>
-          <button
-            type="button"
-            onClick={handleGenerate}
-            className="btn-accent w-full justify-center text-base py-3.5 min-h-[52px] touch-manipulation"
-          >
-            {generating ? (
-              <>
-                <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                Calculating estimate…
-              </>
-            ) : (
-              <>
-                <DollarSign size={18} />
-                Generate Quote
-                <ChevronRight size={16} />
-              </>
-            )}
-          </button>
+          <div className="hidden lg:block">
+            <button
+              type="button"
+              onClick={handleGenerate}
+              disabled={generating}
+              className="btn-accent min-h-[52px] w-full justify-center py-3.5 text-base touch-manipulation disabled:opacity-80"
+            >
+              {generating ? (
+                <>
+                  <div className="w-4 h-4 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+                  Calculating estimate…
+                </>
+              ) : (
+                <>
+                  <DollarSign size={18} aria-hidden />
+                  Generate Quote
+                  <ChevronRight size={16} aria-hidden />
+                </>
+              )}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Mobile / tablet sticky: primary CTA always visible without scrolling past materials */}
+      {!quote && (
+        <div className="no-print pointer-events-none fixed inset-x-0 bottom-0 z-20 lg:hidden">
+          <div className="pointer-events-auto mx-auto max-w-4xl border-t border-orange-400/40 bg-gradient-to-t from-orange-600 to-orange-500 px-3 pb-[max(0.75rem,env(safe-area-inset-bottom,0px))] pt-3 shadow-[0_-12px_32px_-8px_rgba(15,23,42,0.25)]">
+            <button
+              type="button"
+              onClick={handleGenerate}
+              disabled={generating}
+              className="tap-target btn-accent inline-flex min-h-[52px] w-full items-center justify-center gap-2 rounded-xl px-4 py-3.5 text-base font-semibold disabled:opacity-80"
+            >
+              {generating ? (
+                <>
+                  <div className="w-4 h-4 animate-spin rounded-full border-2 border-white/30 border-t-white" aria-hidden />
+                  Calculating estimate…
+                </>
+              ) : (
+                <>
+                  <DollarSign size={18} aria-hidden />
+                  Generate Quote
+                  <ChevronRight size={18} aria-hidden />
+                </>
+              )}
+            </button>
+          </div>
         </div>
       )}
 
       {/* Quote Report */}
       {quote && (
-        <div ref={reportRef}>
-          {/* Actions bar */}
-          <div className="no-print flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-4">
-            <div className="flex items-center gap-2 text-green-600 font-semibold text-sm sm:text-base shrink-0">
+        <>
+          {quotePersistError && (
+            <div className="no-print mb-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+              <div className="flex gap-2">
+                <AlertTriangle size={18} className="mt-0.5 shrink-0 text-red-600" aria-hidden />
+                <div className="min-w-0 flex-1">
+                  <p className="font-semibold">Quote was not saved to the database</p>
+                  <p className="mt-1 whitespace-pre-wrap break-words text-red-900/90">{quotePersistError}</p>
+                  <button
+                    type="button"
+                    onClick={() => persistQuoteToDb(quote)}
+                    disabled={quoteSaving || !isDbConfigured()}
+                    className="tap-target mt-3 inline-flex items-center rounded-lg bg-red-700 px-3 py-2 text-xs font-semibold text-white disabled:opacity-50"
+                  >
+                    {quoteSaving ? 'Saving…' : 'Retry save'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {quote && !isDbConfigured() && (
+            <div className="no-print mb-4 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs leading-relaxed text-amber-900">
+              Quotes list syncing is disabled (database URL not configured on this deployment). Generated estimates still work locally; add{' '}
+              <code className="rounded bg-amber-100/80 px-1">VITE_DATABASE_URL</code> to save quotes to Neon.
+            </div>
+          )}
+
+          {/* Actions bar — wide screens */}
+          <div className="no-print mb-4 hidden lg:flex lg:flex-row lg:items-start lg:justify-between lg:gap-6">
+            <div className="flex shrink-0 items-center gap-2 text-base font-semibold text-green-600">
               <CheckCircle2 size={20} className="shrink-0" aria-hidden />
               Quote ready
             </div>
-            <div className="flex flex-col sm:flex-row gap-2 w-full sm:w-auto sm:justify-end">
+            <div className="flex flex-wrap justify-end gap-2">
               <button
                 type="button"
-                onClick={() => setQuote(null)}
-                className="btn-secondary text-sm py-3 min-h-[48px] touch-manipulation w-full sm:w-auto justify-center"
+                onClick={clearDraftQuote}
+                className="btn-secondary min-h-[48px] touch-manipulation justify-center py-3 text-sm"
               >
                 <RotateCcw size={16} aria-hidden />
                 Change material
               </button>
               <button
                 type="button"
-                onClick={handleSaveQuote}
+                onClick={handleManualSaveQuote}
                 disabled={quoteSaving || quoteSaved}
-                className="btn-secondary text-sm py-3 min-h-[48px] touch-manipulation w-full sm:w-auto justify-center disabled:opacity-60"
+                className="btn-secondary min-h-[48px] touch-manipulation justify-center py-3 text-sm disabled:opacity-60"
               >
                 {quoteSaving ? (
-                  <div className="w-4 h-4 border-2 border-slate-400/30 border-t-slate-600 rounded-full animate-spin" aria-hidden />
+                  <div className="h-4 w-4 animate-spin rounded-full border-2 border-slate-400/30 border-t-slate-600" aria-hidden />
                 ) : quoteSaved ? (
                   <CheckCircle2 size={16} className="text-green-500" aria-hidden />
                 ) : (
@@ -278,15 +372,21 @@ export default function QuotePage({ address, coordinates, sections, projectId, o
                 )}
                 {quoteSaved ? 'Saved' : 'Save quote'}
               </button>
-              <button type="button" onClick={handlePrint} className="btn-primary text-sm py-3 min-h-[48px] touch-manipulation w-full sm:w-auto justify-center">
+              <button type="button" onClick={handlePrint} className="btn-primary min-h-[48px] touch-manipulation justify-center py-3 text-sm">
                 <Printer size={16} aria-hidden />
                 Print / PDF
               </button>
             </div>
           </div>
 
+          {/* In-flow notice on phones (sticky bar handles actions) */}
+          <div className="no-print mb-3 flex items-center gap-2 text-sm font-semibold text-green-600 lg:hidden">
+            <CheckCircle2 size={18} className="shrink-0" aria-hidden />
+            Quote ready
+          </div>
+
           {/* Report card */}
-          <div className="card overflow-hidden" id="quote-report">
+          <div ref={reportRef} className="card overflow-hidden" id="quote-report">
             {/* Report header */}
             <div className="bg-gradient-to-br from-slate-900 to-slate-800 px-4 py-5 sm:px-8 sm:py-7 text-white">
               <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
@@ -439,18 +539,65 @@ export default function QuotePage({ address, coordinates, sections, projectId, o
             </div>
           </div>
 
-          {/* Bottom actions */}
-          <div className="no-print flex flex-col-reverse sm:flex-row sm:items-center sm:justify-between gap-3 mt-5 sm:mt-6">
-            <button type="button" onClick={onRestart} className="btn-secondary w-full sm:w-auto justify-center min-h-[48px] touch-manipulation">
+          {/* Bottom actions — PDF on desktop here; phones use sticky bar */}
+          <div className="no-print mt-5 flex flex-col-reverse gap-3 sm:mt-6 lg:flex-row lg:items-center lg:justify-between">
+            <button
+              type="button"
+              onClick={onRestart}
+              className="btn-secondary tap-target flex min-h-[48px] w-full touch-manipulation items-center justify-center lg:w-auto"
+            >
               <RotateCcw size={16} aria-hidden />
               Start new quote
             </button>
-            <button type="button" onClick={handlePrint} className="btn-primary w-full sm:w-auto justify-center min-h-[48px] touch-manipulation">
+            <button
+              type="button"
+              onClick={handlePrint}
+              className="btn-primary tap-target hidden min-h-[48px] touch-manipulation items-center justify-center lg:inline-flex"
+            >
               <Download size={16} aria-hidden />
               Download PDF
             </button>
           </div>
-        </div>
+
+          {/* Mobile sticky: PDF + material + save (always reachable) */}
+          <div className="no-print pointer-events-none fixed inset-x-0 bottom-0 z-20 lg:hidden">
+            <div className="pointer-events-auto mx-auto max-w-4xl border-t border-slate-200/90 bg-white/95 px-3 pt-3 backdrop-blur-sm shadow-[0_-10px_30px_-10px_rgba(15,23,42,0.2)]">
+              <div className="grid grid-cols-2 gap-2 pb-[max(0.5rem,env(safe-area-inset-bottom,0px))]">
+                <button
+                  type="button"
+                  onClick={handlePrint}
+                  className="btn-primary tap-target col-span-2 inline-flex min-h-[48px] w-full justify-center rounded-xl py-3 text-sm"
+                >
+                  <Printer size={16} aria-hidden />
+                  Print / PDF
+                </button>
+                <button
+                  type="button"
+                  onClick={clearDraftQuote}
+                  className="btn-secondary tap-target inline-flex min-h-[48px] items-center justify-center gap-2 rounded-xl py-3 text-xs"
+                >
+                  <RotateCcw size={14} aria-hidden />
+                  Material
+                </button>
+                <button
+                  type="button"
+                  onClick={handleManualSaveQuote}
+                  disabled={quoteSaving || quoteSaved}
+                  className="btn-secondary tap-target inline-flex min-h-[48px] items-center justify-center gap-2 rounded-xl py-3 text-xs disabled:opacity-60"
+                >
+                  {quoteSaving ? (
+                    <div className="h-4 w-4 animate-spin rounded-full border-2 border-slate-400/30 border-t-slate-600" aria-hidden />
+                  ) : quoteSaved ? (
+                    <CheckCircle2 size={14} className="text-green-600" aria-hidden />
+                  ) : (
+                    <Save size={14} aria-hidden />
+                  )}
+                  {quoteSaved ? 'Saved' : 'Save'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </>
       )}
     </div>
   );
