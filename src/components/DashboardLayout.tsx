@@ -85,13 +85,13 @@ export default function DashboardLayout({
       {/* Sidebar — drawer on small screens */}
       <aside
         className={`
-          fixed lg:static inset-y-0 left-0 z-50 w-[min(18.5rem,90vw)] lg:w-64
-          flex flex-col flex-shrink-0 bg-slate-900
+          fixed lg:static inset-y-0 left-0 z-50 w-[min(18.5rem,92vw)] max-w-[20rem] lg:w-64
+          flex flex-col flex-shrink-0 bg-slate-900 pl-[env(safe-area-inset-left,0px)]
           transform transition-transform duration-200 ease-out
           ${navOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'}
         `}
       >
-        <div className="flex items-center justify-between px-4 pt-4 pb-2 lg:px-6 lg:pt-6 lg:pb-0">
+        <div className="flex items-center justify-between px-4 pt-[max(1rem,env(safe-area-inset-top,0px))] pb-2 lg:px-6 lg:pt-6 lg:pb-0">
           <div className="flex items-center gap-3 min-w-0">
             <div className="w-9 h-9 bg-blue-600 rounded-lg flex items-center justify-center flex-shrink-0">
               <span className="text-white font-bold text-base">R</span>
@@ -100,7 +100,7 @@ export default function DashboardLayout({
           </div>
           <button
             type="button"
-            className="lg:hidden tap-target flex items-center justify-center rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 -mr-1"
+            className="lg:hidden tap-target touch-manipulation min-w-[44px] min-h-[44px] flex items-center justify-center rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 -mr-1"
             onClick={() => setNavOpen(false)}
             aria-label="Close menu"
           >
@@ -111,15 +111,15 @@ export default function DashboardLayout({
           <div className="border-b border-blue-600 mt-1" />
         </div>
 
-        <nav className="flex-1 px-3 sm:px-4 py-2 overflow-y-auto overscroll-contain">
-          <p className="text-slate-500 text-xs font-semibold tracking-wider uppercase px-2 mb-2">Main</p>
+        <nav className="flex-1 px-3 sm:px-4 py-2 overflow-y-auto overscroll-contain [-webkit-overflow-scrolling:touch]">
+          <p className="text-slate-500 text-[10px] sm:text-xs font-semibold tracking-wider uppercase px-2 mb-2">Main</p>
           <ul className="space-y-1 mb-6">
             {MAIN_NAV.map(item => (
               <li key={item.view}>
                 <button
                   type="button"
                   onClick={() => go(item.view)}
-                  className={`w-full flex items-center gap-3 px-3 py-3 min-h-[48px] rounded-lg text-sm font-medium transition-colors touch-manipulation ${
+                  className={`w-full flex items-center gap-3 px-3 py-3.5 min-h-[52px] rounded-xl text-sm font-medium transition-colors touch-manipulation active:opacity-90 ${
                     view === item.view
                       ? 'bg-blue-600 text-white'
                       : 'text-slate-400 hover:text-white hover:bg-slate-800 active:bg-slate-800'
@@ -132,14 +132,14 @@ export default function DashboardLayout({
             ))}
           </ul>
 
-          <p className="text-slate-500 text-xs font-semibold tracking-wider uppercase px-2 mb-2">System</p>
+          <p className="text-slate-500 text-[10px] sm:text-xs font-semibold tracking-wider uppercase px-2 mb-2">System</p>
           <ul className="space-y-1">
             {SYSTEM_NAV.map(item => (
               <li key={item.view}>
                 <button
                   type="button"
                   onClick={() => go(item.view)}
-                  className={`w-full flex items-center gap-3 px-3 py-3 min-h-[48px] rounded-lg text-sm font-medium transition-colors touch-manipulation ${
+                  className={`w-full flex items-center gap-3 px-3 py-3.5 min-h-[52px] rounded-xl text-sm font-medium transition-colors touch-manipulation active:opacity-90 ${
                     view === item.view
                       ? 'bg-blue-600 text-white'
                       : 'text-slate-400 hover:text-white hover:bg-slate-800 active:bg-slate-800'
@@ -153,9 +153,9 @@ export default function DashboardLayout({
           </ul>
         </nav>
 
-        <div className="px-3 sm:px-4 py-4 border-t border-slate-800 safe-pb">
+        <div className="px-3 sm:px-4 py-4 border-t border-slate-800 pb-[max(1rem,env(safe-area-inset-bottom,0px))]">
           <div className="flex items-center gap-3 mb-3 min-w-0">
-            <div className="w-10 h-10 bg-blue-600 rounded-full flex items-center justify-center flex-shrink-0">
+            <div className="w-11 h-11 bg-blue-600 rounded-full flex items-center justify-center flex-shrink-0">
               <span className="text-white text-sm font-bold">{user.avatar}</span>
             </div>
             <div className="min-w-0 flex-1">
@@ -166,7 +166,7 @@ export default function DashboardLayout({
           <button
             type="button"
             onClick={onLogout}
-            className="w-full flex items-center justify-center gap-2 px-3 py-3 min-h-[48px] rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 text-sm transition-colors touch-manipulation"
+            className="w-full flex items-center justify-center gap-2 px-3 py-3.5 min-h-[52px] rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 text-sm transition-colors touch-manipulation active:bg-slate-800/80"
           >
             <LogOut size={16} />
             Sign out
@@ -175,43 +175,43 @@ export default function DashboardLayout({
       </aside>
 
       <div className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden">
-        <header className="min-h-[3.5rem] sm:h-16 bg-white border-b border-slate-200 flex items-center justify-between gap-2 px-3 sm:px-6 flex-shrink-0 pt-[max(0.5rem,env(safe-area-inset-top,0px))] sm:pt-[max(0.75rem,env(safe-area-inset-top,0px))] lg:pt-0">
-          <div className="flex items-center gap-2 min-w-0 flex-1">
+        <header className="min-h-[3.25rem] sm:h-16 bg-white border-b border-slate-200 flex items-center justify-between gap-2 px-3 sm:px-6 flex-shrink-0 pr-[max(0.75rem,env(safe-area-inset-right,0px))] pt-[max(0.5rem,env(safe-area-inset-top,0px))] sm:pt-[max(0.75rem,env(safe-area-inset-top,0px))] lg:pt-0 lg:pr-6">
+          <div className="flex items-center gap-1.5 sm:gap-2 min-w-0 flex-1">
             <button
               type="button"
-              className="lg:hidden tap-target flex items-center justify-center rounded-lg text-slate-700 hover:bg-slate-100 -ml-1 flex-shrink-0"
+              className="lg:hidden tap-target touch-manipulation min-w-[44px] min-h-[44px] flex items-center justify-center rounded-xl text-slate-700 hover:bg-slate-100 active:bg-slate-200 -ml-1 flex-shrink-0"
               onClick={() => setNavOpen(true)}
               aria-label="Open navigation"
             >
               <Menu size={22} />
             </button>
-            <h1 className="text-base sm:text-lg font-semibold text-slate-900 truncate">{pageTitle}</h1>
+            <h1 className="text-[15px] sm:text-lg font-semibold text-slate-900 truncate">{pageTitle}</h1>
           </div>
-          <div className="flex items-center gap-1 sm:gap-3 flex-shrink-0">
+          <div className="flex items-center gap-0.5 sm:gap-2 flex-shrink-0">
             <button
               type="button"
-              className="tap-target flex items-center justify-center text-slate-400 hover:text-slate-600 rounded-lg"
+              className="tap-target touch-manipulation min-w-[44px] min-h-[44px] flex items-center justify-center text-slate-400 hover:text-slate-600 hover:bg-slate-50 rounded-xl active:bg-slate-100"
               aria-label="Notifications"
             >
               <Bell size={20} />
             </button>
-            <div className="flex items-center gap-2 min-w-0">
-              <div className="w-8 h-8 bg-blue-600 rounded-full flex items-center justify-center flex-shrink-0">
+            <div className="flex items-center gap-2 min-w-0 pl-1">
+              <div className="w-9 h-9 sm:w-8 sm:h-8 bg-blue-600 rounded-full flex items-center justify-center flex-shrink-0">
                 <span className="text-white text-xs font-bold">{user.avatar}</span>
               </div>
-              <span className="text-sm font-medium text-slate-700 max-w-[100px] sm:max-w-none truncate hidden sm:inline">{user.name}</span>
+              <span className="text-sm font-medium text-slate-700 max-w-[5.5rem] md:max-w-none truncate hidden sm:inline">{user.name}</span>
             </div>
           </div>
         </header>
 
         {dbBanner && (
-          <div className="flex-shrink-0 px-3 sm:px-6 py-2.5 sm:py-3 bg-amber-50 border-b border-amber-200 text-amber-950 text-xs sm:text-sm leading-relaxed">
+          <div className="flex-shrink-0 px-3 sm:px-6 py-2.5 sm:py-3 bg-amber-50 border-b border-amber-200 text-amber-950 text-[11px] sm:text-sm leading-snug sm:leading-relaxed">
             <strong className="font-semibold">Database:</strong> {dbBanner}
           </div>
         )}
 
         <main
-          className={`flex-1 min-h-0 safe-pb ${fullHeight ? 'overflow-hidden flex flex-col' : 'overflow-y-auto overscroll-y-contain'} bg-slate-50`}
+          className={`flex-1 min-h-0 pb-[env(safe-area-inset-bottom,0px)] ${fullHeight ? 'overflow-hidden flex flex-col' : 'overflow-y-auto overscroll-y-contain [-webkit-overflow-scrolling:touch]'} bg-slate-50`}
         >
           {children}
         </main>

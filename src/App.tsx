@@ -120,6 +120,15 @@ export default function App() {
     setView(user ? 'dashboard' : 'landing');
   };
 
+  /** From dashboard / projects — stay in app shell and open a fresh analysis tab. */
+  const handleNewAnalysisFromPanel = useCallback(() => {
+    setAddress('');
+    setCoordinates({ lat: 37.422, lng: -122.084 });
+    setRoofSections([]);
+    setProjectId(null);
+    setView('analysis');
+  }, []);
+
   const handleApiKeySave = (key: string) => {
     setApiKey(key);
     setShowKeySetup(false);
@@ -158,7 +167,7 @@ export default function App() {
       fullHeight={isAnalysisView}
       dbBanner={dbBanner}
     >
-      {view === 'dashboard' && <DashboardHome onNewAnalysis={() => setView('landing')} />}
+      {view === 'dashboard' && <DashboardHome onNewAnalysis={handleNewAnalysisFromPanel} />}
       {view === 'analysis' && (
         <AnalysisPage
           apiKey={apiKey}
@@ -180,7 +189,7 @@ export default function App() {
           />
         </div>
       )}
-      {view === 'projects' && <ProjectsPage onNewAnalysis={() => setView('landing')} />}
+      {view === 'projects' && <ProjectsPage onNewAnalysis={handleNewAnalysisFromPanel} />}
       {view === 'marketing' && <MarketingPage apiKey={apiKey} />}
       {view === 'quotes-list' && <QuotesListPage />}
       {view === 'reports' && <ReportsPage />}
