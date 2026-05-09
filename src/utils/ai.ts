@@ -4,8 +4,10 @@ import {
   HarmCategory,
   SchemaType,
 } from '@google/generative-ai';
-import type { GenerateContentResult, Schema } from '@google/generative-ai';
+import type { GenerateContentResult, Schema, Part } from '@google/generative-ai';
 import { readGeminiApiKey } from './googleAiKey';
+import type { SolarBuildingInsights } from './solar';
+import { azimuthLabel, formatImageryDate } from './solar';
 
 export interface RoofAnalysis {
   condition: 'Excellent' | 'Good' | 'Fair' | 'Poor' | 'Critical';
@@ -40,9 +42,20 @@ export const URGENCY_BG: Record<RoofAnalysis['urgency'], string> = {
   Urgent: 'bg-red-900 text-red-100',
 };
 
-const ANALYSIS_PROMPT = `You are an expert roofing inspector analyzing a satellite image of a rooftop.
+const ANALYSIS_PROMPT = `You are an expert roofing inspector analyzing a high-resolution aerial image of a rooftop.
 Analyze the visible roof condition and return a JSON object with the required fields (see schema).
 Assess based on: discoloration, missing/damaged shingles, moss/algae, sagging, flashing damage, debris, granule loss, storm damage. If image resolution is insufficient, use "Fair" as the condition.`;
+
+function buildSolarContext(solar: SolarBuildingInsights): string {
+  const segments = solar.roofSegmentStats
+    .map((s, i) => {
+      const areaSqFt = Math.round(s.stats.areaMeters2 * 10.7639);
+      return `  Segment ${i + 1}: ${areaSqFt} sq ft, pitch ~${Math.round(s.pitchDegrees)}°, facing ${azimuthLabel(s.azimuthDegrees)}`;
+    })
+    .join('\n');
+  const date = formatImageryDate(solar.imageryDate);
+  return `\n\nAdditional data from Google Solar API (imagery quality: ${solar.imageryQuality}, captured ${date}):\n${segments}\nUse this structural data alongside the image to improve accuracy of your assessment.`;
+}
 
 /** Forces valid JSON shape from the model (avoids markdown / prose around JSON). */
 const ROOF_RESPONSE_SCHEMA: Schema = {
@@ -180,16 +193,10 @@ function structuredOutputUnsupported(msg: string): boolean {
   return /responseSchema|responseMimeType|JSON schema|invalid argument|400\b|Unsupported/i.test(msg);
 }
 
-export async function analyzeRoofImage(imageUrl: string): Promise<RoofAnalysis> {
+/** Shared Gemini model loop — accepts pre-built parts array. */
+async function runGeminiLoop(parts: Part[]): Promise<RoofAnalysis> {
   const apiKey = readGeminiApiKey();
   if (!apiKey) throw new Error('GOOGLE_AI_KEY_MISSING');
-
-  const imageData = await urlToBase64(imageUrl);
-
-  const parts = [
-    { inlineData: { mimeType: imageData.mimeType || 'image/png', data: imageData.data } },
-    { text: ANALYSIS_PROMPT },
-  ];
 
   const genAI = new GoogleGenerativeAI(apiKey);
 
@@ -199,7 +206,6 @@ export async function analyzeRoofImage(imageUrl: string): Promise<RoofAnalysis> 
     temperature: 0.2,
     maxOutputTokens: 2048,
   };
-
   const plainJsonConfig = {
     responseMimeType: 'application/json' as const,
     temperature: 0.2,
@@ -225,12 +231,8 @@ export async function analyzeRoofImage(imageUrl: string): Promise<RoofAnalysis> 
         const msg = e instanceof Error ? e.message : String(e);
         if (msg.startsWith('GEMINI_BLOCKED') || msg.startsWith('GEMINI_FINISH')) throw e;
         if (isGeminiAuthError(msg)) throw new Error('GEMINI_AUTH_FAILED');
-        if (mode === 'structured' && structuredOutputUnsupported(msg)) {
-          continue;
-        }
-        if (isModelOrEndpointUnavailable(msg)) {
-          break;
-        }
+        if (mode === 'structured' && structuredOutputUnsupported(msg)) continue;
+        if (isModelOrEndpointUnavailable(msg)) break;
         throw e;
       }
     }
@@ -238,4 +240,34 @@ export async function analyzeRoofImage(imageUrl: string): Promise<RoofAnalysis> 
 
   if (lastError instanceof Error) throw lastError;
   throw new Error('GEMINI_MODEL_UNAVAILABLE');
+}
+
+/** Analyse a roof from a satellite/static-map URL (existing flow). */
+export async function analyzeRoofImage(
+  imageUrl: string,
+  solarInsights?: SolarBuildingInsights | null
+): Promise<RoofAnalysis> {
+  const imageData = await urlToBase64(imageUrl);
+  const prompt = solarInsights
+    ? ANALYSIS_PROMPT + buildSolarContext(solarInsights)
+    : ANALYSIS_PROMPT;
+  return runGeminiLoop([
+    { inlineData: { mimeType: imageData.mimeType || 'image/png', data: imageData.data } } as Part,
+    { text: prompt } as Part,
+  ]);
+}
+
+/** Analyse a roof from a user-uploaded File (drone photo, site photo, etc.). */
+export async function analyzeRoofImageFromFile(
+  file: File,
+  solarInsights?: SolarBuildingInsights | null
+): Promise<RoofAnalysis> {
+  const { data, mimeType } = await blobToBase64(file);
+  const prompt =
+    `${ANALYSIS_PROMPT}\n\nNote: This image was uploaded directly by the user (e.g. a drone photo or on-site photo). Analyze it with the same criteria — the image may show the roof at an angle or from street level; do your best to assess visible condition.` +
+    (solarInsights ? buildSolarContext(solarInsights) : '');
+  return runGeminiLoop([
+    { inlineData: { mimeType: mimeType || 'image/jpeg', data } } as Part,
+    { text: prompt } as Part,
+  ]);
 }

@@ -68,6 +68,7 @@ function resolveGeminiKey(mode: string): string {
 }
 
 const STATIC_MAP_URL_RE = /^https:\/\/maps\.googleapis\.com\/maps\/api\/staticmap\?/
+const SOLAR_URL_RE = /^https:\/\/solar\.googleapis\.com\//
 
 /** Dev-only: same-origin proxy so `fetch(staticMapUrl)` works (Google often omits browser CORS on Static Maps). */
 function staticMapProxyDevPlugin(): Plugin {
@@ -91,6 +92,39 @@ function staticMapProxyDevPlugin(): Plugin {
           const upstream = await fetch(target)
           res.statusCode = upstream.status
           res.setHeader('Content-Type', upstream.headers.get('content-type') || 'image/png')
+          const buf = Buffer.from(await upstream.arrayBuffer())
+          return res.end(buf)
+        } catch {
+          res.statusCode = 502
+          return res.end('proxy error')
+        }
+      })
+    },
+  }
+}
+
+/** Dev-only: proxy for Google Solar API (handles CORS in local dev). */
+function solarProxyDevPlugin(): Plugin {
+  return {
+    name: 'roofiq-proxy-solar',
+    configureServer(server) {
+      server.middlewares.use('/api/proxy-solar', async (req, res, next) => {
+        res.setHeader('Access-Control-Allow-Origin', '*')
+        if (req.method === 'OPTIONS') {
+          res.statusCode = 204
+          return res.end()
+        }
+        if (req.method !== 'GET') return next()
+        try {
+          const host = req.headers.host || 'localhost'
+          const target = new URL(req.url || '', `http://${host}`).searchParams.get('u')
+          if (!target || !SOLAR_URL_RE.test(target)) {
+            res.statusCode = 400
+            return res.end('bad request')
+          }
+          const upstream = await fetch(target)
+          res.statusCode = upstream.status
+          res.setHeader('Content-Type', upstream.headers.get('content-type') || 'application/json')
           const buf = Buffer.from(await upstream.arrayBuffer())
           return res.end(buf)
         } catch {
@@ -132,7 +166,7 @@ export default defineConfig(({ mode }) => {
   }
 
   return {
-    plugins: [react(), staticMapProxyDevPlugin()],
+    plugins: [react(), staticMapProxyDevPlugin(), solarProxyDevPlugin()],
     envDir: projectRoot,
     define: {
       __ROOFIQ_DATABASE_URL__: JSON.stringify(resolvedDbUrl),

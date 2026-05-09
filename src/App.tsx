@@ -203,6 +203,7 @@ export default function App() {
             coordinates={coordinates}
             sections={roofSections}
             projectId={projectId}
+            mapsApiKey={apiKey}
             onBack={() => setView('analysis')}
             onRestart={handleRestart}
           />

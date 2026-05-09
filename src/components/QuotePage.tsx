@@ -19,14 +19,17 @@ import {
   MapPin,
   Save,
   AlertTriangle,
+  FileText,
 } from 'lucide-react';
 import { saveQuote, isDbConfigured } from '../utils/db';
+import RoofReport from './RoofReport';
 
 interface QuotePageProps {
   address: string;
   coordinates: Coordinates;
   sections: Omit<RoofSection, 'polygon'>[];
   projectId: string | null;
+  mapsApiKey?: string;
   onBack: () => void;
   onRestart: () => void;
 }
@@ -79,13 +82,14 @@ function MaterialCard({ material, selected, onSelect }: { material: Material; se
   );
 }
 
-export default function QuotePage({ address, coordinates, sections, projectId, onBack, onRestart }: QuotePageProps) {
+export default function QuotePage({ address, coordinates, sections, projectId, mapsApiKey = '', onBack, onRestart }: QuotePageProps) {
   const [selectedMaterial, setSelectedMaterial] = useState<Material>(MATERIALS[0]);
   const [quote, setQuote] = useState<QuoteData | null>(null);
   const [generating, setGenerating] = useState(false);
   const [quoteSaving, setQuoteSaving] = useState(false);
   const [quoteSaved, setQuoteSaved] = useState(false);
   const [quotePersistError, setQuotePersistError] = useState<string | null>(null);
+  const [showReport, setShowReport] = useState(false);
   const reportRef = useRef<HTMLDivElement>(null);
 
   const clearDraftQuote = useCallback(() => {
@@ -372,6 +376,14 @@ export default function QuotePage({ address, coordinates, sections, projectId, o
                 )}
                 {quoteSaved ? 'Saved' : 'Save quote'}
               </button>
+              <button
+                type="button"
+                onClick={() => setShowReport(true)}
+                className="btn-secondary min-h-[48px] touch-manipulation justify-center py-3 text-sm border-blue-200 text-blue-700 hover:bg-blue-50"
+              >
+                <FileText size={16} aria-hidden />
+                Measurement Report
+              </button>
               <button type="button" onClick={handlePrint} className="btn-primary min-h-[48px] touch-manipulation justify-center py-3 text-sm">
                 <Printer size={16} aria-hidden />
                 Print / PDF
@@ -559,16 +571,24 @@ export default function QuotePage({ address, coordinates, sections, projectId, o
             </button>
           </div>
 
-          {/* Mobile sticky: PDF + material + save (always reachable) */}
+          {/* Mobile sticky: PDF + report + material + save */}
           <div className="no-print pointer-events-none fixed inset-x-0 bottom-0 z-20 lg:hidden">
             <div className="pointer-events-auto mx-auto max-w-4xl border-t border-slate-200/90 bg-white/95 px-3 pt-3 backdrop-blur-sm shadow-[0_-10px_30px_-10px_rgba(15,23,42,0.2)]">
               <div className="grid grid-cols-2 gap-2 pb-[max(0.5rem,env(safe-area-inset-bottom,0px))]">
                 <button
                   type="button"
-                  onClick={handlePrint}
-                  className="btn-primary tap-target col-span-2 inline-flex min-h-[48px] w-full justify-center rounded-xl py-3 text-sm"
+                  onClick={() => setShowReport(true)}
+                  className="tap-target col-span-2 inline-flex min-h-[48px] w-full items-center justify-center gap-2 rounded-xl bg-blue-600 py-3 text-sm font-semibold text-white"
                 >
-                  <Printer size={16} aria-hidden />
+                  <FileText size={16} aria-hidden />
+                  Measurement Report
+                </button>
+                <button
+                  type="button"
+                  onClick={handlePrint}
+                  className="btn-primary tap-target inline-flex min-h-[48px] items-center justify-center gap-2 rounded-xl py-3 text-xs"
+                >
+                  <Printer size={14} aria-hidden />
                   Print / PDF
                 </button>
                 <button
@@ -579,25 +599,22 @@ export default function QuotePage({ address, coordinates, sections, projectId, o
                   <RotateCcw size={14} aria-hidden />
                   Material
                 </button>
-                <button
-                  type="button"
-                  onClick={handleManualSaveQuote}
-                  disabled={quoteSaving || quoteSaved}
-                  className="btn-secondary tap-target inline-flex min-h-[48px] items-center justify-center gap-2 rounded-xl py-3 text-xs disabled:opacity-60"
-                >
-                  {quoteSaving ? (
-                    <div className="h-4 w-4 animate-spin rounded-full border-2 border-slate-400/30 border-t-slate-600" aria-hidden />
-                  ) : quoteSaved ? (
-                    <CheckCircle2 size={14} className="text-green-600" aria-hidden />
-                  ) : (
-                    <Save size={14} aria-hidden />
-                  )}
-                  {quoteSaved ? 'Saved' : 'Save'}
-                </button>
               </div>
             </div>
           </div>
         </>
+      )}
+
+      {/* Measurement Report Modal */}
+      {showReport && (
+        <RoofReport
+          address={address}
+          coordinates={coordinates}
+          sections={sections}
+          mapsApiKey={mapsApiKey}
+          quoteData={quote}
+          onClose={() => setShowReport(false)}
+        />
       )}
     </div>
   );
