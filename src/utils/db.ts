@@ -1,6 +1,7 @@
 import { neon } from '@neondatabase/serverless';
 import { Coordinates } from '../types';
 import { QuoteData } from '../types';
+import type { RoofStructureAnalysis } from './roofStructure';
 
 function trimDatabaseUrl(raw: unknown): string | undefined {
   if (raw == null || typeof raw !== 'string') return undefined;
@@ -63,6 +64,15 @@ export async function initDb() {
     )
   `;
   await neonSql`
+    CREATE TABLE IF NOT EXISTS roof_structure_reports (
+      id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      project_id   UUID NOT NULL UNIQUE REFERENCES projects(id) ON DELETE CASCADE,
+      analysis     JSONB NOT NULL,
+      created_at   TIMESTAMPTZ DEFAULT NOW(),
+      updated_at   TIMESTAMPTZ DEFAULT NOW()
+    )
+  `;
+  await neonSql`
     CREATE TABLE IF NOT EXISTS quotes (
       id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       project_id       UUID REFERENCES projects(id) ON DELETE CASCADE,
@@ -102,7 +112,8 @@ export async function saveProject(
   address: string,
   coordinates: Coordinates,
   snapshots: ProjectSnapshot[],
-  sections: SectionToSave[]
+  sections: SectionToSave[],
+  roofStructure?: RoofStructureAnalysis | null
 ): Promise<string> {
   const sql = requireNeon();
   const primaryUrl = snapshots[0]?.url ?? null;
@@ -138,7 +149,28 @@ export async function saveProject(
     `;
   }
 
+  if (roofStructure) {
+    await sql`
+      INSERT INTO roof_structure_reports (project_id, analysis, updated_at)
+      VALUES (${projectId}, ${JSON.stringify(roofStructure)}, NOW())
+      ON CONFLICT (project_id)
+      DO UPDATE SET analysis = EXCLUDED.analysis, updated_at = NOW()
+    `;
+  }
+
   return projectId;
+}
+
+export async function getProjectRoofStructure(projectId: string): Promise<RoofStructureAnalysis | null> {
+  const sql = requireNeon();
+  const rows = await sql`
+    SELECT analysis
+    FROM roof_structure_reports
+    WHERE project_id = ${projectId}
+    LIMIT 1
+  `;
+  if (!rows[0]?.analysis) return null;
+  return rows[0].analysis as RoofStructureAnalysis;
 }
 
 export async function getProjectSnapshots(projectId: string) {

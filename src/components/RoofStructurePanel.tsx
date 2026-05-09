@@ -106,17 +106,20 @@ export default function RoofStructurePanel({ analysis, onClose, onApply }: RoofS
   const [editableFacets, setEditableFacets] = useState<RoofStructureFacet[]>(analysis.facets);
   const [edited, setEdited] = useState(false);
   const [editLog, setEditLog] = useState<EdgeEditLogEntry[]>([]);
+  const [reviewed, setReviewed] = useState<boolean>(analysis.review?.reviewed ?? false);
 
   useEffect(() => {
     setEditableFacets(analysis.facets);
     setEdited(false);
     setEditLog([]);
+    setReviewed(analysis.review?.reviewed ?? false);
   }, [analysis]);
 
   const editableMeasurements = useMemo(
     () => recomputeMeasurementsFromFacets(editableFacets),
     [editableFacets]
   );
+  const reviewDirty = reviewed !== (analysis.review?.reviewed ?? false);
 
   const m = editableMeasurements;
   const confidencePercent = Math.round((analysis.confidence.overall || 0) * 100);
@@ -243,9 +246,21 @@ export default function RoofStructurePanel({ analysis, onClose, onApply }: RoofS
             </button>
             <button
               type="button"
-              disabled={!edited}
+              onClick={() => setReviewed(prev => !prev)}
+              className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs ${
+                reviewed
+                  ? 'border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100'
+                  : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-100'
+              }`}
+            >
+              <Check size={12} />
+              {reviewed ? 'Reviewed' : 'Mark reviewed'}
+            </button>
+            <button
+              type="button"
+              disabled={!edited && !reviewDirty}
               onClick={() => {
-                if (!edited) return;
+                if (!edited && !reviewDirty) return;
                 const editSummary = editLog.length
                   ? `Manual edge edits applied (${editLog.length} changes).`
                   : 'Manual edge edits applied.';
@@ -255,8 +270,13 @@ export default function RoofStructurePanel({ analysis, onClose, onApply }: RoofS
                   measurements: editableMeasurements,
                   notes: [
                     ...analysis.notes,
-                    editSummary,
+                    ...(editLog.length > 0 ? [editSummary] : []),
                   ],
+                  review: {
+                    reviewed,
+                    reviewedAtIso: reviewed ? new Date().toISOString() : undefined,
+                    editsCount: (analysis.review?.editsCount ?? 0) + editLog.length,
+                  },
                 };
                 onApply?.(next);
                 setEdited(false);

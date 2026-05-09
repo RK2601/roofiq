@@ -717,7 +717,7 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
           return pts;
         })(),
       }));
-      projectId = await saveProject(address, coordinates, snapshots, sectionsToSave);
+      projectId = await saveProject(address, coordinates, snapshots, sectionsToSave, roofStructure ?? roofStructurePreview);
       setSaveStatus('saved');
     } catch (err) {
       console.error('Failed to save project:', err);

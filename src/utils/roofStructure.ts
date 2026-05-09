@@ -134,6 +134,12 @@ export interface RoofStructureAnalysis {
   qualityFlags: QualityFlag[];
   dataSources: DataSourceMeta;
   aiCuesUsed?: AiRoofCue[];
+  review?: {
+    reviewed: boolean;
+    reviewedAtIso?: string;
+    reviewerNote?: string;
+    editsCount?: number;
+  };
   notes: string[];
   svg: {
     viewBox: string;
@@ -623,16 +629,104 @@ function computeImageryScore(quality: 'HIGH' | 'MEDIUM' | 'LOW'): number {
   return 0.4;
 }
 
+function vecLength(v: Vec2): number {
+  return Math.hypot(v.x, v.y);
+}
+
+function normalize(v: Vec2): Vec2 {
+  const len = vecLength(v);
+  if (len === 0) return { x: 0, y: 0 };
+  return { x: v.x / len, y: v.y / len };
+}
+
+function edgeSegmentMeters(facet: RoofFacet, edge: FacetEdge): { p1: Vec2; p2: Vec2 } {
+  const center = facet.centroidMeters;
+  const halfRunM = (facet.groundRunFt / M2FT) / 2;
+  const halfWidthM = (facet.widthFt / M2FT) / 2;
+  const edgeLenM = edge.lengthFt / M2FT;
+
+  if (edge.side === 'top' || edge.side === 'bottom') {
+    const sideOffset = edge.side === 'top' ? -halfRunM : halfRunM;
+    const edgeCenter: Vec2 = {
+      x: center.x + facet.slopeDir.x * sideOffset,
+      y: center.y + facet.slopeDir.y * sideOffset,
+    };
+    const dir = normalize(facet.perpDir);
+    return {
+      p1: {
+        x: edgeCenter.x - dir.x * (edgeLenM / 2),
+        y: edgeCenter.y - dir.y * (edgeLenM / 2),
+      },
+      p2: {
+        x: edgeCenter.x + dir.x * (edgeLenM / 2),
+        y: edgeCenter.y + dir.y * (edgeLenM / 2),
+      },
+    };
+  }
+
+  const sideOffset = edge.side === 'left' ? -halfWidthM : halfWidthM;
+  const edgeCenter: Vec2 = {
+    x: center.x + facet.perpDir.x * sideOffset,
+    y: center.y + facet.perpDir.y * sideOffset,
+  };
+  const dir = normalize(facet.slopeDir);
+  return {
+    p1: {
+      x: edgeCenter.x - dir.x * (edgeLenM / 2),
+      y: edgeCenter.y - dir.y * (edgeLenM / 2),
+    },
+    p2: {
+      x: edgeCenter.x + dir.x * (edgeLenM / 2),
+      y: edgeCenter.y + dir.y * (edgeLenM / 2),
+    },
+  };
+}
+
+function segmentMidpoint(p1: Vec2, p2: Vec2): Vec2 {
+  return { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
+}
+
+function orientationSimilarity(a1: Vec2, a2: Vec2, b1: Vec2, b2: Vec2): number {
+  const va = normalize({ x: a2.x - a1.x, y: a2.y - a1.y });
+  const vb = normalize({ x: b2.x - b1.x, y: b2.y - b1.y });
+  return Math.abs(dot(va, vb));
+}
+
 function computeAiAgreement(facets: RoofFacet[], aiCues?: AiRoofCue[]): number {
   if (!aiCues || aiCues.length === 0) return 0.5;
   if (facets.length === 0) return 0;
 
-  const edgeTypes = new Set<EdgeKind>();
-  facets.forEach(f => f.edges.forEach(e => edgeTypes.add(e.kind)));
-  const matched = aiCues.filter(cue => edgeTypes.has(cue.type)).length;
-  const cueMatchRatio = matched / aiCues.length;
-  const cueConfidenceAvg = aiCues.reduce((sum, cue) => sum + cue.confidence, 0) / aiCues.length;
-  return clamp(cueMatchRatio * 0.7 + cueConfidenceAvg * 0.3, 0, 1);
+  const edgeSegments = facets.flatMap(facet =>
+    facet.edges.map(edge => ({
+      kind: edge.kind,
+      confidence: edge.confidence,
+      ...edgeSegmentMeters(facet, edge),
+    }))
+  );
+
+  if (edgeSegments.length === 0) return 0.25;
+
+  let aggregate = 0;
+  for (const cue of aiCues) {
+    const cueMid = segmentMidpoint(cue.p1, cue.p2);
+    const candidates = edgeSegments.filter(edge => edge.kind === cue.type);
+    if (candidates.length === 0) {
+      aggregate += 0.2 * cue.confidence;
+      continue;
+    }
+
+    let best = 0;
+    for (const edge of candidates) {
+      const edgeMid = segmentMidpoint(edge.p1, edge.p2);
+      const dist = Math.hypot(cueMid.x - edgeMid.x, cueMid.y - edgeMid.y);
+      const distScore = clamp(1 - dist / 10, 0, 1); // 10m decay
+      const dirScore = orientationSimilarity(cue.p1, cue.p2, edge.p1, edge.p2);
+      const score = 0.45 * dirScore + 0.4 * distScore + 0.15 * edge.confidence;
+      if (score > best) best = score;
+    }
+    aggregate += best * cue.confidence;
+  }
+  return clamp(aggregate / aiCues.length, 0, 1);
 }
 
 function toConfidenceBand(overall: number): ConfidenceBand {
@@ -787,6 +881,7 @@ function emptyAnalysis(context?: RoofStructureContext): RoofStructureAnalysis {
       sourceTimestampIso: new Date().toISOString(),
     },
     aiCuesUsed: context?.aiCues,
+    review: { reviewed: false, editsCount: 0 },
     notes: ['No segments available for reconstruction.'],
     svg: { viewBox: '0 0 640 360', width: 640, height: 360, pxPerFt: LAYOUT_PX_PER_FT },
   };
@@ -816,6 +911,7 @@ export function analyzeSolarSegments(
     qualityFlags: flags,
     dataSources,
     aiCuesUsed: context?.aiCues,
+    review: { reviewed: false, editsCount: 0 },
     notes: [
       'Geometry and edge classes are estimated from Solar segment boxes.',
       'Low-confidence reports should be reviewed with additional imagery.',
