@@ -175,7 +175,7 @@ export default function App() {
 
   /** Flex column + overflow-hidden on main so children can use flex-1 min-h-0 and scroll (mobile Safari). */
   const fullHeightMain =
-    view === 'analysis' || view === 'marketing' || view === 'quote' || view === 'projects';
+    view === 'analysis' || view === 'marketing' || view === 'quote' || view === 'projects' || view === 'quotes-list';
 
   return (
     <DashboardLayout
@@ -214,7 +214,11 @@ export default function App() {
         </div>
       )}
       {view === 'marketing' && <MarketingPage apiKey={apiKey} />}
-      {view === 'quotes-list' && <QuotesListPage />}
+      {view === 'quotes-list' && (
+        <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-y-contain [-webkit-overflow-scrolling:touch]">
+          <QuotesListPage />
+        </div>
+      )}
       {view === 'reports' && <ReportsPage />}
       {view === 'settings' && (
         <SettingsPage apiKey={apiKey} user={user} onNeedApiKey={() => setShowKeySetup(true)} onLogout={handleLogout} />
