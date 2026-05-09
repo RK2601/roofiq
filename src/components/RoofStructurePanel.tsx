@@ -238,6 +238,9 @@ export default function RoofStructurePanel({ analysis, onClose, onApply }: RoofS
                 ? ` · quality ${Math.round(analysis.dataSources.heightQuality * 100)}%`
                 : ''}
             </p>
+            <p className="text-[11px] text-slate-500">
+              AI cues: {analysis.aiCuesUsed?.length ?? 0} lines
+            </p>
             {analysis.qualityFlags.length > 0 && (
               <div className="mt-2 space-y-1">
                 {analysis.qualityFlags.map(flag => (

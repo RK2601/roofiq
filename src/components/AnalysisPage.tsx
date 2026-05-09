@@ -52,6 +52,7 @@ import {
 import { computeRoofMeasurements, formatFt } from '../utils/measurements';
 import { analyzeSolarSegments, type RoofStructureAnalysis } from '../utils/roofStructure';
 import { buildHeightModel, type HeightModel } from '../utils/heightModel';
+import { deriveHeuristicRoofCues } from '../utils/roofVision';
 import RoofStructurePanel from './RoofStructurePanel';
 
 interface AnalysisPageProps {
@@ -98,10 +99,12 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
     const segments = solarData?.roofSegmentStats ?? [];
     if (solarStatus !== 'ready' || !solarData || segments.length === 0) return null;
     const model = heightModel ?? buildHeightModel(segments, solarDataLayers);
+    const aiCues = deriveHeuristicRoofCues(segments, solarData.center);
     return analyzeSolarSegments(segments, solarData.center, {
       imageryQuality: solarData.imageryQuality,
       hasDsm: !!solarDataLayers?.dsmUrl,
       heightModel: model,
+      aiCues,
     });
   }, [solarData, solarStatus, solarDataLayers, heightModel]);
 
@@ -934,6 +937,12 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
               <p className="text-[10px] text-amber-800/80">
                 Height source: {heightModel?.source === 'dsm' ? 'DSM (data layers)' : heightModel?.source === 'solar-plane' ? 'Solar plane heights' : 'none'}
               </p>
+              <p className="text-[10px] text-amber-800/70">
+                AI cues: {(() => {
+                  const segs = solarData.roofSegmentStats ?? [];
+                  return deriveHeuristicRoofCues(segs, solarData.center).length;
+                })()} inferred lines
+              </p>
               {mapLoaded && (solarData.roofSegmentStats ?? []).length > 0 && (
                 <div className="space-y-1.5">
                   <button
@@ -950,11 +959,13 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
                       const segments = solarData.roofSegmentStats ?? [];
                       if (segments.length === 0) return;
                       if (!roofStructure) {
+                        const aiCues = deriveHeuristicRoofCues(segments, solarData.center);
                         setRoofStructure(
                           analyzeSolarSegments(segments, solarData.center, {
                             imageryQuality: solarData.imageryQuality,
                             hasDsm: !!solarDataLayers?.dsmUrl,
                             heightModel: heightModel ?? buildHeightModel(segments, solarDataLayers),
+                            aiCues,
                           })
                         );
                       }
