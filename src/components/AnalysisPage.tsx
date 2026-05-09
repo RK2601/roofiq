@@ -28,10 +28,26 @@ import {
   ChevronUp,
   Search,
   MapPin,
+  Sun,
+  Zap,
+  Map,
+  Navigation,
+  Camera,
+  Upload,
+  X,
+  ZoomIn,
 } from 'lucide-react';
 import { saveProject } from '../utils/db';
-import { analyzeRoofImage, RoofAnalysis, CONDITION_BG, URGENCY_BG, CONDITION_COLORS } from '../utils/ai';
+import { analyzeRoofImage, analyzeRoofImageFromFile, RoofAnalysis, CONDITION_BG, URGENCY_BG, CONDITION_COLORS } from '../utils/ai';
 import { readGeminiApiKey } from '../utils/googleAiKey';
+import {
+  fetchBuildingInsights,
+  segmentToBoundingPolygon,
+  pitchDegreesToOption,
+  formatImageryDate,
+  type SolarBuildingInsights,
+} from '../utils/solar';
+import { computeRoofMeasurements, formatFt } from '../utils/measurements';
 
 interface AnalysisPageProps {
   apiKey: string;
@@ -64,6 +80,21 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
   const hasGeminiKey = !!readGeminiApiKey();
   const labelsRef = useRef<google.maps.InfoWindow[]>([]);
   const searchInputRef = useRef<HTMLInputElement>(null);
+
+  const [solarStatus, setSolarStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
+  const [solarData, setSolarData] = useState<SolarBuildingInsights | null>(null);
+  const [solarError, setSolarError] = useState<string | null>(null);
+
+  // Map view controls
+  const [mapType, setMapType] = useState<'satellite' | 'hybrid'>('satellite');
+  const [showStreetView, setShowStreetView] = useState(false);
+  const [streetViewAvailable, setStreetViewAvailable] = useState(false);
+  const streetViewRef = useRef<HTMLDivElement>(null);
+  const panoramaRef = useRef<google.maps.StreetViewPanorama | null>(null);
+
+  // Photo upload for AI analysis
+  const [uploadedPhoto, setUploadedPhoto] = useState<{ file: File; previewUrl: string } | null>(null);
+  const photoInputRef = useRef<HTMLInputElement>(null);
 
   // Keep ref in sync
   useEffect(() => {
@@ -265,6 +296,67 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [apiKey, coordinates.lat, coordinates.lng]);
 
+  // Auto-fetch Solar building insights whenever coordinates change
+  useEffect(() => {
+    if (!apiKey) return;
+    setSolarStatus('loading');
+    setSolarData(null);
+    setSolarError(null);
+    fetchBuildingInsights(coordinates.lat, coordinates.lng, apiKey)
+      .then(data => {
+        setSolarData(data);
+        setSolarStatus('ready');
+      })
+      .catch(err => {
+        const msg = err instanceof Error ? err.message : String(err);
+        setSolarError(msg.includes('404') ? 'No Solar data for this address' : msg.slice(0, 100));
+        setSolarStatus('error');
+      });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [coordinates.lat, coordinates.lng]);
+
+  // Sync map type (satellite ↔ hybrid)
+  useEffect(() => {
+    if (!mapInstanceRef.current) return;
+    mapInstanceRef.current.setMapTypeId(mapType);
+  }, [mapType]);
+
+  // Init Street View panorama once map is loaded
+  useEffect(() => {
+    if (!mapLoaded || !streetViewRef.current) return;
+    if (panoramaRef.current) return; // already initialized
+
+    const pano = new google.maps.StreetViewPanorama(streetViewRef.current, {
+      position: coordinates,
+      pov: { heading: 0, pitch: 0 },
+      visible: false,
+      addressControl: false,
+      fullscreenControl: false,
+      motionTracking: false,
+      motionTrackingControl: false,
+      zoomControl: false,
+      panControl: true,
+    });
+    panoramaRef.current = pano;
+    mapInstanceRef.current?.setStreetView(pano);
+
+    // Check if street view is available at this location
+    const svc = new google.maps.StreetViewService();
+    svc.getPanorama({ location: coordinates, radius: 100 }, (_data, status) => {
+      setStreetViewAvailable(status === google.maps.StreetViewStatus.OK);
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mapLoaded]);
+
+  // Show / hide Street View pane and update panorama position on coord change
+  useEffect(() => {
+    if (!panoramaRef.current) return;
+    panoramaRef.current.setVisible(showStreetView);
+    if (showStreetView) {
+      panoramaRef.current.setPosition(coordinates);
+    }
+  }, [showStreetView, coordinates]);
+
   useEffect(() => {
     if (!mapLoaded || !searchInputRef.current) return;
     if (!google.maps?.places) return;
@@ -368,6 +460,82 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
     mapInstanceRef.current.setZoom(20);
   };
 
+  const importSolarSegments = useCallback(() => {
+    if (!solarData || !mapInstanceRef.current) return;
+
+    // Clear existing sections
+    sectionsRef.current.forEach(s => {
+      if (s.polygon) {
+        google.maps.event.clearInstanceListeners(s.polygon);
+        s.polygon.setMap(null);
+      }
+    });
+    labelsRef.current.forEach(l => l.close());
+    labelsRef.current = [];
+    setSections([]);
+
+    solarData.roofSegmentStats.forEach((segment, idx) => {
+      const path = segmentToBoundingPolygon(segment);
+      const color = SECTION_COLORS[idx % SECTION_COLORS.length];
+      const pitchOption = pitchDegreesToOption(segment.pitchDegrees);
+      const flatAreaSqFt = segment.stats.areaMeters2 * 10.7639;
+
+      const polygon = new google.maps.Polygon({
+        paths: path,
+        fillColor: color,
+        strokeColor: color,
+        fillOpacity: 0.3,
+        strokeWeight: 2.5,
+        editable: true,
+        draggable: false,
+        zIndex: 1,
+        map: mapInstanceRef.current,
+      });
+
+      const id = `solar-${Date.now()}-${idx}`;
+
+      google.maps.event.addListener(polygon.getPath(), 'set_at', () => {
+        const newArea = google.maps.geometry.spherical.computeArea(polygon.getPath()) * 10.7639;
+        setSections(prev =>
+          prev.map(s =>
+            s.id === id
+              ? { ...s, flatArea: newArea, actualArea: computeActualArea(newArea, s.pitchMultiplier) }
+              : s
+          )
+        );
+      });
+      google.maps.event.addListener(polygon.getPath(), 'insert_at', () => {
+        const newArea = google.maps.geometry.spherical.computeArea(polygon.getPath()) * 10.7639;
+        setSections(prev =>
+          prev.map(s =>
+            s.id === id
+              ? { ...s, flatArea: newArea, actualArea: computeActualArea(newArea, s.pitchMultiplier) }
+              : s
+          )
+        );
+      });
+      polygon.addListener('click', () => setSelectedSection(id));
+
+      const newSection: RoofSection = {
+        id,
+        name: `Section ${idx + 1}`,
+        polygon,
+        flatArea: flatAreaSqFt,
+        pitch: pitchOption.value,
+        pitchMultiplier: pitchOption.multiplier,
+        actualArea: computeActualArea(flatAreaSqFt, pitchOption.multiplier),
+        color,
+      };
+
+      setSections(prev => {
+        const updated = [...prev, newSection];
+        sectionsRef.current = updated;
+        return updated;
+      });
+      setTimeout(() => updateLabel(newSection), 50);
+    });
+  }, [solarData, updateLabel]);
+
   const totalFlat = sections.reduce((s, r) => s + r.flatArea, 0);
   const totalActual = sections.reduce((s, r) => s + r.actualArea, 0);
   const totalSquares = Math.ceil((totalActual * 1.12) / 100);
@@ -394,14 +562,33 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
     return base + paths.map(p => `&path=${encodeURIComponent(p)}`).join('');
   };
 
-  const analyzeWithAI = async () => {
+  const handlePhotoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const previewUrl = URL.createObjectURL(file);
+    setUploadedPhoto(prev => {
+      if (prev) URL.revokeObjectURL(prev.previewUrl);
+      return { file, previewUrl };
+    });
+    setAiStatus('idle');
+    setAiResult(null);
+    setAiError(null);
+    setAiExpanded(true);
+  };
+
+  const analyzeWithAI = async (useUploadedPhoto = false) => {
     setAiStatus('analyzing');
     setAiResult(null);
     setAiError(null);
     setAiExpanded(true);
-    const url = `https://maps.googleapis.com/maps/api/staticmap?center=${coordinates.lat},${coordinates.lng}&zoom=20&size=640x640&maptype=satellite&scale=2&key=${apiKey}`;
     try {
-      const result = await analyzeRoofImage(url);
+      let result: RoofAnalysis;
+      if (useUploadedPhoto && uploadedPhoto) {
+        result = await analyzeRoofImageFromFile(uploadedPhoto.file, solarData);
+      } else {
+        const url = `https://maps.googleapis.com/maps/api/staticmap?center=${coordinates.lat},${coordinates.lng}&zoom=20&size=640x640&maptype=satellite&scale=2&key=${apiKey}`;
+        result = await analyzeRoofImage(url, solarData);
+      }
       setAiResult(result);
       setAiStatus('done');
     } catch (err) {
@@ -430,7 +617,14 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
   };
 
   const handleComplete = async () => {
-    const exportSections = sections.map(({ polygon: _p, ...rest }) => rest);
+    const exportSections = sections.map(({ polygon, ...rest }) => ({
+      ...rest,
+      polygonPath: (() => {
+        const pts: { lat: number; lng: number }[] = [];
+        polygon?.getPath().forEach(p => pts.push({ lat: p.lat(), lng: p.lng() }));
+        return pts;
+      })(),
+    }));
     setSaving(true);
     let projectId: string | null = null;
     try {
@@ -468,7 +662,27 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
     <div className="flex h-full min-h-0 flex-col lg:flex-row overflow-hidden">
       {/* Map area — fixed share of height on phones; full flex on desktop */}
       <div className="relative w-full h-[38%] min-h-[170px] shrink-0 lg:h-auto lg:min-h-0 lg:flex-1">
-        <div ref={mapRef} className="h-full w-full min-h-0 lg:min-h-[200px]" />
+        {/* Map + Street View side by side */}
+        <div className="flex h-full w-full">
+          <div
+            ref={mapRef}
+            className={`h-full min-h-0 lg:min-h-[200px] transition-all duration-300 ${showStreetView ? 'w-1/2' : 'w-full'}`}
+          />
+          {/* Street View pane */}
+          <div
+            ref={streetViewRef}
+            className={`h-full border-l-2 border-slate-700 transition-all duration-300 ${showStreetView ? 'w-1/2' : 'w-0 overflow-hidden'}`}
+          >
+            {/* "Not available" overlay shown inside the div when SV is toggled but unavailable */}
+            {showStreetView && !streetViewAvailable && (
+              <div className="flex h-full w-full flex-col items-center justify-center gap-3 bg-slate-900 px-4 text-center">
+                <Navigation size={32} className="text-slate-500" />
+                <p className="text-sm font-medium text-slate-300">Street View not available</p>
+                <p className="text-xs text-slate-500">No street-level imagery within 100 m of this address.</p>
+              </div>
+            )}
+          </div>
+        </div>
 
         {/* Loading overlay */}
         {!mapLoaded && !mapError && (
@@ -489,42 +703,112 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
 
         {/* Map toolbar */}
         {mapLoaded && (
-          <div className="absolute top-[max(0.5rem,env(safe-area-inset-top,0px))] left-2 right-2 lg:top-3 lg:left-3 lg:right-auto flex flex-wrap gap-2 z-10 max-w-full">
+          <div className="absolute top-[max(0.5rem,env(safe-area-inset-top,0px))] left-2 right-2 lg:top-3 lg:left-3 lg:right-auto flex flex-wrap gap-1.5 z-10 max-w-full">
+
+            {/* ── Row 1: Zoom presets + Re-center ── */}
+            <div className="flex gap-1 bg-white rounded-xl shadow-md border border-slate-200 p-1">
+              <button
+                type="button"
+                onClick={centerOnProperty}
+                title="Re-center on property"
+                className="touch-manipulation flex items-center gap-1 text-xs font-medium px-2 py-1.5 min-h-[36px] rounded-lg text-slate-600 hover:bg-slate-100 transition-all"
+              >
+                <Maximize2 size={13} />
+                <span className="hidden sm:inline">Center</span>
+              </button>
+              <div className="w-px bg-slate-200 my-1" />
+              {([
+                { label: 'Street', zoom: 17, title: 'Street level — see block context' },
+                { label: 'Block', zoom: 19, title: 'Block level — see neighboring buildings' },
+                { label: 'Roof', zoom: 21, title: 'Roof level — maximum detail' },
+              ] as const).map(({ label, zoom, title }) => (
+                <button
+                  key={label}
+                  type="button"
+                  title={title}
+                  onClick={() => {
+                    if (!mapInstanceRef.current) return;
+                    mapInstanceRef.current.setCenter(coordinates);
+                    mapInstanceRef.current.setZoom(zoom);
+                  }}
+                  className="touch-manipulation flex items-center gap-1 text-xs font-medium px-2 py-1.5 min-h-[36px] rounded-lg text-slate-600 hover:bg-slate-100 transition-all"
+                >
+                  <ZoomIn size={12} />
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            {/* ── Row 1: Map type + overlays ── */}
+            <div className="flex gap-1 bg-white rounded-xl shadow-md border border-slate-200 p-1">
+              {/* Hybrid toggle */}
+              <button
+                type="button"
+                onClick={() => setMapType(t => t === 'satellite' ? 'hybrid' : 'satellite')}
+                title={mapType === 'satellite' ? 'Show street labels (Hybrid view)' : 'Hide street labels (Satellite view)'}
+                className={`touch-manipulation flex items-center gap-1 text-xs font-medium px-2 py-1.5 min-h-[36px] rounded-lg transition-all ${
+                  mapType === 'hybrid'
+                    ? 'bg-green-600 text-white'
+                    : 'text-slate-600 hover:bg-slate-100'
+                }`}
+              >
+                <Map size={13} />
+                <span className="hidden sm:inline">{mapType === 'hybrid' ? 'Labels On' : 'Labels'}</span>
+              </button>
+              <div className="w-px bg-slate-200 my-1" />
+              {/* 3D tilt */}
+              <button
+                type="button"
+                onClick={() => setTilt(t => !t)}
+                title="Toggle 3D tilt"
+                className={`touch-manipulation flex items-center gap-1 text-xs font-medium px-2 py-1.5 min-h-[36px] rounded-lg transition-all ${
+                  tilt ? 'bg-blue-600 text-white' : 'text-slate-600 hover:bg-slate-100'
+                }`}
+              >
+                <Satellite size={13} />
+                <span className="hidden sm:inline">3D</span>
+              </button>
+              <div className="w-px bg-slate-200 my-1" />
+              {/* Section labels */}
+              <button
+                type="button"
+                onClick={() => setShowLabels(l => !l)}
+                title="Toggle section labels"
+                className={`touch-manipulation flex items-center gap-1 text-xs font-medium px-2 py-1.5 min-h-[36px] rounded-lg transition-all ${
+                  showLabels ? 'text-slate-600 hover:bg-slate-100' : 'bg-slate-700 text-white'
+                }`}
+              >
+                {showLabels ? <Eye size={13} /> : <EyeOff size={13} />}
+                <span className="hidden sm:inline">Pins</span>
+              </button>
+            </div>
+
+            {/* ── Street View toggle ── */}
             <button
               type="button"
-              onClick={centerOnProperty}
-              title="Center on property"
-              className="touch-manipulation flex items-center gap-1.5 bg-white text-slate-700 hover:bg-slate-50 text-xs font-medium px-3 py-2.5 min-h-[44px] rounded-xl shadow-md border border-slate-200 transition-all"
-            >
-              <Maximize2 size={14} />
-              <span className="hidden sm:inline">Re-center</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setTilt(t => !t)}
-              title="Toggle 3D tilt"
-              className={`touch-manipulation flex items-center gap-1.5 text-xs font-medium px-3 py-2.5 min-h-[44px] rounded-xl shadow-md border transition-all ${
-                tilt
-                  ? 'bg-blue-600 text-white border-blue-600'
-                  : 'bg-white text-slate-700 hover:bg-slate-50 border-slate-200'
+              onClick={() => setShowStreetView(v => !v)}
+              title={showStreetView ? 'Close Street View' : 'Open Street View — confirm building identity from street level'}
+              className={`touch-manipulation flex items-center gap-1.5 text-xs font-semibold px-3 py-2 min-h-[36px] rounded-xl shadow-md border transition-all ${
+                showStreetView
+                  ? 'bg-orange-500 text-white border-orange-500'
+                  : 'bg-white text-slate-700 border-slate-200 hover:bg-orange-50 hover:border-orange-300 hover:text-orange-700'
               }`}
             >
-              <Satellite size={14} />
-              <span className="hidden sm:inline">3D</span>
+              <Navigation size={13} />
+              <span>{showStreetView ? 'Close Street View' : 'Street View'}</span>
+              {!streetViewAvailable && !showStreetView && (
+                <span className="text-[10px] text-slate-400 hidden sm:inline">(checking…)</span>
+              )}
             </button>
-            <button
-              type="button"
-              onClick={() => setShowLabels(l => !l)}
-              title="Toggle labels"
-              className={`touch-manipulation flex items-center gap-1.5 text-xs font-medium px-3 py-2.5 min-h-[44px] rounded-xl shadow-md border transition-all ${
-                showLabels
-                  ? 'bg-white text-slate-700 border-slate-200'
-                  : 'bg-slate-700 text-white border-slate-700'
-              }`}
-            >
-              {showLabels ? <Eye size={14} /> : <EyeOff size={14} />}
-              <span className="hidden sm:inline">Labels</span>
-            </button>
+
+            {/* Low-quality imagery warning */}
+            {solarData?.imageryQuality === 'LOW' && (
+              <div className="flex items-center gap-1.5 bg-red-600 text-white text-xs font-semibold px-3 py-2 min-h-[36px] rounded-xl shadow-md">
+                <AlertCircle size={13} />
+                <span className="hidden sm:inline">Low imagery quality — use Street View or upload a photo</span>
+                <span className="sm:hidden">Low quality</span>
+              </div>
+            )}
           </div>
         )}
 
@@ -591,6 +875,52 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
         </div>
 
         <div className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-y-contain">
+
+        {/* Solar API status banner */}
+        <div className="mx-3 mt-3 mb-1">
+          {solarStatus === 'loading' && (
+            <div className="flex items-center gap-2 rounded-xl bg-amber-50 border border-amber-100 px-3 py-2 text-xs text-amber-700">
+              <Loader2 size={12} className="animate-spin shrink-0" />
+              <span>Fetching Solar imagery data…</span>
+            </div>
+          )}
+          {solarStatus === 'ready' && solarData && (
+            <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs space-y-1.5">
+              <div className="flex items-center gap-1.5 font-semibold text-amber-800">
+                <Sun size={13} className="text-amber-500 shrink-0" />
+                Solar data loaded
+                <span className={`ml-auto text-[10px] font-bold px-1.5 py-0.5 rounded-full ${
+                  solarData.imageryQuality === 'HIGH' ? 'bg-green-100 text-green-700' :
+                  solarData.imageryQuality === 'MEDIUM' ? 'bg-amber-100 text-amber-700' :
+                  'bg-slate-100 text-slate-500'
+                }`}>
+                  {solarData.imageryQuality} quality
+                </span>
+              </div>
+              <p className="text-amber-700">
+                {solarData.roofSegmentStats.length} roof segment{solarData.roofSegmentStats.length !== 1 ? 's' : ''} detected
+                · imagery {formatImageryDate(solarData.imageryDate)}
+              </p>
+              {mapLoaded && (
+                <button
+                  type="button"
+                  onClick={importSolarSegments}
+                  className="touch-manipulation w-full flex items-center justify-center gap-1.5 bg-amber-500 hover:bg-amber-600 text-white text-xs font-semibold px-3 py-2 rounded-lg transition-colors"
+                >
+                  <Zap size={12} />
+                  Auto-import roof segments
+                </button>
+              )}
+            </div>
+          )}
+          {solarStatus === 'error' && (
+            <div className="flex items-center gap-2 rounded-xl bg-slate-50 border border-slate-200 px-3 py-2 text-xs text-slate-500">
+              <Sun size={12} className="shrink-0 opacity-40" />
+              <span>{solarError ?? 'Solar data unavailable — draw sections manually'}</span>
+            </div>
+          )}
+        </div>
+
         {/* Sections list */}
         <div className="space-y-2 p-3 pb-1">
           {sections.length === 0 && !isDrawing && (
@@ -664,31 +994,45 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
           ))}
         </div>
 
-        {/* Totals — scroll with sections */}
-        {sections.length > 0 && (
-          <div className="border-t border-slate-100 p-3 bg-slate-50 space-y-2">
-            <div className="flex items-center gap-1.5 mb-2">
-              <Ruler size={13} className="text-slate-400" />
-              <span className="text-xs font-semibold text-slate-600 uppercase tracking-wide">Totals</span>
+        {/* Measurements Summary — scroll with sections */}
+        {sections.length > 0 && (() => {
+          const exportedSections = sections.map(({ polygon, ...rest }) => ({
+            ...rest,
+            polygonPath: (() => {
+              const pts: { lat: number; lng: number }[] = [];
+              polygon?.getPath().forEach(p => pts.push({ lat: p.lat(), lng: p.lng() }));
+              return pts;
+            })(),
+          }));
+          const m = computeRoofMeasurements(exportedSections);
+          return (
+            <div className="border-t border-slate-100 p-3 bg-slate-50 space-y-2">
+              <div className="flex items-center gap-1.5 mb-1">
+                <Ruler size={13} className="text-slate-400" />
+                <span className="text-xs font-semibold text-slate-600 uppercase tracking-wide">Measurements</span>
+              </div>
+              <div className="grid grid-cols-2 gap-1.5">
+                {[
+                  { label: 'Roof Area', value: formatArea(m.totalActualAreaSqFt) },
+                  { label: 'Roof Facets', value: String(m.facets) },
+                  { label: 'Predominant Pitch', value: m.predominantPitch },
+                  { label: 'Squares (est.)', value: `${m.totalSquares} sq` },
+                  { label: 'Plan Area', value: formatArea(m.totalFlatAreaSqFt) },
+                  { label: 'Perimeter', value: formatFt(m.totalPerimeterFt) },
+                ].map(item => (
+                  <div key={item.label} className="bg-white rounded-lg p-2 border border-slate-100 text-center">
+                    <div className="text-[10px] text-slate-400 leading-none mb-1">{item.label}</div>
+                    <div className="text-xs font-bold text-slate-900">{item.value}</div>
+                  </div>
+                ))}
+              </div>
+              <div className="flex items-start gap-1.5 bg-blue-50 rounded-lg p-2 text-xs text-blue-700">
+                <Info size={11} className="mt-0.5 flex-shrink-0" />
+                <span>Includes 12% waste factor · Perimeter from polygon boundaries</span>
+              </div>
             </div>
-            <div className="grid grid-cols-3 gap-1.5">
-              {[
-                { label: 'Plan Area', value: formatArea(totalFlat) },
-                { label: 'Roof Area', value: formatArea(totalActual) },
-                { label: 'Squares (est.)', value: `${totalSquares} sq` },
-              ].map(item => (
-                <div key={item.label} className="bg-white rounded-lg p-2 border border-slate-100 text-center">
-                  <div className="text-[10px] text-slate-400 leading-none mb-1">{item.label}</div>
-                  <div className="text-xs font-bold text-slate-900">{item.value}</div>
-                </div>
-              ))}
-            </div>
-            <div className="flex items-start gap-1.5 bg-blue-50 rounded-lg p-2 text-xs text-blue-700">
-              <Info size={11} className="mt-0.5 flex-shrink-0" />
-              <span>Includes 12% waste factor for ordering</span>
-            </div>
-          </div>
-        )}
+          );
+        })()}
 
         {/* AI Assessment */}
         {sections.length > 0 && (
@@ -713,16 +1057,74 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
 
             {aiExpanded && (
               <div className="px-3 py-2.5 bg-purple-50/50 space-y-2">
+
+                {/* Photo upload strip — always visible in expanded state */}
+                <div className="rounded-lg border border-purple-100 bg-white overflow-hidden">
+                  {uploadedPhoto ? (
+                    <div className="flex items-center gap-2 p-2">
+                      <img
+                        src={uploadedPhoto.previewUrl}
+                        alt="Uploaded roof photo"
+                        className="w-14 h-10 object-cover rounded-md border border-slate-200 shrink-0"
+                      />
+                      <div className="min-w-0 flex-1">
+                        <p className="text-[10px] font-semibold text-slate-700 truncate">{uploadedPhoto.file.name}</p>
+                        <p className="text-[10px] text-slate-400">Uploaded photo ready for analysis</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          URL.revokeObjectURL(uploadedPhoto.previewUrl);
+                          setUploadedPhoto(null);
+                          if (photoInputRef.current) photoInputRef.current.value = '';
+                        }}
+                        className="shrink-0 text-slate-300 hover:text-red-400 transition-colors"
+                      >
+                        <X size={14} />
+                      </button>
+                    </div>
+                  ) : (
+                    <label className="flex items-center gap-2 p-2 cursor-pointer hover:bg-slate-50 transition-colors">
+                      <div className="w-14 h-10 rounded-md border-2 border-dashed border-slate-200 flex items-center justify-center shrink-0">
+                        <Camera size={16} className="text-slate-300" />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-[10px] font-semibold text-slate-600">Upload a photo</p>
+                        <p className="text-[10px] text-slate-400">Drone, site, or street photo</p>
+                      </div>
+                      <Upload size={13} className="text-slate-400 shrink-0" />
+                      <input
+                        ref={photoInputRef}
+                        type="file"
+                        accept="image/*"
+                        className="sr-only"
+                        onChange={handlePhotoUpload}
+                      />
+                    </label>
+                  )}
+                </div>
+
                 {aiStatus === 'idle' && (
-                  <button
-                    onClick={analyzeWithAI}
-                    disabled={!hasGeminiKey}
-                    className="w-full flex items-center justify-center gap-2 bg-purple-600 hover:bg-purple-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-semibold px-3 py-2 rounded-lg transition-colors"
-                    title={!hasGeminiKey ? 'Add your Gemini key in Settings to enable AI' : ''}
-                  >
-                    <Brain size={13} />
-                    Run AI Analysis
-                  </button>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <button
+                      onClick={() => analyzeWithAI(false)}
+                      disabled={!hasGeminiKey}
+                      className="flex items-center justify-center gap-1.5 bg-purple-600 hover:bg-purple-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-[11px] font-semibold px-2 py-2 rounded-lg transition-colors"
+                      title={!hasGeminiKey ? 'Add your Gemini key in Settings to enable AI' : 'Analyze the satellite map image'}
+                    >
+                      <Satellite size={12} />
+                      Satellite
+                    </button>
+                    <button
+                      onClick={() => analyzeWithAI(true)}
+                      disabled={!hasGeminiKey || !uploadedPhoto}
+                      className="flex items-center justify-center gap-1.5 bg-purple-600 hover:bg-purple-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-[11px] font-semibold px-2 py-2 rounded-lg transition-colors"
+                      title={!uploadedPhoto ? 'Upload a photo first' : 'Analyze your uploaded photo'}
+                    >
+                      <Camera size={12} />
+                      My Photo
+                    </button>
+                  </div>
                 )}
                 {aiStatus === 'analyzing' && (
                   <div className="flex items-center justify-center gap-2 text-xs text-purple-600 py-2">
@@ -733,7 +1135,10 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
                 {aiStatus === 'error' && (
                   <div className="text-xs text-red-600 text-center py-1 space-y-1">
                     <p className="leading-snug">{aiError || 'Analysis failed.'}</p>
-                    <button type="button" onClick={analyzeWithAI} className="text-purple-700 underline font-medium">Retry</button>
+                    <div className="flex gap-2 justify-center">
+                      <button type="button" onClick={() => analyzeWithAI(false)} className="text-purple-700 underline font-medium">Satellite</button>
+                      {uploadedPhoto && <button type="button" onClick={() => analyzeWithAI(true)} className="text-purple-700 underline font-medium">My Photo</button>}
+                    </div>
                   </div>
                 )}
                 {aiStatus === 'done' && aiResult && (
@@ -755,7 +1160,10 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
                       </ul>
                     )}
                     <p className="text-slate-600 italic bg-white rounded-lg px-2 py-1.5 border border-purple-100">"{aiResult.recommendation}"</p>
-                    <button onClick={analyzeWithAI} className="text-purple-500 hover:text-purple-700 text-[10px] underline">Re-analyze</button>
+                    <div className="flex gap-2">
+                      <button onClick={() => analyzeWithAI(false)} className="text-purple-500 hover:text-purple-700 text-[10px] underline">Re-analyze satellite</button>
+                      {uploadedPhoto && <button onClick={() => analyzeWithAI(true)} className="text-purple-500 hover:text-purple-700 text-[10px] underline">Use my photo</button>}
+                    </div>
                   </div>
                 )}
               </div>

@@ -12,6 +12,7 @@ export interface RoofSection {
   pitchMultiplier: number;
   actualArea: number; // sq ft (true roof area)
   color: string;
+  polygonPath?: { lat: number; lng: number }[];
 }
 
 export interface Material {
