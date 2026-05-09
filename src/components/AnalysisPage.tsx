@@ -52,7 +52,7 @@ import {
 import { computeRoofMeasurements, formatFt } from '../utils/measurements';
 import { analyzeSolarSegments, type RoofStructureAnalysis } from '../utils/roofStructure';
 import { buildHeightModel, type HeightModel } from '../utils/heightModel';
-import { deriveHeuristicRoofCues } from '../utils/roofVision';
+import { deriveHeuristicRoofCues, deriveVisionRoofCuesFromStaticMap } from '../utils/roofVision';
 import RoofStructurePanel from './RoofStructurePanel';
 
 interface AnalysisPageProps {
@@ -91,6 +91,8 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
   const [solarData, setSolarData] = useState<SolarBuildingInsights | null>(null);
   const [solarDataLayers, setSolarDataLayers] = useState<SolarDataLayersResponse | null>(null);
   const [heightModel, setHeightModel] = useState<HeightModel | null>(null);
+  const [roofAiCues, setRoofAiCues] = useState<ReturnType<typeof deriveHeuristicRoofCues> | null>(null);
+  const [roofAiCueStatus, setRoofAiCueStatus] = useState<'idle' | 'loading' | 'ready' | 'fallback'>('idle');
   const [solarError, setSolarError] = useState<string | null>(null);
   const [roofStructure, setRoofStructure] = useState<RoofStructureAnalysis | null>(null);
   const [showRoofStructure, setShowRoofStructure] = useState(false);
@@ -99,14 +101,14 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
     const segments = solarData?.roofSegmentStats ?? [];
     if (solarStatus !== 'ready' || !solarData || segments.length === 0) return null;
     const model = heightModel ?? buildHeightModel(segments, solarDataLayers);
-    const aiCues = deriveHeuristicRoofCues(segments, solarData.center);
+    const aiCues = roofAiCues ?? deriveHeuristicRoofCues(segments, solarData.center);
     return analyzeSolarSegments(segments, solarData.center, {
       imageryQuality: solarData.imageryQuality,
       hasDsm: !!solarDataLayers?.dsmUrl,
       heightModel: model,
       aiCues,
     });
-  }, [solarData, solarStatus, solarDataLayers, heightModel]);
+  }, [solarData, solarStatus, solarDataLayers, heightModel, roofAiCues]);
 
   // Map view controls
   const [mapType, setMapType] = useState<'satellite' | 'hybrid'>('satellite');
@@ -326,6 +328,8 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
     setSolarData(null);
     setSolarDataLayers(null);
     setHeightModel(null);
+    setRoofAiCues(null);
+    setRoofAiCueStatus('idle');
     setSolarError(null);
     setRoofStructure(null);
     setShowRoofStructure(false);
@@ -356,6 +360,39 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [coordinates.lat, coordinates.lng]);
+
+  useEffect(() => {
+    if (!solarData || solarStatus !== 'ready') return;
+    const segments = solarData.roofSegmentStats ?? [];
+    if (segments.length === 0) {
+      setRoofAiCues(null);
+      setRoofAiCueStatus('idle');
+      return;
+    }
+
+    let cancelled = false;
+    setRoofAiCueStatus('loading');
+    (async () => {
+      const staticMapUrl =
+        `https://maps.googleapis.com/maps/api/staticmap?center=${coordinates.lat},${coordinates.lng}` +
+        `&zoom=20&size=640x640&maptype=satellite&scale=2&key=${apiKey}`;
+
+      const visionCues = await deriveVisionRoofCuesFromStaticMap(staticMapUrl, solarData).catch(() => null);
+      if (cancelled) return;
+      if (visionCues && visionCues.length > 0) {
+        setRoofAiCues(visionCues);
+        setRoofAiCueStatus('ready');
+        return;
+      }
+      const fallback = deriveHeuristicRoofCues(segments, solarData.center);
+      setRoofAiCues(fallback);
+      setRoofAiCueStatus('fallback');
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [solarData, solarStatus, coordinates.lat, coordinates.lng, apiKey]);
 
   // Sync map type (satellite ↔ hybrid)
   useEffect(() => {
@@ -938,10 +975,9 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
                 Height source: {heightModel?.source === 'dsm' ? 'DSM (data layers)' : heightModel?.source === 'solar-plane' ? 'Solar plane heights' : 'none'}
               </p>
               <p className="text-[10px] text-amber-800/70">
-                AI cues: {(() => {
-                  const segs = solarData.roofSegmentStats ?? [];
-                  return deriveHeuristicRoofCues(segs, solarData.center).length;
-                })()} inferred lines
+                AI cues: {(roofAiCues?.length ?? 0)} inferred lines
+                {' · '}
+                {roofAiCueStatus === 'ready' ? 'vision model' : roofAiCueStatus === 'loading' ? 'analyzing…' : 'heuristic fallback'}
               </p>
               {mapLoaded && (solarData.roofSegmentStats ?? []).length > 0 && (
                 <div className="space-y-1.5">
@@ -959,7 +995,7 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
                       const segments = solarData.roofSegmentStats ?? [];
                       if (segments.length === 0) return;
                       if (!roofStructure) {
-                        const aiCues = deriveHeuristicRoofCues(segments, solarData.center);
+                        const aiCues = roofAiCues ?? deriveHeuristicRoofCues(segments, solarData.center);
                         setRoofStructure(
                           analyzeSolarSegments(segments, solarData.center, {
                             imageryQuality: solarData.imageryQuality,

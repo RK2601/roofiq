@@ -17,6 +17,16 @@ interface RoofStructurePanelProps {
   onApply?: (next: RoofStructureAnalysis) => void;
 }
 
+interface EdgeEditLogEntry {
+  id: string;
+  facetIndex: number;
+  edgeIndex: number;
+  from: EdgeKind;
+  to: EdgeKind;
+  adjacentFacetIndex: number | null;
+  timestampIso: string;
+}
+
 const EDGE_STYLES: Record<
   FacetEdge['kind'],
   { color: string; width: number; dash?: string; label: string }
@@ -95,10 +105,12 @@ function renderEdges(
 export default function RoofStructurePanel({ analysis, onClose, onApply }: RoofStructurePanelProps) {
   const [editableFacets, setEditableFacets] = useState<RoofStructureFacet[]>(analysis.facets);
   const [edited, setEdited] = useState(false);
+  const [editLog, setEditLog] = useState<EdgeEditLogEntry[]>([]);
 
   useEffect(() => {
     setEditableFacets(analysis.facets);
     setEdited(false);
+    setEditLog([]);
   }, [analysis]);
 
   const editableMeasurements = useMemo(
@@ -135,17 +147,59 @@ export default function RoofStructurePanel({ analysis, onClose, onApply }: RoofS
       if (!facet) return prev;
       const edge = facet.edges[edgeIndex];
       if (!edge) return prev;
-      const currentIdx = EDITABLE_EDGE_KINDS.indexOf(edge.kind);
-      edge.kind = EDITABLE_EDGE_KINDS[(currentIdx + 1) % EDITABLE_EDGE_KINDS.length];
+      const fromKind = edge.kind;
+      const currentIdx = EDITABLE_EDGE_KINDS.indexOf(fromKind);
+      const toKind = EDITABLE_EDGE_KINDS[(currentIdx + 1) % EDITABLE_EDGE_KINDS.length];
+      edge.kind = toKind;
 
       if (edge.adjacentFacetIndex !== null) {
         const adjacent = facets.find(item => item.index === edge.adjacentFacetIndex);
         const reciprocal = adjacent?.edges.find(candidate => candidate.adjacentFacetIndex === facetIndex);
-        if (reciprocal) reciprocal.kind = edge.kind;
+        if (reciprocal) reciprocal.kind = toKind;
       }
+      setEditLog(prevLog => [
+        ...prevLog,
+        {
+          id: `${Date.now()}-${facetIndex}-${edgeIndex}`,
+          facetIndex,
+          edgeIndex,
+          from: fromKind,
+          to: toKind,
+          adjacentFacetIndex: edge.adjacentFacetIndex,
+          timestampIso: new Date().toISOString(),
+        },
+      ]);
       return facets;
     });
     setEdited(true);
+  };
+
+  const handleUndoLastEdit = () => {
+    const last = editLog[editLog.length - 1];
+    if (!last) return;
+
+    setEditableFacets(prev => {
+      const facets = prev.map(facet => ({
+        ...facet,
+        edges: facet.edges.map(edge => ({ ...edge })),
+      }));
+      const facet = facets.find(item => item.index === last.facetIndex);
+      const edge = facet?.edges[last.edgeIndex];
+      if (!facet || !edge) return prev;
+      edge.kind = last.from;
+
+      if (last.adjacentFacetIndex !== null) {
+        const adjacent = facets.find(item => item.index === last.adjacentFacetIndex);
+        const reciprocal = adjacent?.edges.find(candidate => candidate.adjacentFacetIndex === last.facetIndex);
+        if (reciprocal) reciprocal.kind = last.from;
+      }
+      return facets;
+    });
+    setEditLog(prev => {
+      const next = prev.slice(0, -1);
+      setEdited(next.length > 0);
+      return next;
+    });
   };
 
   return (
@@ -171,6 +225,7 @@ export default function RoofStructurePanel({ analysis, onClose, onApply }: RoofS
               onClick={() => {
                 setEditableFacets(analysis.facets);
                 setEdited(false);
+                setEditLog([]);
               }}
               className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-600 hover:bg-slate-100"
             >
@@ -179,20 +234,33 @@ export default function RoofStructurePanel({ analysis, onClose, onApply }: RoofS
             </button>
             <button
               type="button"
+              disabled={editLog.length === 0}
+              onClick={handleUndoLastEdit}
+              className="inline-flex items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-700 hover:bg-amber-100 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <RotateCcw size={12} />
+              Undo last
+            </button>
+            <button
+              type="button"
               disabled={!edited}
               onClick={() => {
                 if (!edited) return;
+                const editSummary = editLog.length
+                  ? `Manual edge edits applied (${editLog.length} changes).`
+                  : 'Manual edge edits applied.';
                 const next: RoofStructureAnalysis = {
                   ...analysis,
                   facets: editableFacets,
                   measurements: editableMeasurements,
                   notes: [
                     ...analysis.notes,
-                    'Manual edge edits applied in roof structure panel.',
+                    editSummary,
                   ],
                 };
                 onApply?.(next);
                 setEdited(false);
+                setEditLog([]);
               }}
               className="inline-flex items-center gap-1 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 text-xs text-emerald-700 hover:bg-emerald-100 disabled:opacity-50 disabled:cursor-not-allowed"
             >
@@ -201,6 +269,19 @@ export default function RoofStructurePanel({ analysis, onClose, onApply }: RoofS
             </button>
             {edited && <span className="text-[11px] text-amber-700">Manual edge edits pending</span>}
           </div>
+
+          {editLog.length > 0 && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2">
+              <p className="text-xs font-semibold text-amber-800">Edit log ({editLog.length})</p>
+              <div className="mt-1 max-h-24 overflow-y-auto space-y-0.5">
+                {editLog.slice(-8).map(entry => (
+                  <p key={entry.id} className="text-[11px] text-amber-700">
+                    Facet {entry.facetIndex + 1} edge {entry.edgeIndex + 1}: {entry.from} → {entry.to}
+                  </p>
+                ))}
+              </div>
+            </div>
+          )}
 
           <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
             <div className="flex flex-wrap items-center gap-2">
