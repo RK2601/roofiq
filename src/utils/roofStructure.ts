@@ -919,3 +919,26 @@ export function analyzeSolarSegments(
     svg,
   };
 }
+
+export function applyAiCuesToAnalysis(
+  analysis: RoofStructureAnalysis,
+  aiCues: AiRoofCue[]
+): RoofStructureAnalysis {
+  const { band, breakdown, flags, dataSources } = computeConfidence(analysis.facets, {
+    imageryQuality: analysis.dataSources.imageryQuality,
+    hasDsm: analysis.dataSources.hasDsm,
+    aiCues,
+  });
+  return {
+    ...analysis,
+    confidenceBand: band,
+    confidence: breakdown,
+    qualityFlags: flags,
+    dataSources,
+    aiCuesUsed: aiCues,
+    notes: [
+      ...analysis.notes,
+      `Applied ${aiCues.length} multi-angle AI cues to confidence scoring.`,
+    ],
+  };
+}

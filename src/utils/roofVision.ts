@@ -52,7 +52,7 @@ const ROOF_CUE_SCHEMA: Schema = {
   required: ['cues'],
 };
 
-interface VisionCueRaw {
+export interface VisionCueRaw {
   type: 'ridge' | 'hip' | 'valley' | 'eave' | 'rake';
   x1: number;
   y1: number;
@@ -60,6 +60,21 @@ interface VisionCueRaw {
   y2: number;
   confidence: number;
 }
+
+export interface RoofPhotoCueAnalysis {
+  qualityScore: number; // 0..1
+  cues: VisionCueRaw[];
+  byType: Record<VisionCueRaw['type'], number>;
+}
+
+const ROOF_PHOTO_CUE_SCHEMA: Schema = {
+  type: SchemaType.OBJECT,
+  properties: {
+    qualityScore: { type: SchemaType.NUMBER },
+    cues: ROOF_CUE_SCHEMA.properties?.cues,
+  },
+  required: ['qualityScore', 'cues'],
+};
 
 function metersPerDegLng(lat: number): number {
   return 111_320 * Math.cos((lat * Math.PI) / 180);
@@ -121,6 +136,30 @@ function parseVisionCueJson(text: string): VisionCueRaw[] {
   const cleaned = text.replace(/```json\n?/gi, '').replace(/```\n?/g, '').trim();
   const parsed = JSON.parse(cleaned) as { cues?: VisionCueRaw[] };
   return Array.isArray(parsed.cues) ? parsed.cues : [];
+}
+
+function parsePhotoCueJson(text: string): RoofPhotoCueAnalysis {
+  const cleaned = text.replace(/```json\n?/gi, '').replace(/```\n?/g, '').trim();
+  const parsed = JSON.parse(cleaned) as { qualityScore?: number; cues?: VisionCueRaw[] };
+  const cues = Array.isArray(parsed.cues) ? parsed.cues : [];
+  const byType: Record<VisionCueRaw['type'], number> = {
+    ridge: 0,
+    hip: 0,
+    valley: 0,
+    eave: 0,
+    rake: 0,
+  };
+  cues.forEach(cue => {
+    byType[cue.type] += 1;
+  });
+  const qualityScore = clamp(
+    typeof parsed.qualityScore === 'number'
+      ? parsed.qualityScore
+      : (cues.reduce((sum, cue) => sum + cue.confidence, 0) / Math.max(cues.length, 1)),
+    0,
+    1
+  );
+  return { qualityScore, cues, byType };
 }
 
 function normalizeCueToMeters(
@@ -208,6 +247,56 @@ export async function deriveVisionRoofCuesFromStaticMap(
         .map(item => normalizeCueToMeters(item, solar))
         .filter((item): item is AiRoofCue => !!item);
       if (cues.length > 0) return cues;
+    } catch {
+      // Try next model.
+    }
+  }
+  return null;
+}
+
+async function fileToBase64(file: File): Promise<{ data: string; mimeType: string }> {
+  return blobToBase64(file);
+}
+
+export async function deriveVisionRoofCuesFromFile(
+  file: File,
+  slotLabel?: string
+): Promise<RoofPhotoCueAnalysis | null> {
+  const apiKey = readGeminiApiKey();
+  if (!apiKey) return null;
+
+  const imageData = await fileToBase64(file).catch(() => null);
+  if (!imageData) return null;
+
+  const genAI = new GoogleGenerativeAI(apiKey);
+  const prompt = `Analyze this single roof photo and extract roof geometry cues.
+Return strict JSON with:
+- qualityScore: 0..1 overall usability of this photo for roof geometry
+- cues: array of line cues in normalized image coordinates [0,1]
+Cue types: ridge, hip, valley, eave, rake.
+Keep 2-16 cues max. Skip tiny noisy lines.
+${slotLabel ? `Capture slot: ${slotLabel}.` : ''}`;
+
+  const parts: Part[] = [
+    { inlineData: { mimeType: imageData.mimeType || 'image/jpeg', data: imageData.data } } as Part,
+    { text: prompt } as Part,
+  ];
+
+  for (const modelId of GEMINI_MODEL_IDS) {
+    try {
+      const model = genAI.getGenerativeModel({
+        model: modelId,
+        generationConfig: {
+          responseMimeType: 'application/json',
+          responseSchema: ROOF_PHOTO_CUE_SCHEMA,
+          temperature: 0.2,
+          maxOutputTokens: 1800,
+        },
+        safetySettings: SAFETY_RELAXED,
+      });
+      const result = await model.generateContent(parts);
+      const analysis = parsePhotoCueJson(readResponseText(result));
+      if (analysis.cues.length > 0 || analysis.qualityScore > 0.25) return analysis;
     } catch {
       // Try next model.
     }
