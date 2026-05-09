@@ -44,7 +44,7 @@ export default function App() {
       setDbBanner(
         import.meta.env.DEV
           ? null
-          : 'Not connected. Vite bakes VITE_DATABASE_URL in at build time — add it in Vercel → Project → Settings → Environment Variables for Production and Preview, then redeploy (not only .env on your laptop).'
+          : 'Not connected. Git-based Vercel builds cannot read your local .env. From this project run `npm run deploy:vercel` (builds locally with .env, then uploads), or store VITE_DATABASE_URL on Vercel for cloud builds.'
       );
       return;
     }

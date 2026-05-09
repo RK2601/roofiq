@@ -13,12 +13,12 @@ export default defineConfig(({ mode }) => {
     const maps = (viteEnv.VITE_GOOGLE_MAPS_API_KEY || process.env.VITE_GOOGLE_MAPS_API_KEY || '').trim()
     if (!db) {
       console.warn(
-        '[roofiq] VITE_DATABASE_URL is missing for this Vercel build. Add it in Vercel → Project → Settings → Environment Variables (Production + Preview), enable it for Builds, then redeploy.'
+        '[roofiq] VITE_DATABASE_URL missing on this Vercel cloud build. Either add it under Project → Environment Variables, or deploy from your laptop with `npm run deploy:vercel` so local `.env` is used at build time.'
       )
     }
     if (!maps) {
       console.warn(
-        '[roofiq] VITE_GOOGLE_MAPS_API_KEY is missing for this Vercel build. Maps will not work until it is set and you redeploy.'
+        '[roofiq] VITE_GOOGLE_MAPS_API_KEY missing on this Vercel cloud build. Use local `npm run deploy:vercel` or set the variable on Vercel, then redeploy.'
       )
     }
   }
