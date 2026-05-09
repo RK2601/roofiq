@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useLayoutEffect } from 'react';
 import { AppView, Coordinates, RoofSection, User } from './types';
 import LandingPage from './components/LandingPage';
 import AnalysisPage from './components/AnalysisPage';
@@ -13,10 +13,7 @@ import SettingsPage from './components/SettingsPage';
 import ReportsPage from './components/ReportsPage';
 import MarketingPage from './components/MarketingPage';
 import { initDb } from './utils/db';
-
-function getApiKey(): string {
-  return import.meta.env.VITE_GOOGLE_MAPS_API_KEY || localStorage.getItem('roofiq_gmaps_key') || '';
-}
+import { readMapsApiKey } from './utils/googleMapsKey';
 
 function getStoredUser(): User | null {
   try {
@@ -32,16 +29,22 @@ export default function App() {
   const [address, setAddress] = useState('');
   const [coordinates, setCoordinates] = useState<Coordinates>({ lat: 37.422, lng: -122.084 });
   const [roofSections, setRoofSections] = useState<Omit<RoofSection, 'polygon'>[]>([]);
-  const [apiKey, setApiKey] = useState(getApiKey);
-  const [showKeySetup, setShowKeySetup] = useState(false);
+  const [apiKey, setApiKey] = useState(() => readMapsApiKey());
+  const [showKeySetup, setShowKeySetup] = useState(() => !readMapsApiKey());
   const [projectId, setProjectId] = useState<string | null>(null);
-  const [user, setUser] = useState<User | null>(getStoredUser);
+  const [user, setUser] = useState<User | null>(() => getStoredUser());
   // pending address/coords saved before login
   const [pendingAddr, setPendingAddr] = useState('');
   const [pendingCoords, setPendingCoords] = useState<Coordinates>({ lat: 37.422, lng: -122.084 });
 
+  useLayoutEffect(() => {
+    const k = readMapsApiKey();
+    setApiKey(k);
+    if (k) setShowKeySetup(false);
+    else setShowKeySetup(true);
+  }, []);
+
   useEffect(() => {
-    if (!apiKey) setShowKeySetup(true);
     initDb().catch(console.error);
   }, []);
 

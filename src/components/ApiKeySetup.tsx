@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Key, ExternalLink, ChevronRight, CheckCircle2, AlertCircle } from 'lucide-react';
+import { readMapsApiKey } from '../utils/googleMapsKey';
 
 interface ApiKeySetupProps {
   onSave: (key: string) => void;
@@ -13,7 +14,7 @@ const steps = [
 ];
 
 export default function ApiKeySetup({ onSave }: ApiKeySetupProps) {
-  const [key, setKey] = useState('');
+  const [key, setKey] = useState(() => readMapsApiKey());
   const [error, setError] = useState('');
   const [validating, setValidating] = useState(false);
 
