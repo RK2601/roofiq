@@ -18,6 +18,8 @@ interface DashboardLayoutProps {
   onLogout: () => void;
   children: React.ReactNode;
   fullHeight?: boolean;
+  /** Shown under the header when DB is missing or failed to initialize (e.g. Vercel env not set at build time). */
+  dbBanner?: string | null;
 }
 
 const PAGE_TITLES: Partial<Record<AppView, string>> = {
@@ -51,6 +53,7 @@ export default function DashboardLayout({
   onLogout,
   children,
   fullHeight = false,
+  dbBanner = null,
 }: DashboardLayoutProps) {
   const pageTitle = PAGE_TITLES[view] ?? 'RoofIQ';
 
@@ -150,6 +153,12 @@ export default function DashboardLayout({
             </div>
           </div>
         </header>
+
+        {dbBanner && (
+          <div className="flex-shrink-0 px-6 py-3 bg-amber-50 border-b border-amber-200 text-amber-950 text-sm leading-relaxed">
+            <strong className="font-semibold">Database:</strong> {dbBanner}
+          </div>
+        )}
 
         {/* Content area */}
         <main className={`flex-1 ${fullHeight ? 'overflow-hidden flex flex-col' : 'overflow-auto'} bg-slate-50`}>

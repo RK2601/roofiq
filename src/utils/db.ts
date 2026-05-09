@@ -2,9 +2,17 @@ import { neon } from '@neondatabase/serverless';
 import { Coordinates } from '../types';
 import { QuoteData } from '../types';
 
-const dbUrl = import.meta.env.VITE_DATABASE_URL;
+function trimDatabaseUrl(raw: unknown): string | undefined {
+  if (raw == null || typeof raw !== 'string') return undefined;
+  const t = raw.trim().replace(/^\uFEFF/, '');
+  return t.length ? t : undefined;
+}
+
+const dbUrl = trimDatabaseUrl(import.meta.env.VITE_DATABASE_URL);
 /** Undefined URL must not be passed to `neon()` — it throws immediately and breaks the whole app (e.g. Vercel without env). */
-const neonSql = dbUrl ? neon(dbUrl) : null;
+const neonSql = dbUrl
+  ? neon(dbUrl, { disableWarningInBrowsers: true })
+  : null;
 
 function requireNeon() {
   if (!neonSql) {

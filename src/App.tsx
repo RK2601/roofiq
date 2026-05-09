@@ -12,7 +12,7 @@ import QuotesListPage from './components/QuotesListPage';
 import SettingsPage from './components/SettingsPage';
 import ReportsPage from './components/ReportsPage';
 import MarketingPage from './components/MarketingPage';
-import { initDb } from './utils/db';
+import { initDb, isDbConfigured } from './utils/db';
 import { readMapsApiKey } from './utils/googleMapsKey';
 
 function getStoredUser(): User | null {
@@ -36,10 +36,25 @@ export default function App() {
   // pending address/coords saved before login
   const [pendingAddr, setPendingAddr] = useState('');
   const [pendingCoords, setPendingCoords] = useState<Coordinates>({ lat: 37.422, lng: -122.084 });
+  const [dbBanner, setDbBanner] = useState<string | null>(null);
 
   useEffect(() => {
     setApiKey(readMapsApiKey());
-    initDb().catch(console.error);
+    if (!isDbConfigured()) {
+      setDbBanner(
+        import.meta.env.DEV
+          ? null
+          : 'Not connected. Vite bakes VITE_DATABASE_URL in at build time — add it in Vercel → Project → Settings → Environment Variables for Production and Preview, then redeploy (not only .env on your laptop).'
+      );
+      return;
+    }
+    initDb()
+      .then(() => setDbBanner(null))
+      .catch((e: unknown) => {
+        console.error('[RoofIQ] initDb', e);
+        const msg = e instanceof Error ? e.message : 'Initialization failed.';
+        setDbBanner(`Could not reach the database: ${msg}`);
+      });
   }, []);
 
   useEffect(() => {
@@ -130,7 +145,14 @@ export default function App() {
   const isAnalysisView = view === 'analysis' || view === 'marketing';
 
   return (
-    <DashboardLayout view={view} user={user} onNavigate={setView} onLogout={handleLogout} fullHeight={isAnalysisView}>
+    <DashboardLayout
+      view={view}
+      user={user}
+      onNavigate={setView}
+      onLogout={handleLogout}
+      fullHeight={isAnalysisView}
+      dbBanner={dbBanner}
+    >
       {view === 'dashboard' && <DashboardHome onNewAnalysis={() => setView('landing')} />}
       {view === 'analysis' && (
         <AnalysisPage
