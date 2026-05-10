@@ -42,7 +42,9 @@ import { analyzeRoofImage, analyzeRoofImageFromFile, RoofAnalysis, CONDITION_BG,
 import { readGeminiApiKey } from '../utils/googleAiKey';
 import {
   fetchBuildingInsights,
+  computeDominantAzimuth,
   fetchDataLayers,
+  filterUsableRoofSegments,
   segmentToBoundingPolygon,
   pitchDegreesToOption,
   formatImageryDate,
@@ -96,9 +98,14 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
   const [solarError, setSolarError] = useState<string | null>(null);
   const [roofStructure, setRoofStructure] = useState<RoofStructureAnalysis | null>(null);
   const [showRoofStructure, setShowRoofStructure] = useState(false);
+  const filteredSolar = useMemo(
+    () => filterUsableRoofSegments(solarData?.roofSegmentStats ?? []),
+    [solarData?.roofSegmentStats]
+  );
+  const usableSolarSegments = filteredSolar.segments;
 
   const roofStructurePreview = useMemo(() => {
-    const segments = solarData?.roofSegmentStats ?? [];
+    const segments = usableSolarSegments;
     if (solarStatus !== 'ready' || !solarData || segments.length === 0) return null;
     const model = heightModel ?? buildHeightModel(segments, solarDataLayers);
     const aiCues = roofAiCues ?? deriveHeuristicRoofCues(segments, solarData.center);
@@ -108,7 +115,7 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
       heightModel: model,
       aiCues,
     });
-  }, [solarData, solarStatus, solarDataLayers, heightModel, roofAiCues]);
+  }, [solarData, solarStatus, solarDataLayers, heightModel, roofAiCues, usableSolarSegments]);
 
   // Map view controls
   const [mapType, setMapType] = useState<'satellite' | 'hybrid'>('satellite');
@@ -341,7 +348,7 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
         if (cancelled) return;
         setSolarData(data);
 
-        const segments = data?.roofSegmentStats ?? [];
+        const segments = filterUsableRoofSegments(data?.roofSegmentStats ?? []).segments;
         const layers = await fetchDataLayers(coordinates.lat, coordinates.lng, 120, apiKey).catch(() => null);
         if (cancelled) return;
         setSolarDataLayers(layers);
@@ -363,7 +370,7 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
 
   useEffect(() => {
     if (!solarData || solarStatus !== 'ready') return;
-    const segments = solarData.roofSegmentStats ?? [];
+    const segments = usableSolarSegments;
     if (segments.length === 0) {
       setRoofAiCues(null);
       setRoofAiCueStatus('idle');
@@ -392,7 +399,7 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
     return () => {
       cancelled = true;
     };
-  }, [solarData, solarStatus, coordinates.lat, coordinates.lng, apiKey]);
+  }, [solarData, solarStatus, coordinates.lat, coordinates.lng, apiKey, usableSolarSegments]);
 
   // Sync map type (satellite ↔ hybrid)
   useEffect(() => {
@@ -541,8 +548,9 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
 
   const importSolarSegments = useCallback(() => {
     if (!solarData || !mapInstanceRef.current) return;
-    const segments = solarData.roofSegmentStats ?? [];
+    const segments = usableSolarSegments;
     if (segments.length === 0) return;
+    const dominantAzimuth = computeDominantAzimuth(segments);
 
     // Clear existing sections
     sectionsRef.current.forEach(s => {
@@ -557,7 +565,7 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
 
     // Build all sections first, then set state once
     const newSections: RoofSection[] = segments.map((segment, idx) => {
-      const path = segmentToBoundingPolygon(segment);
+      const path = segmentToBoundingPolygon(segment, { dominantAzimuthDegrees: dominantAzimuth });
       const color = SECTION_COLORS[idx % SECTION_COLORS.length];
       const pitchOption = pitchDegreesToOption(segment.pitchDegrees);
       const flatAreaSqFt = segment.stats.areaMeters2 * 10.7639;
@@ -604,7 +612,7 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
     sectionsRef.current = newSections;
     setSections(newSections);
     newSections.forEach(s => setTimeout(() => updateLabel(s), 50));
-  }, [solarData, updateLabel]);
+  }, [solarData, usableSolarSegments, updateLabel]);
 
   const totalFlat = sections.reduce((s, r) => s + r.flatArea, 0);
   const totalActual = sections.reduce((s, r) => s + r.actualArea, 0);
@@ -968,8 +976,17 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
                 </span>
               </div>
               <p className="text-amber-700">
-                {(solarData.roofSegmentStats ?? []).length} roof segment{(solarData.roofSegmentStats ?? []).length !== 1 ? 's' : ''} detected
+                {usableSolarSegments.length} usable roof segment{usableSolarSegments.length !== 1 ? 's' : ''} detected
                 · imagery {formatImageryDate(solarData.imageryDate)}
+              </p>
+              {filteredSolar.summary.droppedCount > 0 && (
+                <p className="text-[10px] text-amber-800/70">
+                  Filtered out {filteredSolar.summary.droppedCount} micro-segment
+                  {filteredSolar.summary.droppedCount !== 1 ? 's' : ''} to improve stability.
+                </p>
+              )}
+              <p className="text-[10px] text-amber-800/70">
+                Geometry retention: {Math.round(filteredSolar.summary.retainedAreaRatio * 100)}% of detected roof area.
               </p>
               <p className="text-[10px] text-amber-800/80">
                 Height source: {heightModel?.source === 'dsm' ? 'DSM (data layers)' : heightModel?.source === 'solar-plane' ? 'Solar plane heights' : 'none'}
@@ -979,7 +996,7 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
                 {' · '}
                 {roofAiCueStatus === 'ready' ? 'vision model' : roofAiCueStatus === 'loading' ? 'analyzing…' : 'heuristic fallback'}
               </p>
-              {mapLoaded && (solarData.roofSegmentStats ?? []).length > 0 && (
+              {mapLoaded && usableSolarSegments.length > 0 && (
                 <div className="space-y-1.5">
                   <button
                     type="button"
@@ -992,7 +1009,7 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
                   <button
                     type="button"
                     onClick={() => {
-                      const segments = solarData.roofSegmentStats ?? [];
+                      const segments = usableSolarSegments;
                       if (segments.length === 0) return;
                       if (!roofStructure) {
                         const aiCues = roofAiCues ?? deriveHeuristicRoofCues(segments, solarData.center);
@@ -1030,7 +1047,7 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
                       </div>
                       {(roofStructure ?? roofStructurePreview)?.confidenceBand === 'low' && (
                         <p className="text-[10px] text-amber-700 leading-snug">
-                          Add 2-4 property photos to improve ridge/valley accuracy.
+                          Run auto map viewpoints to improve ridge/valley accuracy.
                         </p>
                       )}
                     </div>
@@ -1359,6 +1376,9 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
       {showRoofStructure && roofStructure && (
         <RoofStructurePanel
           analysis={roofStructure}
+          mapCenter={coordinates}
+          mapsApiKey={apiKey}
+          solarInsights={solarData}
           onApply={next => setRoofStructure(next)}
           onClose={() => setShowRoofStructure(false)}
         />

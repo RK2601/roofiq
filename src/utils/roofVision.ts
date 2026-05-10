@@ -67,6 +67,12 @@ export interface RoofPhotoCueAnalysis {
   byType: Record<VisionCueRaw['type'], number>;
 }
 
+export interface AutoMapViewCapture {
+  id: string;
+  label: string;
+  url: string;
+}
+
 const ROOF_PHOTO_CUE_SCHEMA: Schema = {
   type: SchemaType.OBJECT,
   properties: {
@@ -313,6 +319,34 @@ function cueTypeFromPitchAndAzimuth(
   if (mod < 22.5 || mod > 157.5) return 'ridge';
   if (mod > 67.5 && mod < 112.5) return 'valley';
   return 'hip';
+}
+
+export function buildAutoMapViewCaptures(
+  center: { lat: number; lng: number },
+  apiKey: string
+): AutoMapViewCapture[] {
+  const metersToLat = (m: number) => m / 111_320;
+  const metersToLng = (m: number, lat: number) => m / (111_320 * Math.cos((lat * Math.PI) / 180));
+  const offset = 14;
+  const dLat = metersToLat(offset);
+  const dLng = metersToLng(offset, center.lat);
+
+  const views = [
+    { id: 'v-center', label: 'Center Zoom 20', lat: center.lat, lng: center.lng, zoom: 20 },
+    { id: 'v-nw', label: 'NW Offset', lat: center.lat + dLat, lng: center.lng - dLng, zoom: 20 },
+    { id: 'v-ne', label: 'NE Offset', lat: center.lat + dLat, lng: center.lng + dLng, zoom: 20 },
+    { id: 'v-sw', label: 'SW Offset', lat: center.lat - dLat, lng: center.lng - dLng, zoom: 20 },
+    { id: 'v-se', label: 'SE Offset', lat: center.lat - dLat, lng: center.lng + dLng, zoom: 20 },
+    { id: 'v-wide', label: 'Wider Zoom 19', lat: center.lat, lng: center.lng, zoom: 19 },
+  ] as const;
+
+  return views.map(view => ({
+    id: view.id,
+    label: view.label,
+    url:
+      `https://maps.googleapis.com/maps/api/staticmap?center=${view.lat},${view.lng}` +
+      `&zoom=${view.zoom}&size=640x640&maptype=satellite&scale=2&key=${apiKey}`,
+  }));
 }
 
 /**

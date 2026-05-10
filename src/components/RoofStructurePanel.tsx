@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { X, Ruler, Info, RotateCcw, Check, Camera, Loader2, Sparkles, Trash2 } from 'lucide-react';
+import { X, Ruler, Info, RotateCcw, Check, Loader2, Sparkles } from 'lucide-react';
 import { SECTION_COLORS, formatArea } from '../utils/roofCalculations';
 import { formatFt } from '../utils/measurements';
 import type {
@@ -11,10 +11,17 @@ import type {
   RoofStructureFacet,
 } from '../utils/roofStructure';
 import { applyAiCuesToAnalysis, recomputeMeasurementsFromFacets } from '../utils/roofStructure';
-import { deriveVisionRoofCuesFromFile, type RoofPhotoCueAnalysis, type VisionCueRaw } from '../utils/roofVision';
+import type { SolarBuildingInsights } from '../utils/solar';
+import {
+  buildAutoMapViewCaptures,
+  deriveVisionRoofCuesFromStaticMap,
+} from '../utils/roofVision';
 
 interface RoofStructurePanelProps {
   analysis: RoofStructureAnalysis;
+  mapCenter: { lat: number; lng: number };
+  mapsApiKey: string;
+  solarInsights: SolarBuildingInsights | null;
   onClose: () => void;
   onApply?: (next: RoofStructureAnalysis) => void;
 }
@@ -30,24 +37,29 @@ interface EdgeEditLogEntry {
 }
 
 const MULTI_ANGLE_SLOTS = [
-  { id: 'front_left', label: 'Front Left' },
-  { id: 'front_center', label: 'Front Center' },
-  { id: 'front_right', label: 'Front Right' },
-  { id: 'rear_left', label: 'Rear Left' },
-  { id: 'rear_center', label: 'Rear Center' },
-  { id: 'rear_right', label: 'Rear Right' },
+  { id: 'center', label: 'Center Zoom 20' },
+  { id: 'nw', label: 'NW Offset' },
+  { id: 'ne', label: 'NE Offset' },
+  { id: 'sw', label: 'SW Offset' },
+  { id: 'se', label: 'SE Offset' },
+  { id: 'wide', label: 'Wider Zoom 19' },
 ] as const;
 
 type MultiAngleSlot = (typeof MULTI_ANGLE_SLOTS)[number]['id'];
 
 interface MultiAngleCapture {
-  file: File;
-  previewUrl: string;
+  id: string;
+  label: string;
+  url: string;
 }
 
 interface MultiAngleResult {
   status: 'idle' | 'analyzing' | 'done' | 'error';
-  result?: RoofPhotoCueAnalysis;
+  result?: {
+    qualityScore: number;
+    aiCues: AiRoofCue[];
+    byType: Record<'ridge' | 'hip' | 'valley' | 'eave' | 'rake', number>;
+  };
   error?: string;
 }
 
@@ -126,7 +138,14 @@ function renderEdges(
   return lines;
 }
 
-export default function RoofStructurePanel({ analysis, onClose, onApply }: RoofStructurePanelProps) {
+export default function RoofStructurePanel({
+  analysis,
+  mapCenter,
+  mapsApiKey,
+  solarInsights,
+  onClose,
+  onApply,
+}: RoofStructurePanelProps) {
   const [editableFacets, setEditableFacets] = useState<RoofStructureFacet[]>(analysis.facets);
   const [edited, setEdited] = useState(false);
   const [editLog, setEditLog] = useState<EdgeEditLogEntry[]>([]);
@@ -142,12 +161,14 @@ export default function RoofStructurePanel({ analysis, onClose, onApply }: RoofS
   }, [analysis]);
 
   useEffect(() => {
-    return () => {
-      Object.values(multiCaptures).forEach(capture => {
-        if (capture) URL.revokeObjectURL(capture.previewUrl);
-      });
-    };
-  }, [multiCaptures]);
+    const captures = buildAutoMapViewCaptures(mapCenter, mapsApiKey);
+    const bySlot: Partial<Record<MultiAngleSlot, MultiAngleCapture>> = {};
+    MULTI_ANGLE_SLOTS.forEach((slot, idx) => {
+      bySlot[slot.id] = captures[idx];
+    });
+    setMultiCaptures(bySlot);
+    setMultiResults({});
+  }, [mapCenter, mapsApiKey]);
 
   const editableMeasurements = useMemo(
     () => recomputeMeasurementsFromFacets(editableFacets),
@@ -162,7 +183,7 @@ export default function RoofStructurePanel({ analysis, onClose, onApply }: RoofS
     done.forEach(item => {
       if (!item?.result) return;
       totalQuality += item.result.qualityScore;
-      cues += item.result.cues.length;
+      cues += item.result.aiCues.length;
       cuesByType.ridge += item.result.byType.ridge;
       cuesByType.hip += item.result.byType.hip;
       cuesByType.valley += item.result.byType.valley;
@@ -264,32 +285,12 @@ export default function RoofStructurePanel({ analysis, onClose, onApply }: RoofS
     });
   };
 
-  const handleCaptureSelect = (slot: MultiAngleSlot, file: File | null) => {
-    if (!file) return;
-    setMultiCaptures(prev => {
-      const existing = prev[slot];
-      if (existing) URL.revokeObjectURL(existing.previewUrl);
-      return {
-        ...prev,
-        [slot]: {
-          file,
-          previewUrl: URL.createObjectURL(file),
-        },
-      };
-    });
-    setMultiResults(prev => ({
-      ...prev,
-      [slot]: { status: 'idle' },
-    }));
-  };
-
   const analyzeSlot = async (slot: MultiAngleSlot) => {
     const capture = multiCaptures[slot];
-    if (!capture) return;
+    if (!capture || !solarInsights) return;
     setMultiResults(prev => ({ ...prev, [slot]: { status: 'analyzing' } }));
-    const slotLabel = MULTI_ANGLE_SLOTS.find(item => item.id === slot)?.label ?? slot;
     try {
-      const result = await deriveVisionRoofCuesFromFile(capture.file, slotLabel);
+      const result = await deriveVisionRoofCuesFromStaticMap(capture.url, solarInsights);
       if (!result) {
         setMultiResults(prev => ({
           ...prev,
@@ -297,9 +298,22 @@ export default function RoofStructurePanel({ analysis, onClose, onApply }: RoofS
         }));
         return;
       }
+      const byType = { ridge: 0, hip: 0, valley: 0, eave: 0, rake: 0 };
+      result.forEach(cue => {
+        if (cue.type in byType) {
+          byType[cue.type as keyof typeof byType] += 1;
+        }
+      });
       setMultiResults(prev => ({
         ...prev,
-        [slot]: { status: 'done', result },
+        [slot]: {
+          status: 'done',
+          result: {
+            qualityScore: result.reduce((sum, cue) => sum + cue.confidence, 0) / Math.max(result.length, 1),
+            aiCues: result,
+            byType,
+          },
+        },
       }));
     } catch (err) {
       setMultiResults(prev => ({
@@ -310,6 +324,7 @@ export default function RoofStructurePanel({ analysis, onClose, onApply }: RoofS
   };
 
   const analyzeAllSlots = async () => {
+    if (!solarInsights) return;
     for (const slot of MULTI_ANGLE_SLOTS) {
       if (!multiCaptures[slot.id]) continue;
       // Sequential to avoid aggressive parallel model calls.
@@ -318,35 +333,9 @@ export default function RoofStructurePanel({ analysis, onClose, onApply }: RoofS
     }
   };
 
-  const mapVisionCueToApproxLocal = (cue: VisionCueRaw): AiRoofCue | null => {
-    if (editableFacets.length === 0) return null;
-    const minX = Math.min(...editableFacets.map(f => f.bboxMeters.sw.x));
-    const maxX = Math.max(...editableFacets.map(f => f.bboxMeters.ne.x));
-    const minY = Math.min(...editableFacets.map(f => f.bboxMeters.sw.y));
-    const maxY = Math.max(...editableFacets.map(f => f.bboxMeters.ne.y));
-    const rangeX = Math.max(0.1, maxX - minX);
-    const rangeY = Math.max(0.1, maxY - minY);
-    const toLocal = (x: number, y: number) => ({
-      x: minX + Math.min(1, Math.max(0, x)) * rangeX,
-      y: maxY - Math.min(1, Math.max(0, y)) * rangeY,
-    });
-    const p1 = toLocal(cue.x1, cue.y1);
-    const p2 = toLocal(cue.x2, cue.y2);
-    const len = Math.hypot(p2.x - p1.x, p2.y - p1.y);
-    if (len < 0.8) return null;
-    return {
-      type: cue.type,
-      p1,
-      p2,
-      confidence: Math.min(1, Math.max(0.2, cue.confidence)),
-    };
-  };
-
   const applyMultiAngleInsights = () => {
     const cues = Object.values(multiResults)
-      .flatMap(item => (item?.status === 'done' && item.result && item.result.qualityScore >= 0.45 ? item.result.cues : []))
-      .map(mapVisionCueToApproxLocal)
-      .filter((cue): cue is AiRoofCue => !!cue);
+      .flatMap(item => (item?.status === 'done' && item.result && item.result.qualityScore >= 0.45 ? item.result.aiCues : []));
     if (cues.length === 0) return;
     const next = applyAiCuesToAnalysis(
       {
@@ -460,20 +449,20 @@ export default function RoofStructurePanel({ analysis, onClose, onApply }: RoofS
           <div className="rounded-xl border border-indigo-200 bg-indigo-50 p-3 space-y-3">
             <div className="flex flex-wrap items-center gap-2">
               <Sparkles size={14} className="text-indigo-600" />
-              <h3 className="text-sm font-semibold text-indigo-900">Multi-Angle Analysis (Experimental)</h3>
+              <h3 className="text-sm font-semibold text-indigo-900">Auto Map Viewpoint Analysis</h3>
               <button
                 type="button"
                 onClick={analyzeAllSlots}
-                disabled={Object.keys(multiCaptures).length === 0}
+                disabled={Object.keys(multiCaptures).length === 0 || !solarInsights}
                 className="ml-auto inline-flex items-center gap-1 rounded-md border border-indigo-200 bg-white px-2 py-1 text-xs text-indigo-700 hover:bg-indigo-100 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <Sparkles size={12} />
-                Analyze all
+                Analyze all views
               </button>
             </div>
 
             <p className="text-[11px] text-indigo-700">
-              Separate from roof topology calculations. Upload 5-6 angles (street/front/rear corners) to extract additional AI line cues.
+              Snapshots are captured automatically from the map around the selected roof center (center + four offsets + wider zoom), then fused into AI cues.
             </p>
             <div className="rounded-md border border-indigo-100 bg-white px-2 py-1.5 text-[11px] text-indigo-700">
               Captures: {captureCount}/6 · Analyzed (quality {'>=45%'}): {readySlots}/6 ·
@@ -493,7 +482,7 @@ export default function RoofStructurePanel({ analysis, onClose, onApply }: RoofS
 
                     {capture ? (
                       <img
-                        src={capture.previewUrl}
+                        src={capture.url}
                         alt={`${slot.label} capture`}
                         className="w-full h-24 object-cover rounded border border-slate-200"
                       />
@@ -504,53 +493,20 @@ export default function RoofStructurePanel({ analysis, onClose, onApply }: RoofS
                     )}
 
                     <div className="flex items-center gap-1.5">
-                      <label className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-700 hover:bg-slate-50 cursor-pointer">
-                        <Camera size={11} />
-                        Upload
-                        <input
-                          type="file"
-                          accept="image/*"
-                          className="sr-only"
-                          onChange={e => handleCaptureSelect(slot.id, e.target.files?.[0] ?? null)}
-                        />
-                      </label>
                       <button
                         type="button"
                         onClick={() => analyzeSlot(slot.id)}
-                        disabled={!capture || result?.status === 'analyzing'}
+                        disabled={!capture || result?.status === 'analyzing' || !solarInsights}
                         className="inline-flex items-center gap-1 rounded-md border border-indigo-200 bg-indigo-50 px-2 py-1 text-[11px] text-indigo-700 hover:bg-indigo-100 disabled:opacity-50 disabled:cursor-not-allowed"
                       >
                         <Sparkles size={11} />
                         Analyze
                       </button>
-                      {capture && (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setMultiCaptures(prev => {
-                              const current = prev[slot.id];
-                              if (current) URL.revokeObjectURL(current.previewUrl);
-                              const next = { ...prev };
-                              delete next[slot.id];
-                              return next;
-                            });
-                            setMultiResults(prev => {
-                              const next = { ...prev };
-                              delete next[slot.id];
-                              return next;
-                            });
-                          }}
-                          className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-2 py-1 text-[11px] text-red-700 hover:bg-red-100"
-                        >
-                          <Trash2 size={11} />
-                          Clear
-                        </button>
-                      )}
                     </div>
 
                     {result?.status === 'done' && result.result && (
                       <p className="text-[11px] text-emerald-700">
-                        {result.result.cues.length} cues · quality {Math.round(result.result.qualityScore * 100)}%
+                        {result.result.aiCues.length} cues · quality {Math.round(result.result.qualityScore * 100)}%
                       </p>
                     )}
                     {result?.status === 'error' && (
@@ -582,9 +538,14 @@ export default function RoofStructurePanel({ analysis, onClose, onApply }: RoofS
                 Apply multi-angle cues to structure confidence
               </button>
               {!multiCoverageOk && (
-                <span className="text-[11px] text-indigo-600">Need at least 4 quality-analyzed angle photos.</span>
+                <span className="text-[11px] text-indigo-600">Need at least 4 quality-analyzed map views.</span>
               )}
             </div>
+            {!solarInsights && (
+              <p className="text-[11px] text-amber-700">
+                Solar insights are required before viewpoint analysis can run.
+              </p>
+            )}
           </div>
 
           <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
