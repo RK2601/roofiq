@@ -54,8 +54,16 @@ import {
 import { computeRoofMeasurements, formatFt } from '../utils/measurements';
 import { analyzeSolarSegments, type RoofStructureAnalysis } from '../utils/roofStructure';
 import { buildHeightModel, type HeightModel } from '../utils/heightModel';
-import { deriveHeuristicRoofCues, deriveVisionRoofCuesFromStaticMap } from '../utils/roofVision';
+import {
+  deriveHeuristicRoofCues,
+  deriveVisionRoofCuesFromStaticMap,
+  deriveVisionRoofCuesFromFile,
+  mapPhotoCuesToAiCues,
+  type RoofPhotoCueAnalysis,
+} from '../utils/roofVision';
 import RoofStructurePanel from './RoofStructurePanel';
+import RoofMappingWizard from './RoofMappingWizard';
+import { ErrorBoundary } from './ErrorBoundary';
 
 interface AnalysisPageProps {
   apiKey: string;
@@ -103,6 +111,7 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
     [solarData?.roofSegmentStats]
   );
   const usableSolarSegments = filteredSolar.segments;
+  const [showWizard, setShowWizard] = useState(false);
 
   const roofStructurePreview = useMemo(() => {
     const segments = usableSolarSegments;
@@ -127,6 +136,30 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
   // Photo upload for AI analysis
   const [uploadedPhoto, setUploadedPhoto] = useState<{ file: File; previewUrl: string } | null>(null);
   const photoInputRef = useRef<HTMLInputElement>(null);
+
+  // Multi-angle photo analysis (sidebar section)
+  const MULTI_ANGLE_SLOTS = [
+    { id: 'front_left' as const,   label: 'Front Left' },
+    { id: 'front_center' as const, label: 'Front Center' },
+    { id: 'front_right' as const,  label: 'Front Right' },
+    { id: 'rear_left' as const,    label: 'Rear Left' },
+    { id: 'rear_center' as const,  label: 'Rear Center' },
+    { id: 'rear_right' as const,   label: 'Rear Right' },
+  ] as const;
+  type MultiSlotId = typeof MULTI_ANGLE_SLOTS[number]['id'];
+  type MultiCapture = { file: File; previewUrl: string };
+  type MultiResult  = { status: 'idle' | 'analyzing' | 'done' | 'error'; result?: RoofPhotoCueAnalysis; error?: string };
+
+  const [showMultiAngle, setShowMultiAngle] = useState(false);
+  const [multiCaptures, setMultiCaptures] = useState<Partial<Record<MultiSlotId, MultiCapture>>>({});
+  const [multiResults,  setMultiResults]  = useState<Partial<Record<MultiSlotId, MultiResult>>>({});
+
+  const multiCaptureCount = Object.keys(multiCaptures).length;
+  const multiReadySlots   = Object.values(multiResults)
+    .filter(r => r?.status === 'done' && (r.result?.qualityScore ?? 0) >= 0.4).length;
+  const multiTotalCues    = Object.values(multiResults)
+    .filter(r => r?.status === 'done' && r.result)
+    .reduce((sum, r) => sum + (r!.result!.cues.length), 0);
 
   // Keep ref in sync
   useEffect(() => {
@@ -563,8 +596,16 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
     labelsRef.current = [];
     sectionsRef.current = [];
 
+    // Keep only meaningful facets: drop tiny segments (<80 sq ft), cap at 12, largest first
+    // so smaller polygons render on top of larger ones (higher zIndex).
+    const MIN_AREA_SQFT = 80;
+    const filtered = [...segments]
+      .filter(s => s.stats.areaMeters2 * 10.7639 >= MIN_AREA_SQFT)
+      .sort((a, b) => b.stats.areaMeters2 - a.stats.areaMeters2)
+      .slice(0, 12);
+
     // Build all sections first, then set state once
-    const newSections: RoofSection[] = segments.map((segment, idx) => {
+    const newSections: RoofSection[] = filtered.map((segment, idx) => {
       const path = segmentToBoundingPolygon(segment, { dominantAzimuthDegrees: dominantAzimuth });
       const color = SECTION_COLORS[idx % SECTION_COLORS.length];
       const pitchOption = pitchDegreesToOption(segment.pitchDegrees);
@@ -638,6 +679,57 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
       });
     const base = `https://maps.googleapis.com/maps/api/staticmap?${params}`;
     return base + paths.map(p => `&path=${encodeURIComponent(p)}`).join('');
+  };
+
+  const handleMultiCapture = (slotId: MultiSlotId, file: File | null) => {
+    if (!file) return;
+    setMultiCaptures(prev => {
+      const existing = prev[slotId];
+      if (existing) URL.revokeObjectURL(existing.previewUrl);
+      return { ...prev, [slotId]: { file, previewUrl: URL.createObjectURL(file) } };
+    });
+    setMultiResults(prev => ({ ...prev, [slotId]: { status: 'idle' } }));
+  };
+
+  const analyzeMultiSlot = async (slotId: MultiSlotId) => {
+    const capture = multiCaptures[slotId];
+    if (!capture) return;
+    setMultiResults(prev => ({ ...prev, [slotId]: { status: 'analyzing' } }));
+    const label = MULTI_ANGLE_SLOTS.find(s => s.id === slotId)?.label;
+    try {
+      const result = await deriveVisionRoofCuesFromFile(capture.file, label);
+      if (!result) {
+        setMultiResults(prev => ({ ...prev, [slotId]: { status: 'error', error: 'No cues detected.' } }));
+        return;
+      }
+      setMultiResults(prev => ({ ...prev, [slotId]: { status: 'done', result } }));
+    } catch (err) {
+      setMultiResults(prev => ({
+        ...prev,
+        [slotId]: { status: 'error', error: err instanceof Error ? err.message : String(err) },
+      }));
+    }
+  };
+
+  const analyzeAllMultiSlots = async () => {
+    for (const slot of MULTI_ANGLE_SLOTS) {
+      if (!multiCaptures[slot.id] || multiResults[slot.id]?.status === 'analyzing') continue;
+      // eslint-disable-next-line no-await-in-loop
+      await analyzeMultiSlot(slot.id);
+    }
+  };
+
+  const applyMultiCuesToStructure = () => {
+    if (!solarData) return;
+    const rawCues = Object.values(multiResults)
+      .filter(r => r?.status === 'done' && (r.result?.qualityScore ?? 0) >= 0.4)
+      .flatMap(r => r!.result!.cues);
+    if (rawCues.length === 0) return;
+    const aiCues = mapPhotoCuesToAiCues(rawCues, solarData);
+    if (aiCues.length > 0) {
+      setRoofAiCues(aiCues);
+      setRoofAiCueStatus('ready');
+    }
   };
 
   const handlePhotoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -923,6 +1015,17 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
           </div>
           <p className="hidden text-xs text-slate-500 sm:block">Draw polygons on the map to measure each roof section</p>
 
+          {/* Smart Roof Mapping Wizard launch button */}
+          <button
+            type="button"
+            onClick={() => setShowWizard(true)}
+            className="mt-2 w-full flex items-center justify-center gap-2 bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-500 hover:to-blue-500 text-white text-xs font-semibold py-2.5 px-4 rounded-xl transition-all shadow-sm"
+          >
+            <Brain size={13} />
+            Smart Roof Mapping Wizard
+            <ArrowRight size={13} />
+          </button>
+
           <div className="mt-2 space-y-2 border-t border-slate-200 pt-2 sm:mt-3 sm:pt-3">
             <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
               <MapPin size={12} className="shrink-0 text-blue-600" aria-hidden />
@@ -1060,6 +1163,147 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
             <div className="flex items-center gap-2 rounded-xl bg-slate-50 border border-slate-200 px-3 py-2 text-xs text-slate-500">
               <Sun size={12} className="shrink-0 opacity-40" />
               <span>{solarError ?? 'Solar data unavailable — draw sections manually'}</span>
+            </div>
+          )}
+        </div>
+
+        {/* ── Multi-Angle Photo Analysis ──────────────────────────── */}
+        <div className="mx-3 mt-2">
+          <button
+            type="button"
+            onClick={() => setShowMultiAngle(v => !v)}
+            className="w-full flex items-center gap-2 text-xs font-semibold text-indigo-700 px-3 py-2 bg-indigo-50 hover:bg-indigo-100 rounded-xl transition-colors"
+          >
+            <Camera size={13} className="text-indigo-500 shrink-0" />
+            Multi-Angle Photo Analysis
+            {multiCaptureCount > 0 && (
+              <span className="ml-auto text-[10px] font-medium text-indigo-500">
+                {multiCaptureCount}/6 uploaded · {multiTotalCues} cues
+              </span>
+            )}
+            {showMultiAngle ? <ChevronUp size={12} className="ml-1 shrink-0" /> : <ChevronDown size={12} className="ml-1 shrink-0" />}
+          </button>
+
+          {showMultiAngle && (
+            <div className="mt-1 rounded-xl border border-indigo-100 bg-indigo-50/60 p-2.5 space-y-2">
+              <p className="text-[10px] text-indigo-600 leading-snug">
+                Upload roof photos from different angles. AI extracts ridge, hip, valley, eave and rake cues to
+                improve structure accuracy.
+              </p>
+
+              <div className="grid grid-cols-2 gap-1.5">
+                {MULTI_ANGLE_SLOTS.map(slot => {
+                  const capture = multiCaptures[slot.id];
+                  const result  = multiResults[slot.id];
+                  const analyzing = result?.status === 'analyzing';
+                  const done      = result?.status === 'done' && result.result;
+                  const error     = result?.status === 'error';
+                  return (
+                    <div key={slot.id} className="rounded-lg border border-indigo-100 bg-white p-1.5 space-y-1">
+                      <p className="text-[10px] font-semibold text-slate-600">{slot.label}</p>
+
+                      {capture ? (
+                        <img
+                          src={capture.previewUrl}
+                          alt={slot.label}
+                          className="w-full h-14 object-cover rounded border border-slate-200"
+                        />
+                      ) : (
+                        <label className="flex flex-col items-center justify-center w-full h-14 rounded border-2 border-dashed border-indigo-200 bg-indigo-50/50 cursor-pointer hover:bg-indigo-100 transition-colors">
+                          <Camera size={16} className="text-indigo-300 mb-0.5" />
+                          <span className="text-[9px] text-indigo-400">Upload</span>
+                          <input
+                            type="file"
+                            accept="image/*"
+                            className="sr-only"
+                            onChange={e => handleMultiCapture(slot.id, e.target.files?.[0] ?? null)}
+                          />
+                        </label>
+                      )}
+
+                      <div className="flex items-center gap-1 flex-wrap">
+                        {capture && (
+                          <>
+                            <label className="text-[10px] text-slate-500 cursor-pointer hover:text-indigo-600 border border-slate-200 rounded px-1.5 py-0.5">
+                              Change
+                              <input
+                                type="file"
+                                accept="image/*"
+                                className="sr-only"
+                                onChange={e => handleMultiCapture(slot.id, e.target.files?.[0] ?? null)}
+                              />
+                            </label>
+                            <button
+                              type="button"
+                              onClick={() => analyzeMultiSlot(slot.id)}
+                              disabled={analyzing}
+                              className="text-[10px] text-indigo-700 bg-indigo-50 border border-indigo-200 rounded px-1.5 py-0.5 disabled:opacity-50"
+                            >
+                              {analyzing ? (
+                                <Loader2 size={10} className="inline animate-spin" />
+                              ) : 'Analyze'}
+                            </button>
+                          </>
+                        )}
+                        {done && (
+                          <span className="ml-auto text-[10px] text-emerald-600 font-medium">
+                            {result!.result!.cues.length}c · {Math.round(result!.result!.qualityScore * 100)}%
+                          </span>
+                        )}
+                        {error && (
+                          <span className="text-[10px] text-red-500 truncate" title={result?.error}>Err</span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Summary + actions */}
+              <div className="rounded-lg border border-indigo-100 bg-white px-2 py-1.5 text-[10px] text-slate-600 space-y-0.5">
+                <p className="font-semibold text-slate-700">
+                  {multiReadySlots}/{MULTI_ANGLE_SLOTS.length} quality angles · {multiTotalCues} total cues
+                </p>
+                {multiTotalCues > 0 && (
+                  <p>
+                    {Object.values(multiResults).filter(r => r?.status === 'done').map(r => r!.result!).reduce((s, r) => s + r.byType.ridge, 0)} ridge ·{' '}
+                    {Object.values(multiResults).filter(r => r?.status === 'done').map(r => r!.result!).reduce((s, r) => s + r.byType.hip, 0)} hip ·{' '}
+                    {Object.values(multiResults).filter(r => r?.status === 'done').map(r => r!.result!).reduce((s, r) => s + r.byType.valley, 0)} valley
+                  </p>
+                )}
+              </div>
+
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <button
+                  type="button"
+                  onClick={analyzeAllMultiSlots}
+                  disabled={multiCaptureCount === 0}
+                  className="text-[10px] font-semibold text-indigo-700 border border-indigo-200 bg-white rounded px-2.5 py-1.5 hover:bg-indigo-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  Analyze All
+                </button>
+                {solarData && multiReadySlots >= 2 && (
+                  <button
+                    type="button"
+                    onClick={applyMultiCuesToStructure}
+                    className="text-[10px] font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded px-2.5 py-1.5 transition-colors"
+                  >
+                    Apply to Structure Analysis
+                  </button>
+                )}
+                {!solarData && multiReadySlots >= 2 && (
+                  <span className="text-[10px] text-indigo-500 italic">Waiting for Solar data to apply cues…</span>
+                )}
+                {solarData && multiReadySlots < 2 && multiCaptureCount > 0 && (
+                  <span className="text-[10px] text-indigo-400">Analyze at least 2 angles to apply</span>
+                )}
+              </div>
+
+              {roofAiCueStatus === 'ready' && multiReadySlots >= 2 && (
+                <div className="rounded-lg bg-emerald-50 border border-emerald-100 px-2 py-1 text-[10px] text-emerald-700">
+                  Photo cues applied — structure analysis updated.
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -1382,6 +1626,18 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
           onApply={next => setRoofStructure(next)}
           onClose={() => setShowRoofStructure(false)}
         />
+      )}
+
+      {showWizard && (
+        <ErrorBoundary>
+          <RoofMappingWizard
+            apiKey={apiKey}
+            address={address}
+            coordinates={coordinates}
+            solarData={solarData}
+            onClose={() => setShowWizard(false)}
+          />
+        </ErrorBoundary>
       )}
     </div>
   );

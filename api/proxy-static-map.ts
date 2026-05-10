@@ -1,6 +1,6 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 
-const ALLOWED = /^https:\/\/maps\.googleapis\.com\/maps\/api\/staticmap\?/;
+const ALLOWED = /^https:\/\/maps\.googleapis\.com\/maps\/api\/(staticmap|streetview)\?/;
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader('Access-Control-Allow-Origin', '*');
