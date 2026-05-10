@@ -213,6 +213,17 @@ imagery quality: ${solar.imageryQuality}
 ${segments}`;
 }
 
+/** Convert an array of raw photo cues (normalized 0-1 coords) to metric AiRoofCues
+ *  using the Solar building bounding box to map image space → lat/lng → meters. */
+export function mapPhotoCuesToAiCues(
+  rawCues: VisionCueRaw[],
+  solar: SolarBuildingInsights
+): AiRoofCue[] {
+  return rawCues
+    .map(cue => normalizeCueToMeters(cue, solar))
+    .filter((cue): cue is AiRoofCue => !!cue);
+}
+
 export async function deriveVisionRoofCuesFromStaticMap(
   staticMapUrl: string,
   solar: SolarBuildingInsights
@@ -303,6 +314,373 @@ ${slotLabel ? `Capture slot: ${slotLabel}.` : ''}`;
   }
   return null;
 }
+
+// ─── Wizard Analysis Types ────────────────────────────────────────────────────
+
+export interface OutlineAnalysis {
+  qualityScore: number;   // 0..1 how well the outline matches the actual roof
+  coverage: number;       // 0..1 fraction of roof covered
+  areaEstimateSqFt: number;
+  notes: string;
+}
+
+export interface SegmentAnalysis {
+  type: 'flat' | 'gable' | 'hip' | 'shed' | 'valley' | 'dormer' | 'mansard';
+  facingDirection: string; // N|NE|E|SE|S|SW|W|NW|flat
+  pitchEstimate: string;   // flat|2/12|3/12|4/12|6/12|8/12|10/12|12/12|steep
+  confidence: number;      // 0..1
+  notes: string;
+}
+
+export interface StructuralLine {
+  type: 'ridge' | 'hip' | 'valley' | 'eave' | 'rake' | 'step';
+  x1: number; y1: number;
+  x2: number; y2: number;
+  confidence: number;
+  estimatedLengthFt: number;
+}
+
+export interface StructuralDetection {
+  cues: StructuralLine[];
+  roofType: string;
+  predominantPitch: string;
+  totalAreaSqFt: number;
+  notes: string;
+}
+
+export interface CombinedRoofAnalysis {
+  condition: 'Excellent' | 'Good' | 'Fair' | 'Poor' | 'Critical';
+  condition_score: number;
+  issues: string[];
+  urgency: 'Low' | 'Medium' | 'High' | 'Urgent';
+  estimated_remaining_life: string;
+  recommendation: string;
+  marketing_message: string;
+  structuralSummary: string;
+  photoSummary: string;
+}
+
+// ─── Wizard Schemas ───────────────────────────────────────────────────────────
+
+const OUTLINE_ANALYSIS_SCHEMA: Schema = {
+  type: SchemaType.OBJECT,
+  properties: {
+    qualityScore: { type: SchemaType.NUMBER },
+    coverage: { type: SchemaType.NUMBER },
+    areaEstimateSqFt: { type: SchemaType.NUMBER },
+    notes: { type: SchemaType.STRING },
+  },
+  required: ['qualityScore', 'coverage', 'areaEstimateSqFt', 'notes'],
+};
+
+const SEGMENT_ANALYSIS_SCHEMA: Schema = {
+  type: SchemaType.OBJECT,
+  properties: {
+    type: {
+      type: SchemaType.STRING,
+      format: 'enum',
+      enum: ['flat', 'gable', 'hip', 'shed', 'valley', 'dormer', 'mansard'],
+    },
+    facingDirection: {
+      type: SchemaType.STRING,
+      format: 'enum',
+      enum: ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW', 'flat'],
+    },
+    pitchEstimate: {
+      type: SchemaType.STRING,
+      format: 'enum',
+      enum: ['flat', '2/12', '3/12', '4/12', '5/12', '6/12', '8/12', '10/12', '12/12', 'steep'],
+    },
+    confidence: { type: SchemaType.NUMBER },
+    notes: { type: SchemaType.STRING },
+  },
+  required: ['type', 'facingDirection', 'pitchEstimate', 'confidence', 'notes'],
+};
+
+const STRUCTURAL_DETECTION_SCHEMA: Schema = {
+  type: SchemaType.OBJECT,
+  properties: {
+    cues: {
+      type: SchemaType.ARRAY,
+      items: {
+        type: SchemaType.OBJECT,
+        properties: {
+          type: {
+            type: SchemaType.STRING,
+            format: 'enum',
+            enum: ['ridge', 'hip', 'valley', 'eave', 'rake', 'step'],
+          },
+          x1: { type: SchemaType.NUMBER },
+          y1: { type: SchemaType.NUMBER },
+          x2: { type: SchemaType.NUMBER },
+          y2: { type: SchemaType.NUMBER },
+          confidence: { type: SchemaType.NUMBER },
+          estimatedLengthFt: { type: SchemaType.NUMBER },
+        },
+        required: ['type', 'x1', 'y1', 'x2', 'y2', 'confidence', 'estimatedLengthFt'],
+      },
+    },
+    roofType: { type: SchemaType.STRING },
+    predominantPitch: { type: SchemaType.STRING },
+    totalAreaSqFt: { type: SchemaType.NUMBER },
+    notes: { type: SchemaType.STRING },
+  },
+  required: ['cues', 'roofType', 'predominantPitch', 'totalAreaSqFt', 'notes'],
+};
+
+const COMBINED_ANALYSIS_SCHEMA: Schema = {
+  type: SchemaType.OBJECT,
+  properties: {
+    condition: {
+      type: SchemaType.STRING,
+      format: 'enum',
+      enum: ['Excellent', 'Good', 'Fair', 'Poor', 'Critical'],
+    },
+    condition_score: { type: SchemaType.NUMBER },
+    issues: { type: SchemaType.ARRAY, items: { type: SchemaType.STRING } },
+    urgency: {
+      type: SchemaType.STRING,
+      format: 'enum',
+      enum: ['Low', 'Medium', 'High', 'Urgent'],
+    },
+    estimated_remaining_life: { type: SchemaType.STRING },
+    recommendation: { type: SchemaType.STRING },
+    marketing_message: { type: SchemaType.STRING },
+    structuralSummary: { type: SchemaType.STRING },
+    photoSummary: { type: SchemaType.STRING },
+  },
+  required: [
+    'condition', 'condition_score', 'issues', 'urgency',
+    'estimated_remaining_life', 'recommendation', 'marketing_message',
+    'structuralSummary', 'photoSummary',
+  ],
+};
+
+// ─── Coordinate helpers for wizard ───────────────────────────────────────────
+
+/** Convert a lat/lng point to normalized [0,1] image coordinates for a static map
+ *  at the given center/zoom. y=0 is the top (north). Approximation valid at zoom ≥18. */
+export function latLngToImageNorm(
+  point: { lat: number; lng: number },
+  center: { lat: number; lng: number },
+  zoom: number,
+  imageLogicalSize: number
+): { x: number; y: number } {
+  const worldPx = 256 * Math.pow(2, zoom);
+  const pixelsPerDeg = worldPx / 360;
+  const half = imageLogicalSize / 2;
+  const dx = (point.lng - center.lng) * pixelsPerDeg;
+  const dy = -(point.lat - center.lat) * pixelsPerDeg; // y flips (north = top)
+  return {
+    x: Math.max(0, Math.min(1, (dx + half) / imageLogicalSize)),
+    y: Math.max(0, Math.min(1, (dy + half) / imageLogicalSize)),
+  };
+}
+
+function polygonToNormString(
+  path: { lat: number; lng: number }[],
+  center: { lat: number; lng: number },
+  zoom: number
+): string {
+  return path
+    .map(p => {
+      const n = latLngToImageNorm(p, center, zoom, 640);
+      return `(${n.x.toFixed(3)},${n.y.toFixed(3)})`;
+    })
+    .join(' → ');
+}
+
+function buildImagePart(imageData: { data: string; mimeType: string } | null | undefined): Part | null {
+  if (!imageData || !imageData.data || imageData.data.length < 100) return null;
+  return { inlineData: { mimeType: imageData.mimeType || 'image/png', data: imageData.data } } as Part;
+}
+
+async function runGeminiWithSchema<T>(
+  parts: Part[],
+  schema: Schema,
+  temperature = 0.25
+): Promise<T | null> {
+  const apiKey = readGeminiApiKey();
+  if (!apiKey) return null;
+  // Remove any null/falsy parts (e.g., missing image)
+  const validParts = parts.filter(Boolean) as Part[];
+  if (validParts.length === 0) return null;
+  const genAI = new GoogleGenerativeAI(apiKey);
+  for (const modelId of GEMINI_MODEL_IDS) {
+    try {
+      const model = genAI.getGenerativeModel({
+        model: modelId,
+        generationConfig: {
+          responseMimeType: 'application/json',
+          responseSchema: schema,
+          temperature,
+          maxOutputTokens: 2000,
+        },
+        safetySettings: SAFETY_RELAXED,
+      });
+      const result = await model.generateContent(validParts);
+      const text = result.response.text();
+      const cleaned = text.replace(/```json\n?/gi, '').replace(/```\n?/g, '').trim();
+      return JSON.parse(cleaned) as T;
+    } catch {
+      // try next model
+    }
+  }
+  return null;
+}
+
+// ─── Wizard Gemini Calls ──────────────────────────────────────────────────────
+
+/** Step 1a: Analyze the user's drawn roof outline against the satellite image. */
+export async function analyzeRoofOutline(
+  imageData: { data: string; mimeType: string } | null,
+  outlineNormalized: { x: number; y: number }[],
+): Promise<OutlineAnalysis | null> {
+  const outlineStr = outlineNormalized.map(p => `(${p.x.toFixed(3)},${p.y.toFixed(3)})`).join(' → ');
+  const imgPart = buildImagePart(imageData);
+  const textPart: Part = {
+    text: `You are analyzing a north-up satellite image of a building rooftop.${imgPart ? '' : ' (No image provided — use coordinates only.)'}
+The user has drawn a boundary polygon with these normalized image coordinates (x=0 left, y=0 top):
+${outlineStr}
+
+Evaluate:
+1. qualityScore (0-1): How well does the polygon appear to trace a roof boundary?
+2. coverage (0-1): Estimate what fraction of a typical roof the polygon covers.
+3. areaEstimateSqFt: Estimate total roof area in square feet.
+4. notes: Brief feedback (≤2 sentences) on the outline.
+
+Return JSON only.`,
+  } as Part;
+  const parts: Part[] = [imgPart, textPart].filter(Boolean) as Part[];
+  return runGeminiWithSchema<OutlineAnalysis>(parts, OUTLINE_ANALYSIS_SCHEMA);
+}
+
+/** Step 1b: Analyze a single user-drawn roof segment against the satellite image. */
+export async function analyzeRoofSegment(
+  imageData: { data: string; mimeType: string } | null,
+  segmentNormalized: { x: number; y: number }[],
+  segmentIndex: number,
+  existingSegmentsNormalized?: { x: number; y: number }[][],
+): Promise<SegmentAnalysis | null> {
+  const segStr = segmentNormalized.map(p => `(${p.x.toFixed(3)},${p.y.toFixed(3)})`).join(' → ');
+  const contextStr = existingSegmentsNormalized && existingSegmentsNormalized.length > 0
+    ? `\nPreviously mapped segments for context: ${existingSegmentsNormalized.length} segment(s) already identified.`
+    : '';
+  const imgPart = buildImagePart(imageData);
+  const textPart: Part = {
+    text: `You are analyzing a north-up satellite image of a building rooftop.${imgPart ? '' : ' (No image provided — use coordinates only.)'}
+Segment ${segmentIndex + 1} has been drawn with these normalized image coordinates:
+${segStr}${contextStr}
+
+Classify this roof segment:
+- type: the structural type (flat/gable/hip/shed/valley/dormer/mansard)
+- facingDirection: which cardinal direction this slope faces (N/NE/E/SE/S/SW/W/NW/flat)
+- pitchEstimate: slope ratio (flat/2/12/3/12/4/12/5/12/6/12/8/12/10/12/12/12/steep)
+- confidence: 0-1 how confident you are
+- notes: 1 sentence describing what you see
+
+Return JSON only.`,
+  } as Part;
+  const parts: Part[] = [imgPart, textPart].filter(Boolean) as Part[];
+  return runGeminiWithSchema<SegmentAnalysis>(parts, SEGMENT_ANALYSIS_SCHEMA);
+}
+
+/** Step 1c: Detect structural roof lines across all user-drawn segments. */
+export async function detectRoofStructure(
+  imageData: { data: string; mimeType: string } | null,
+  allSegmentsNormalized: { x: number; y: number }[][],
+): Promise<StructuralDetection | null> {
+  const segDesc = allSegmentsNormalized
+    .map((seg, i) => `Segment ${i + 1}: ${seg.map(p => `(${p.x.toFixed(3)},${p.y.toFixed(3)})`).join(' → ')}`)
+    .join('\n');
+  const imgPart = buildImagePart(imageData);
+  const textPart: Part = {
+    text: `You are analyzing a north-up satellite image of a building rooftop where the user has traced ${allSegmentsNormalized.length} roof segment(s).${imgPart ? '' : ' (No image provided — infer structure from segment coordinates only.)'}
+
+${segDesc}
+
+Detect ALL structural lines (ridge, hip, valley, eave, rake, step) using the segment boundaries.
+For each cue:
+- type: MUST be one of: ridge, hip, valley, eave, rake, step
+- x1,y1,x2,y2: normalized image coords [0,1] of the line endpoints
+- confidence: 0-1
+- estimatedLengthFt: estimated length in feet (use 10-60 as typical range)
+
+Also return:
+- roofType: e.g. "gable", "hip", "complex hip-gable", "flat", "mansard"
+- predominantPitch: e.g. "4/12", "6/12"
+- totalAreaSqFt: estimated total roof area (positive number)
+- notes: key observations (1-2 sentences)
+
+Return 4-20 cues total. Return JSON only.`,
+  } as Part;
+  const parts: Part[] = [imgPart, textPart].filter(Boolean) as Part[];
+  return runGeminiWithSchema<StructuralDetection>(parts, STRUCTURAL_DETECTION_SCHEMA);
+}
+
+/** Step 3: Combined final analysis from structural map + multi-angle photos. */
+export async function analyzeCombinedRoof(
+  structuralData: {
+    roofType: string;
+    predominantPitch: string;
+    totalAreaSqFt: number;
+    segmentCount: number;
+    ridgeFt: number;
+    hipFt: number;
+    valleyFt: number;
+    eaveFt: number;
+    notes: string;
+  },
+  photoSummaries: Array<{
+    slot: string;
+    qualityScore: number;
+    cueCount: number;
+    byType: Record<string, number>;
+  }>,
+  topImageData?: { data: string; mimeType: string },
+): Promise<CombinedRoofAnalysis | null> {
+  const structStr = `Roof type: ${structuralData.roofType}
+Predominant pitch: ${structuralData.predominantPitch}
+Total area: ${Math.round(structuralData.totalAreaSqFt)} sq ft (${Math.round(structuralData.totalAreaSqFt / 100)} squares)
+Segments mapped: ${structuralData.segmentCount}
+Ridge: ${Math.round(structuralData.ridgeFt)} ft | Hip: ${Math.round(structuralData.hipFt)} ft | Valley: ${Math.round(structuralData.valleyFt)} ft | Eave: ${Math.round(structuralData.eaveFt)} ft
+Structural notes: ${structuralData.notes}`;
+
+  const photoStr = photoSummaries.length > 0
+    ? photoSummaries.map(p => `${p.slot}: quality=${(p.qualityScore * 100).toFixed(0)}%, ${p.cueCount} cues detected`).join('\n')
+    : 'No additional photos analyzed.';
+
+  const parts: Part[] = [];
+  if (topImageData) {
+    parts.push({ inlineData: { mimeType: topImageData.mimeType, data: topImageData.data } } as Part);
+  }
+  parts.push({
+    text: `You are an expert roofing inspector performing a comprehensive roof assessment.
+
+STRUCTURAL ANALYSIS (from mapped segments):
+${structStr}
+
+MULTI-ANGLE PHOTO ANALYSIS:
+${photoStr}
+
+Based on all available data, provide a complete roof assessment:
+- condition: Excellent/Good/Fair/Poor/Critical
+- condition_score: 0-100 numeric score
+- issues: list of specific issues identified (empty array if none)
+- urgency: Low/Medium/High/Urgent for service recommendation
+- estimated_remaining_life: e.g. "8-12 years"
+- recommendation: specific actionable recommendation for the homeowner
+- marketing_message: compelling 1-sentence pitch for roofing services
+- structuralSummary: 1-2 sentence summary of structural findings
+- photoSummary: 1-2 sentence summary of photo analysis findings
+
+Return JSON only.`,
+  } as Part);
+
+  return runGeminiWithSchema<CombinedRoofAnalysis>(parts, COMBINED_ANALYSIS_SCHEMA, 0.3);
+}
+
+// ─── Legacy helpers (unchanged below) ────────────────────────────────────────
 
 function cueTypeFromPitchAndAzimuth(
   pitchDegrees: number,

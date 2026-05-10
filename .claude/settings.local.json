@@ -20,7 +20,12 @@
       "Bash(curl -s http://localhost:5173)",
       "Bash(echo \"EXIT: $?\")",
       "Bash(git -C /Users/rupesh/roofing-app show 04557ef -- src/App.tsx)",
-      "Bash(git -C /Users/rupesh/roofing-app diff 04557ef~1 04557ef)"
+      "Bash(git -C /Users/rupesh/roofing-app diff 04557ef~1 04557ef)",
+      "Bash(grep -E \"\\\\.\\(tsx?|jsx?|json\\)$\")",
+      "Bash(npx vite *)",
+      "Bash(cat /Users/rupesh/roofing-app/.claude/worktrees/affectionate-cray-f5bc7b/.env 2>/dev/null || cat /Users/rupesh/roofing-app/.env 2>/dev/null || echo \"No .env found\")",
+      "Bash(cp /Users/rupesh/roofing-app/.env /Users/rupesh/roofing-app/.claude/worktrees/affectionate-cray-f5bc7b/.env *)",
+      "Bash(python3 -c \"import json,sys; logs=json.load\\(sys.stdin\\); texts=[l['text'] for l in logs if l.get\\('type'\\)=='text']; text=''.join\\(texts\\); lines=text.split\\('\\\\n'\\); errs=[l for l in lines if '[error]' in l and 'The above' not in l and 'Consider' not in l and 'Visit' not in l]; print\\('\\\\n'.join\\(errs[:20]\\)\\)\")"
     ]
   }
 }

@@ -89,6 +89,15 @@ export async function initDb() {
       generated_at     TIMESTAMPTZ DEFAULT NOW()
     )
   `;
+  await neonSql`
+    CREATE TABLE IF NOT EXISTS roof_ai_workflow_reports (
+      id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      project_id   UUID NOT NULL UNIQUE REFERENCES projects(id) ON DELETE CASCADE,
+      report       JSONB NOT NULL,
+      created_at   TIMESTAMPTZ DEFAULT NOW(),
+      updated_at   TIMESTAMPTZ DEFAULT NOW()
+    )
+  `;
   await neonSql`ALTER TABLE quotes ADD COLUMN IF NOT EXISTS quote_address TEXT`;
 }
 
@@ -106,6 +115,38 @@ export interface SectionToSave {
 export interface ProjectSnapshot {
   label: string;
   url: string;
+}
+
+export interface WizardWorkflowReportPayload {
+  version: 'v1';
+  source: 'roof-mapping-wizard';
+  address: string;
+  coordinates: Coordinates;
+  outline: {
+    points: Array<{ lat: number; lng: number }>;
+    analysis: unknown | null;
+  } | null;
+  segments: Array<{
+    id: string;
+    index: number;
+    color: string;
+    path: Array<{ lat: number; lng: number }>;
+    analysis: unknown | null;
+  }>;
+  structure: unknown | null;
+  photos: Array<{
+    id: string;
+    label: string;
+    description: string;
+    status: string;
+    qualityScore?: number | null;
+    cueCount?: number;
+    byType?: Record<string, number>;
+    captureImageDataUrl?: string | null;
+    capturedAtIso?: string | null;
+  }>;
+  finalAnalysis: unknown | null;
+  updatedAtIso: string;
 }
 
 export async function saveProject(
@@ -159,6 +200,55 @@ export async function saveProject(
   }
 
   return projectId;
+}
+
+export async function saveWizardWorkflowReport(
+  report: WizardWorkflowReportPayload
+): Promise<{ projectId: string; reportId: string }> {
+  const sql = requireNeon();
+
+  await sql`
+    CREATE TABLE IF NOT EXISTS roof_ai_workflow_reports (
+      id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      project_id   UUID NOT NULL UNIQUE REFERENCES projects(id) ON DELETE CASCADE,
+      report       JSONB NOT NULL,
+      created_at   TIMESTAMPTZ DEFAULT NOW(),
+      updated_at   TIMESTAMPTZ DEFAULT NOW()
+    )
+  `;
+
+  const existing = await sql`
+    SELECT id
+    FROM projects
+    WHERE address = ${report.address}
+      AND ABS(lat - ${report.coordinates.lat}) < 0.000001
+      AND ABS(lng - ${report.coordinates.lng}) < 0.000001
+    ORDER BY created_at DESC
+    LIMIT 1
+  `;
+
+  let projectId = existing[0]?.id as string | undefined;
+  if (!projectId) {
+    const [inserted] = await sql`
+      INSERT INTO projects (address, lat, lng, snapshot_url)
+      VALUES (${report.address}, ${report.coordinates.lat}, ${report.coordinates.lng}, NULL)
+      RETURNING id
+    `;
+    projectId = inserted.id as string;
+  }
+
+  const rows = await sql`
+    INSERT INTO roof_ai_workflow_reports (project_id, report, updated_at)
+    VALUES (${projectId}, ${JSON.stringify(report)}, NOW())
+    ON CONFLICT (project_id)
+    DO UPDATE SET report = EXCLUDED.report, updated_at = NOW()
+    RETURNING id
+  `;
+
+  return {
+    projectId,
+    reportId: rows[0].id as string,
+  };
 }
 
 export async function getProjectRoofStructure(projectId: string): Promise<RoofStructureAnalysis | null> {

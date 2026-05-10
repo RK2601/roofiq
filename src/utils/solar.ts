@@ -61,7 +61,14 @@ export async function fetchBuildingInsights(
       const body = await res.text().catch(() => '');
       throw new Error(`SOLAR_HTTP_${res.status}: ${body.slice(0, 120)}`);
     }
-    return res.json() as Promise<SolarBuildingInsights>;
+    const raw = await res.json() as SolarBuildingInsights & {
+      solarPotential?: { roofSegmentStats?: SolarRoofSegment[] };
+    };
+    // The API nests roofSegmentStats inside solarPotential; hoist it to the top level.
+    if (!raw.roofSegmentStats && raw.solarPotential?.roofSegmentStats) {
+      raw.roofSegmentStats = raw.solarPotential.roofSegmentStats;
+    }
+    return raw;
   };
 
   try {
@@ -140,17 +147,77 @@ export function pitchDegreesToOption(degrees: number): (typeof PITCH_OPTIONS)[nu
   return best;
 }
 
-/** Convert Solar roof segment bounding boxes into map polygon paths (4-corner rectangles). */
+/**
+ * Convert a Solar roof segment into an azimuth-oriented polygon.
+ * Instead of the axis-aligned bounding box (which creates overlapping N-S/E-W
+ * rectangles for every segment regardless of slope direction), we build an
+ * oriented rectangle whose long axis aligns with the segment's facing direction
+ * and whose dimensions match the actual ground-projected area.
+ */
 export function segmentToBoundingPolygon(
-  segment: SolarRoofSegment
+  segment: SolarRoofSegment,
+  buildingBox?: SolarBoundingBox
 ): Array<{ lat: number; lng: number }> {
+  const center = segment.center;
   const { sw, ne } = segment.boundingBox;
-  return [
-    { lat: sw.latitude, lng: sw.longitude },
-    { lat: ne.latitude, lng: sw.longitude },
-    { lat: ne.latitude, lng: ne.longitude },
-    { lat: sw.latitude, lng: ne.longitude },
+
+  const metersPerLat = 111_320;
+  const metersPerLng = 111_320 * Math.cos((center.latitude * Math.PI) / 180);
+
+  // Bounding box dimensions in meters (used only to estimate aspect ratio)
+  const bboxWidthM = (ne.longitude - sw.longitude) * metersPerLng;
+  const bboxHeightM = (ne.latitude - sw.latitude) * metersPerLat;
+
+  // Ground-projected area (prefer explicit value, fall back from sloped area + pitch)
+  const pitchRad = (segment.pitchDegrees * Math.PI) / 180;
+  const groundAreaM2 = segment.stats.groundAreaMeters2 ??
+    segment.stats.areaMeters2 * Math.cos(pitchRad);
+  const safeArea = Math.max(4, groundAreaM2);
+
+  // Azimuth: direction the slope faces (clockwise from North)
+  const azRad = (segment.azimuthDegrees * Math.PI) / 180;
+  const sinAz = Math.sin(azRad);
+  const cosAz = Math.cos(azRad);
+
+  // Project bounding box extents onto the azimuth-aligned frame to get aspect ratio
+  // (extent_along = run from ridge to eave; extent_perp = width along ridge)
+  const extentAlong = Math.abs(sinAz) * bboxWidthM + Math.abs(cosAz) * bboxHeightM;
+  const extentPerp  = Math.abs(cosAz) * bboxWidthM + Math.abs(sinAz) * bboxHeightM;
+  const aspect = extentPerp / Math.max(0.5, extentAlong); // width / run ratio
+
+  // Size the polygon to the full Solar bbox extent — the per-segment bbox IS the footprint
+  // that Solar computed for that facet. Using groundArea underestimates coverage.
+  // The sidebar area value comes from segment.stats.areaMeters2 (not polygon geometry),
+  // so measurements remain accurate regardless of visual polygon size.
+  const hr = extentAlong / 2;
+  const hw = extentPerp / 2;
+
+  // Along-azimuth direction in (East, North) meter space: (sinAz, cosAz)
+  // Perpendicular direction (90° CW from azimuth): (cosAz, -sinAz)
+  // dx = East offset, dy = North offset
+  const corners = [
+    { dx:  sinAz * hr + cosAz * hw, dy:  cosAz * hr - sinAz * hw },
+    { dx:  sinAz * hr - cosAz * hw, dy:  cosAz * hr + sinAz * hw },
+    { dx: -sinAz * hr - cosAz * hw, dy: -cosAz * hr + sinAz * hw },
+    { dx: -sinAz * hr + cosAz * hw, dy: -cosAz * hr - sinAz * hw },
   ];
+
+  // Clamp each corner to the building-level bounding box so polygons never bleed
+  // onto neighbouring properties, driveways, or yards.
+  const bLat = buildingBox
+    ? { min: buildingBox.sw.latitude, max: buildingBox.ne.latitude }
+    : null;
+  const bLng = buildingBox
+    ? { min: buildingBox.sw.longitude, max: buildingBox.ne.longitude }
+    : null;
+
+  return corners.map(({ dx, dy }) => {
+    let lat = center.latitude + dy / metersPerLat;
+    let lng = center.longitude + dx / metersPerLng;
+    if (bLat) lat = Math.min(bLat.max, Math.max(bLat.min, lat));
+    if (bLng) lng = Math.min(bLng.max, Math.max(bLng.min, lng));
+    return { lat, lng };
+  });
 }
 
 /** Azimuth degrees → human-readable cardinal direction. */
