@@ -75,6 +75,15 @@ export function computeActualArea(flatArea: number, pitchMultiplier: number): nu
   return flatArea * pitchMultiplier;
 }
 
+/** Parse a pitch label like `4/12` into slope angle in degrees (for structure / Solar hints). */
+export function pitchStringToPitchDegrees(pitch: string): number {
+  const m = pitch.trim().match(/^(\d+(?:\.\d+)?)\s*\/\s*12$/i);
+  if (!m) return (Math.atan2(4, 12) * 180) / Math.PI;
+  const rise = Number(m[1]);
+  if (!Number.isFinite(rise) || rise <= 0) return (Math.atan2(4, 12) * 180) / Math.PI;
+  return (Math.atan2(rise, 12) * 180) / Math.PI;
+}
+
 export function generateQuote(
   address: string,
   coordinates: Coordinates,

@@ -42,9 +42,6 @@ import {
   Star,
   ArrowRight,
   CheckCircle2,
-  Download,
-  Share2,
-  FileSpreadsheet,
 } from 'lucide-react';
 import type { Coordinates } from '../types';
 import type { SolarBuildingInsights } from '../utils/solar';
@@ -53,18 +50,15 @@ import {
   analyzeRoofSegment,
   detectRoofStructure,
   analyzeCombinedRoof,
-  deriveVisionRoofCuesFromFile,
   latLngToImageNorm,
   type OutlineAnalysis,
   type SegmentAnalysis,
   type StructuralDetection,
   type StructuralLine,
-  type RoofPhotoCueAnalysis,
 } from '../utils/roofVision';
+import { deriveVisionRoofCuesFromFile, type RoofPhotoCueAnalysis } from '../utils/roofVisionPhoto';
 import { readGeminiApiKey } from '../utils/googleAiKey';
 import { isDbConfigured, saveWizardWorkflowReport, type WizardWorkflowReportPayload } from '../utils/db';
-import jsPDF from 'jspdf';
-import autoTable from 'jspdf-autotable';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -180,6 +174,12 @@ interface Props {
   coordinates: Coordinates;
   solarData: SolarBuildingInsights | null;
   onClose: () => void;
+  /** When the user already has a dashboard project (e.g. saved analysis), wizard JSON attaches here. */
+  existingProjectId?: string | null;
+  /** After Phase 3 fusion and successful persist, user clicks "View full report". */
+  onReportReady?: (ctx: { projectId: string; address: string }) => void;
+  /** Same folder naming as Quick analysis: stored as name + address on the project row when set. */
+  projectFolderName?: string | null;
 }
 
 // ─── Helper components ────────────────────────────────────────────────────────
@@ -212,7 +212,16 @@ function QualityBadge({ score }: { score: number }) {
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
-export default function RoofMappingWizard({ apiKey, address, coordinates, solarData, onClose }: Props) {
+export default function RoofMappingWizard({
+  apiKey,
+  address,
+  coordinates,
+  solarData,
+  onClose,
+  existingProjectId = null,
+  onReportReady,
+  projectFolderName = null,
+}: Props) {
   // Map refs
   const mapRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<google.maps.Map | null>(null);
@@ -243,6 +252,7 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
   const [finalSource, setFinalSource] = useState<'ai' | 'fallback' | null>(null);
   const [showFullReport, setShowFullReport] = useState(false);
   const [persistStatus, setPersistStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [persistedProjectId, setPersistedProjectId] = useState<string | null>(null);
 
   // Satellite image cache for Gemini calls
   const satelliteImageRef = useRef<{ data: string; mimeType: string } | null>(null);
@@ -1080,172 +1090,6 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
     }
   }, [segments, structureResult, photoSlots]);
 
-  const buildFinalPayload = useCallback(() => {
-    if (!finalAnalysis) return null;
-    return {
-      generatedAtIso: new Date().toISOString(),
-      address,
-      coordinates,
-      structural: {
-        segmentCount: segments.length,
-        roofType: structureResult?.roofType ?? 'unknown',
-        predominantPitch: structureResult?.predominantPitch ?? '4/12',
-        totalAreaSqFt: structureResult?.totalAreaSqFt ?? 0,
-        cues: structureResult?.cues ?? [],
-      },
-      photos: photoSlots.map(slot => ({
-        slot: slot.label,
-        status: slot.status,
-        quality: slot.analysis?.qualityScore ?? null,
-        cueCount: slot.analysis?.cues.length ?? 0,
-      })),
-      final: finalAnalysis,
-    };
-  }, [finalAnalysis, address, coordinates, segments.length, structureResult, photoSlots]);
-
-  const downloadFinalReport = useCallback(() => {
-    const payload = buildFinalPayload();
-    if (!payload || !finalAnalysis) return;
-    const doc = new jsPDF({ unit: 'pt', format: 'a4' });
-    const pageWidth = doc.internal.pageSize.getWidth();
-    let y = 44;
-
-    doc.setFontSize(18);
-    doc.text('Roof Intelligence Final Report', 40, y);
-    y += 20;
-    doc.setFontSize(10);
-    doc.setTextColor(80);
-    doc.text(address, 40, y);
-    y += 14;
-    doc.text(`Generated: ${new Date(payload.generatedAtIso).toLocaleString()}`, 40, y);
-    y += 24;
-
-    doc.setTextColor(20);
-    doc.setFontSize(12);
-    doc.text(`Condition: ${finalAnalysis.condition} (${finalAnalysis.condition_score}/100)`, 40, y);
-    y += 14;
-    doc.text(`Urgency: ${finalAnalysis.urgency}`, 40, y);
-    y += 20;
-
-    autoTable(doc, {
-      startY: y,
-      head: [['Metric', 'Value']],
-      body: [
-        ['Roof Type', String(payload.structural.roofType)],
-        ['Predominant Pitch', String(payload.structural.predominantPitch)],
-        ['Segments', String(payload.structural.segmentCount)],
-        ['Total Area (sq ft)', String(Math.round(payload.structural.totalAreaSqFt))],
-        ['Photo Slots Analyzed', String(payload.photos.filter((p: { status: string }) => p.status === 'done').length)],
-      ],
-      styles: { fontSize: 9 },
-      theme: 'grid',
-    });
-
-    const afterMetrics = (doc as jsPDF & { lastAutoTable?: { finalY?: number } }).lastAutoTable?.finalY ?? y + 120;
-    autoTable(doc, {
-      startY: afterMetrics + 16,
-      head: [['Section', 'Summary']],
-      body: [
-        ['Structural Summary', finalAnalysis.structuralSummary],
-        ['Photo Summary', finalAnalysis.photoSummary],
-        ['Recommendation', finalAnalysis.recommendation],
-      ],
-      styles: { fontSize: 9, cellPadding: 5 },
-      theme: 'striped',
-      columnStyles: { 0: { cellWidth: 130 }, 1: { cellWidth: pageWidth - 210 } },
-    });
-
-    const afterSummary = (doc as jsPDF & { lastAutoTable?: { finalY?: number } }).lastAutoTable?.finalY ?? afterMetrics + 140;
-    const issues = finalAnalysis.issues.length > 0 ? finalAnalysis.issues : ['No major issues flagged by combined analysis.'];
-    autoTable(doc, {
-      startY: afterSummary + 16,
-      head: [['Identified Issues']],
-      body: issues.map(issue => [issue]),
-      styles: { fontSize: 9 },
-      theme: 'grid',
-    });
-
-    doc.save(`roof-report-${Date.now()}.pdf`);
-  }, [buildFinalPayload, finalAnalysis, address]);
-
-  const shareFinalReport = useCallback(async () => {
-    const payload = buildFinalPayload();
-    if (!payload) return;
-    const text = [
-      `Roof Report — ${address}`,
-      `Condition: ${finalAnalysis?.condition} (${finalAnalysis?.condition_score}/100)`,
-      `Urgency: ${finalAnalysis?.urgency}`,
-      `Recommendation: ${finalAnalysis?.recommendation ?? ''}`,
-    ].join('\n');
-
-    try {
-      if (navigator.share) {
-        await navigator.share({ title: 'Roof Analysis Report', text });
-        return;
-      }
-      await navigator.clipboard.writeText(`${text}\n\n${JSON.stringify(payload, null, 2)}`);
-    } catch {
-      // Intentionally no-op; share can be blocked by browser permissions.
-    }
-  }, [buildFinalPayload, address, finalAnalysis]);
-
-  const downloadQuoteDraft = useCallback(() => {
-    if (!finalAnalysis) return;
-    const mappedArea = segments.reduce((sum, segment) => sum + safeComputeAreaSqFt(segment.polygon), 0);
-    const structureArea = Math.max(1, Math.round(structureResult?.totalAreaSqFt ?? mappedArea));
-    const squares = Math.max(1, Math.round(structureArea / 100));
-    const baseRate =
-      finalAnalysis.condition === 'Excellent'
-        ? 380
-        : finalAnalysis.condition === 'Good'
-          ? 430
-          : finalAnalysis.condition === 'Fair'
-            ? 520
-            : finalAnalysis.condition === 'Poor'
-              ? 610
-              : 690;
-    const subtotal = squares * baseRate;
-    const tax = Math.round(subtotal * 0.13);
-    const total = subtotal + tax;
-
-    const doc = new jsPDF({ unit: 'pt', format: 'a4' });
-    let y = 44;
-    doc.setFontSize(18);
-    doc.text('Roof Quote Draft', 40, y);
-    y += 20;
-    doc.setFontSize(10);
-    doc.setTextColor(80);
-    doc.text(address, 40, y);
-    y += 16;
-    doc.text(`Condition: ${finalAnalysis.condition} (${finalAnalysis.condition_score}/100)`, 40, y);
-    y += 12;
-    doc.text(`Urgency: ${finalAnalysis.urgency}`, 40, y);
-    y += 18;
-
-    autoTable(doc, {
-      startY: y,
-      head: [['Line Item', 'Qty', 'Unit', 'Amount']],
-      body: [
-        ['Roof System', `${squares} sq`, `$${baseRate}`, `$${subtotal}`],
-        ['Assessment/QA', '1', '$350', '$350'],
-        ['Disposal & Cleanup', '1', '$420', '$420'],
-      ],
-      styles: { fontSize: 10 },
-      theme: 'grid',
-    });
-    const afterItems = (doc as jsPDF & { lastAutoTable?: { finalY?: number } }).lastAutoTable?.finalY ?? y + 100;
-    doc.setTextColor(20);
-    doc.setFontSize(11);
-    doc.text(`Subtotal: $${(subtotal + 770).toLocaleString()}`, 40, afterItems + 20);
-    doc.text(`Estimated Tax: $${tax.toLocaleString()}`, 40, afterItems + 36);
-    doc.setFontSize(13);
-    doc.text(`Estimated Total: $${(total + 770).toLocaleString()}`, 40, afterItems + 56);
-    doc.setFontSize(10);
-    doc.setTextColor(70);
-    doc.text(`Recommended Scope: ${finalAnalysis.recommendation}`, 40, afterItems + 82, { maxWidth: 500 });
-    doc.save(`quote-draft-${Date.now()}.pdf`);
-  }, [address, finalAnalysis, structureResult, segments, safeComputeAreaSqFt]);
-
   // ── Step navigation ─────────────────────────────────────────────────────────
 
   function goToSegments() {
@@ -1280,7 +1124,14 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
     setFinalSource(null);
     setFinalError(null);
     setPhase(3);
-    setShowFullReport(true);
+    setShowFullReport(false);
+  }
+
+  const resolvedProjectId = existingProjectId ?? persistedProjectId;
+
+  function handleViewFullReport() {
+    if (!finalAnalysis || !resolvedProjectId || !onReportReady) return;
+    onReportReady({ projectId: resolvedProjectId, address });
   }
 
   // ── Derived stats ───────────────────────────────────────────────────────────
@@ -1382,6 +1233,46 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
     dash: safeDashPattern(cue.type),
   }));
 
+  const buildWorkflowReportPayload = useCallback((): WizardWorkflowReportPayload => {
+    return {
+      version: 'v1',
+      source: 'roof-mapping-wizard',
+      projectFolderName: projectFolderName?.trim() ? projectFolderName.trim() : null,
+      address,
+      coordinates,
+      outline: outline
+        ? {
+            points: outline.path,
+            analysis: outline.analysis,
+          }
+        : null,
+      segments: segments.map(segment => ({
+        id: segment.id,
+        index: segment.index,
+        color: segment.color,
+        path: segment.path,
+        analysis: segment.analysis,
+      })),
+      structure: structureResult,
+      photos: photoSlots.map(slot => ({
+        id: slot.id,
+        label: slot.label,
+        description: slot.description,
+        status: slot.status,
+        qualityScore: slot.analysis?.qualityScore ?? null,
+        cueCount: slot.analysis?.cues.length ?? 0,
+        byType: slot.analysis?.byType,
+        captureImageDataUrl:
+          slot.captureImageDataUrl && slot.captureImageDataUrl.length < 350_000
+            ? slot.captureImageDataUrl
+            : null,
+        capturedAtIso: slot.capturedAtIso ?? null,
+      })),
+      finalAnalysis,
+      updatedAtIso: new Date().toISOString(),
+    };
+  }, [address, coordinates, outline, segments, structureResult, photoSlots, finalAnalysis, projectFolderName]);
+
   useEffect(() => {
     if (phase !== 3 || finalAnalyzing || finalAnalysis) return;
     void runFinalAnalysis();
@@ -1406,44 +1297,14 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
     }, 250);
     (async () => {
       try {
-        const payload: WizardWorkflowReportPayload = {
-          version: 'v1',
-          source: 'roof-mapping-wizard',
-          address,
-          coordinates,
-          outline: outline
-            ? {
-                points: outline.path,
-                analysis: outline.analysis,
-              }
-            : null,
-          segments: segments.map(segment => ({
-            id: segment.id,
-            index: segment.index,
-            color: segment.color,
-            path: segment.path,
-            analysis: segment.analysis,
-          })),
-          structure: structureResult,
-          photos: photoSlots.map(slot => ({
-            id: slot.id,
-            label: slot.label,
-            description: slot.description,
-            status: slot.status,
-            qualityScore: slot.analysis?.qualityScore ?? null,
-            cueCount: slot.analysis?.cues.length ?? 0,
-            byType: slot.analysis?.byType,
-            captureImageDataUrl:
-              slot.captureImageDataUrl && slot.captureImageDataUrl.length < 350_000
-                ? slot.captureImageDataUrl
-                : null,
-            capturedAtIso: slot.capturedAtIso ?? null,
-          })),
-          finalAnalysis,
-          updatedAtIso: new Date().toISOString(),
-        };
-        await saveWizardWorkflowReport(payload);
-        if (!cancelled) setPersistStatus('saved');
+        const payload = buildWorkflowReportPayload();
+        const { projectId } = await saveWizardWorkflowReport(payload, {
+          projectId: existingProjectId ?? persistedProjectId,
+        });
+        if (!cancelled) {
+          setPersistedProjectId(projectId);
+          setPersistStatus('saved');
+        }
       } catch {
         if (!cancelled) setPersistStatus('error');
       } finally {
@@ -1455,7 +1316,18 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [address, coordinates, outline, segments, structureResult, photoSlots, finalAnalysis]);
+  }, [
+    buildWorkflowReportPayload,
+    existingProjectId,
+    persistedProjectId,
+    address,
+    coordinates,
+    outline,
+    segments,
+    structureResult,
+    photoSlots,
+    finalAnalysis,
+  ]);
 
   // Capture snapshot of previewUrls for cleanup on unmount only (not on every photoSlots change,
   // which would revoke URLs that are still being displayed).
@@ -2125,25 +1997,31 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
                     <p className="text-xs text-slate-300 italic leading-relaxed">"{finalAnalysis.marketing_message}"</p>
                   </div>
 
-                  <div className="grid grid-cols-2 gap-2">
+                  <div className="flex flex-col gap-2">
+                    {onReportReady ? (
+                      <button
+                        type="button"
+                        onClick={handleViewFullReport}
+                        disabled={!finalAnalysis || !resolvedProjectId || persistStatus === 'saving'}
+                        className="text-sm text-white bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed px-3 py-2.5 rounded-lg inline-flex items-center justify-center gap-2 font-semibold"
+                      >
+                        View full report
+                        <ArrowRight size={14} />
+                      </button>
+                    ) : null}
                     <button
-                      onClick={downloadFinalReport}
-                      className="text-xs text-slate-200 bg-slate-800 hover:bg-slate-700 border border-slate-600 px-2.5 py-2 rounded-lg inline-flex items-center justify-center gap-1.5"
+                      type="button"
+                      onClick={() => setShowFullReport(true)}
+                      disabled={!finalAnalysis}
+                      className="text-xs text-slate-200 bg-slate-800 hover:bg-slate-700 border border-slate-600 px-2.5 py-2 rounded-lg inline-flex items-center justify-center gap-1.5 disabled:opacity-50"
                     >
-                      <Download size={12} /> Download
+                      Open printable preview
                     </button>
-                    <button
-                      onClick={() => void shareFinalReport()}
-                      className="text-xs text-slate-200 bg-slate-800 hover:bg-slate-700 border border-slate-600 px-2.5 py-2 rounded-lg inline-flex items-center justify-center gap-1.5"
-                    >
-                      <Share2 size={12} /> Share
-                    </button>
-                    <button
-                      onClick={downloadQuoteDraft}
-                      className="col-span-2 text-xs text-white bg-blue-600 hover:bg-blue-500 px-2.5 py-2 rounded-lg inline-flex items-center justify-center gap-1.5"
-                    >
-                      <FileSpreadsheet size={12} /> Generate Quote Draft
-                    </button>
+                    {persistStatus === 'error' && !resolvedProjectId && (
+                      <p className="text-[11px] text-amber-300">
+                        Report could not be saved to the database. Fix your connection, then use preview or re-run.
+                      </p>
+                    )}
                   </div>
                   <button
                     onClick={runFinalAnalysis}
@@ -2161,7 +2039,10 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
               )}
 
               <button
-                onClick={() => setPhase(2)}
+                onClick={() => {
+                  setShowFullReport(false);
+                  setPhase(2);
+                }}
                 className="shrink-0 flex items-center gap-1.5 text-sm text-slate-400 hover:text-white px-3 py-2 rounded-lg border border-slate-700 hover:border-slate-500 transition-colors"
               >
                 <ChevronLeft size={14} /> Back to Photos
@@ -2179,26 +2060,9 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
                 <p className="text-xs text-slate-500 truncate">{address}</p>
                 <h2 className="text-sm sm:text-base font-semibold text-slate-900">AI Roof Intelligence Report</h2>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap justify-end">
                 <button
-                  onClick={downloadFinalReport}
-                  className="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 px-2.5 py-1.5 rounded-md inline-flex items-center gap-1.5"
-                >
-                  <Download size={12} /> Download
-                </button>
-                <button
-                  onClick={() => void shareFinalReport()}
-                  className="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 px-2.5 py-1.5 rounded-md inline-flex items-center gap-1.5"
-                >
-                  <Share2 size={12} /> Share
-                </button>
-                <button
-                  onClick={downloadQuoteDraft}
-                  className="text-xs bg-blue-600 hover:bg-blue-500 text-white px-2.5 py-1.5 rounded-md inline-flex items-center gap-1.5"
-                >
-                  <FileSpreadsheet size={12} /> Quote
-                </button>
-                <button
+                  type="button"
                   onClick={() => setShowFullReport(false)}
                   className="text-xs bg-slate-900 text-white px-2.5 py-1.5 rounded-md"
                 >

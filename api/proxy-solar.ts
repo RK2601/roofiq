@@ -1,3 +1,9 @@
+/**
+ * Vercel serverless proxy for the Google Solar API (`solar.googleapis.com`).
+ * The browser calls same-origin `/api/proxy-solar?u=<encoded Solar URL>` so a **Maps-only** key is not
+ * required to expose a Solar key to the client (optional hardening). Local dev: ensure this route is
+ * served (e.g. `vercel dev`) or rely on direct Solar fetches when the upstream allows your origin.
+ */
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 
 const ALLOWED = /^https:\/\/solar\.googleapis\.com\//;

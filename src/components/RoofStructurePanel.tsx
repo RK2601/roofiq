@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { X, Ruler, Info, RotateCcw, Check, Loader2, Sparkles } from 'lucide-react';
+import { X, Ruler, Info, RotateCcw, Check, Loader2, Sparkles, ChevronDown } from 'lucide-react';
 import { SECTION_COLORS, formatArea } from '../utils/roofCalculations';
 import { formatFt } from '../utils/measurements';
 import type {
@@ -15,6 +15,9 @@ import type { SolarBuildingInsights } from '../utils/solar';
 import {
   buildAutoMapViewCaptures,
   deriveVisionRoofCuesFromStaticMap,
+  DRAWN_OVERLAY_VISION_HINT,
+  type AutoMapViewCapture,
+  type RoofCaptureRing,
 } from '../utils/roofVision';
 
 interface RoofStructurePanelProps {
@@ -22,6 +25,8 @@ interface RoofStructurePanelProps {
   mapCenter: { lat: number; lng: number };
   mapsApiKey: string;
   solarInsights: SolarBuildingInsights | null;
+  /** When set, static-map captures center on this outline and include colored overlays (quick map sections). */
+  roofCaptureRings?: RoofCaptureRing[] | null;
   onClose: () => void;
   onApply?: (next: RoofStructureAnalysis) => void;
 }
@@ -47,12 +52,6 @@ const MULTI_ANGLE_SLOTS = [
 
 type MultiAngleSlot = (typeof MULTI_ANGLE_SLOTS)[number]['id'];
 
-interface MultiAngleCapture {
-  id: string;
-  label: string;
-  url: string;
-}
-
 interface MultiAngleResult {
   status: 'idle' | 'analyzing' | 'done' | 'error';
   result?: {
@@ -67,41 +66,27 @@ const EDGE_STYLES: Record<
   FacetEdge['kind'],
   { color: string; width: number; dash?: string; label: string }
 > = {
-  ridge: { color: '#ef4444', width: 3, label: 'Ridge' },
-  hip: { color: '#f97316', width: 2.5, label: 'Hip' },
-  valley: { color: '#3b82f6', width: 2.5, label: 'Valley' },
-  eave: { color: '#94a3b8', width: 1.8, dash: '5 3', label: 'Eave' },
-  rake: { color: '#64748b', width: 1.8, dash: '2 3', label: 'Rake' },
-  step: { color: '#cbd5e1', width: 1.5, dash: '4 3', label: 'Step/Transition' },
+  ridge: { color: '#ef4444', width: 3.6, label: 'Ridge' },
+  hip: { color: '#f97316', width: 3.2, label: 'Hip' },
+  valley: { color: '#3b82f6', width: 3.2, label: 'Valley' },
+  eave: { color: '#94a3b8', width: 2, dash: '5 3', label: 'Eave' },
+  rake: { color: '#64748b', width: 2, dash: '2 3', label: 'Rake' },
+  step: { color: '#cbd5e1', width: 1.6, dash: '4 3', label: 'Step/Transition' },
 };
 
 function edgeSegment(
   facet: RoofStructureFacet,
   side: FacetSide,
-  edgeLengthFt: number,
-  pxPerFt: number
+  _edgeLengthFt: number,
+  _pxPerFt: number
 ): { x1: number; y1: number; x2: number; y2: number } {
   const { x, y, w, h } = facet.placement;
   if (side === 'top' || side === 'bottom') {
-    const lineLength = Math.min(w, Math.max(4, edgeLengthFt * pxPerFt));
-    const cx = x + w / 2;
     const yLine = side === 'top' ? y : y + h;
-    return {
-      x1: cx - lineLength / 2,
-      y1: yLine,
-      x2: cx + lineLength / 2,
-      y2: yLine,
-    };
+    return { x1: x, y1: yLine, x2: x + w, y2: yLine };
   }
-  const lineLength = Math.min(h, Math.max(4, edgeLengthFt * pxPerFt));
-  const cy = y + h / 2;
   const xLine = side === 'left' ? x : x + w;
-  return {
-    x1: xLine,
-    y1: cy - lineLength / 2,
-    x2: xLine,
-    y2: cy + lineLength / 2,
-  };
+  return { x1: xLine, y1: y, x2: xLine, y2: y + h };
 }
 
 const EDITABLE_EDGE_KINDS: EdgeKind[] = ['ridge', 'hip', 'valley', 'eave', 'rake', 'step'];
@@ -113,6 +98,7 @@ function renderEdges(
 ) {
   const lines: JSX.Element[] = [];
   facets.forEach(facet => {
+    if (facet.placement.outlinePx && facet.placement.outlinePx.length >= 3) return;
     facet.edges.forEach((edge, idx) => {
       if (edge.adjacentFacetIndex !== null && edge.adjacentFacetIndex < facet.index) return;
       const seg = edgeSegment(facet, edge.side, edge.lengthFt, pxPerFt);
@@ -126,9 +112,11 @@ function renderEdges(
           x2={seg.x2}
           y2={seg.y2}
           stroke={lowConfidence ? '#f59e0b' : style.color}
-          strokeWidth={lowConfidence ? Math.max(style.width, 2.2) : style.width}
+          strokeWidth={lowConfidence ? Math.max(style.width, 2.6) : style.width}
           strokeDasharray={lowConfidence ? '5 4' : style.dash}
-          strokeLinecap="round"
+          strokeLinecap="butt"
+          strokeLinejoin="miter"
+          style={{ pointerEvents: 'stroke' }}
           onClick={() => onEdgeClick?.(facet.index, idx)}
           className={onEdgeClick ? 'cursor-pointer' : undefined}
         />
@@ -143,6 +131,7 @@ export default function RoofStructurePanel({
   mapCenter,
   mapsApiKey,
   solarInsights,
+  roofCaptureRings = null,
   onClose,
   onApply,
 }: RoofStructurePanelProps) {
@@ -150,7 +139,7 @@ export default function RoofStructurePanel({
   const [edited, setEdited] = useState(false);
   const [editLog, setEditLog] = useState<EdgeEditLogEntry[]>([]);
   const [reviewed, setReviewed] = useState<boolean>(analysis.review?.reviewed ?? false);
-  const [multiCaptures, setMultiCaptures] = useState<Partial<Record<MultiAngleSlot, MultiAngleCapture>>>({});
+  const [multiCaptures, setMultiCaptures] = useState<Partial<Record<MultiAngleSlot, AutoMapViewCapture>>>({});
   const [multiResults, setMultiResults] = useState<Partial<Record<MultiAngleSlot, MultiAngleResult>>>({});
 
   useEffect(() => {
@@ -161,14 +150,18 @@ export default function RoofStructurePanel({
   }, [analysis]);
 
   useEffect(() => {
-    const captures = buildAutoMapViewCaptures(mapCenter, mapsApiKey);
-    const bySlot: Partial<Record<MultiAngleSlot, MultiAngleCapture>> = {};
+    const captures = buildAutoMapViewCaptures(
+      mapCenter,
+      mapsApiKey,
+      roofCaptureRings?.length ? roofCaptureRings : null
+    );
+    const bySlot: Partial<Record<MultiAngleSlot, AutoMapViewCapture>> = {};
     MULTI_ANGLE_SLOTS.forEach((slot, idx) => {
       bySlot[slot.id] = captures[idx];
     });
     setMultiCaptures(bySlot);
     setMultiResults({});
-  }, [mapCenter, mapsApiKey]);
+  }, [mapCenter, mapsApiKey, roofCaptureRings]);
 
   const editableMeasurements = useMemo(
     () => recomputeMeasurementsFromFacets(editableFacets),
@@ -202,6 +195,10 @@ export default function RoofStructurePanel({
   const multiCoverageOk = readySlots >= 4;
 
   const m = editableMeasurements;
+  const isUserTracedStructure = useMemo(
+    () => analysis.notes.some(n => n.toLowerCase().includes('user-drawn')),
+    [analysis.notes]
+  );
   const confidencePercent = Math.round((analysis.confidence.overall || 0) * 100);
   const metricCards = [
     { label: 'Roof Area', value: formatArea(m.totalRoofAreaSqFt) },
@@ -290,8 +287,14 @@ export default function RoofStructurePanel({
     if (!capture || !solarInsights) return;
     setMultiResults(prev => ({ ...prev, [slot]: { status: 'analyzing' } }));
     try {
-      const result = await deriveVisionRoofCuesFromStaticMap(capture.url, solarInsights);
-      if (!result) {
+      const result = await deriveVisionRoofCuesFromStaticMap(
+        capture.url,
+        solarInsights,
+        roofCaptureRings?.length ? DRAWN_OVERLAY_VISION_HINT : undefined,
+        capture.imageBounds ?? null,
+        roofCaptureRings?.length ? roofCaptureRings : null
+      );
+      if (!result || result.length === 0) {
         setMultiResults(prev => ({
           ...prev,
           [slot]: { status: 'error', error: 'No cues detected for this angle.' },
@@ -351,13 +354,35 @@ export default function RoofStructurePanel({
   return (
     <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm p-2 sm:p-4">
       <div className="mx-auto flex h-full max-w-[1200px] flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
-        <div className="flex items-center gap-2 border-b border-slate-200 bg-slate-50 px-4 py-3">
-          <Ruler size={15} className="text-blue-600" />
-          <h2 className="text-sm sm:text-base font-semibold text-slate-900">Roof Structure Analysis</h2>
+        <div className="flex flex-col gap-1 border-b border-slate-200 bg-slate-50 px-4 py-3 sm:flex-row sm:items-center sm:gap-2">
+          <div className="flex items-center gap-2 min-w-0">
+            <Ruler size={15} className="text-blue-600 shrink-0" />
+            <div className="min-w-0">
+              <h2 className="text-sm sm:text-base font-semibold text-slate-900 leading-tight">
+                {isUserTracedStructure
+                  ? 'Schematic from your map traces + Solar pitch hints'
+                  : 'Schematic from Solar facets (not as-built linework)'}
+              </h2>
+              <p className="text-[11px] text-slate-500 leading-snug mt-0.5">
+                {isUserTracedStructure ? (
+                  <>
+                    Footprint follows <span className="font-medium text-slate-600">your drawn sections</span>; pitch and
+                    facing lean on the nearest Solar facet where available. Rollups and the diagram are still{' '}
+                    <span className="font-medium text-slate-600">indicative</span>, not survey-grade.
+                  </>
+                ) : (
+                  <>
+                    Numeric rollups use the same facet model as the diagram. Rollups are estimates; the drawing is{' '}
+                    <span className="font-medium text-slate-600">indicative</span>, not survey-grade geometry.
+                  </>
+                )}
+              </p>
+            </div>
+          </div>
           <button
             type="button"
             onClick={onClose}
-            className="ml-auto inline-flex items-center justify-center rounded-lg border border-slate-200 bg-white p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-700 transition-colors"
+            className="shrink-0 sm:ml-auto inline-flex items-center justify-center rounded-lg border border-slate-200 bg-white p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-700 transition-colors"
             aria-label="Close roof structure panel"
           >
             <X size={14} />
@@ -446,15 +471,25 @@ export default function RoofStructurePanel({
             </div>
           )}
 
-          <div className="rounded-xl border border-indigo-200 bg-indigo-50 p-3 space-y-3">
+          <details className="group rounded-xl border border-indigo-200 bg-indigo-50 p-3 open:pb-3">
+            <summary className="cursor-pointer list-none text-left marker:content-none [&::-webkit-details-marker]:hidden flex flex-wrap items-center gap-2">
+              <Sparkles size={14} className="text-indigo-600 shrink-0" />
+              <h3 className="text-sm font-semibold text-indigo-900">Static-map viewpoint cues (advanced)</h3>
+              <ChevronDown
+                size={14}
+                className="ml-auto shrink-0 text-indigo-600 transition-transform group-open:rotate-180 lg:ml-0"
+              />
+            </summary>
+            <div className="mt-2 space-y-3 border-t border-indigo-100/80 pt-2">
             <div className="flex flex-wrap items-center gap-2">
-              <Sparkles size={14} className="text-indigo-600" />
-              <h3 className="text-sm font-semibold text-indigo-900">Auto Map Viewpoint Analysis</h3>
+              <p className="text-[11px] text-indigo-800 flex-1 min-w-0 leading-snug">
+                Same multi-angle idea as the <span className="font-semibold">Roof Mapping Wizard</span> — optional static-map snapshots here for power users.
+              </p>
               <button
                 type="button"
                 onClick={analyzeAllSlots}
                 disabled={Object.keys(multiCaptures).length === 0 || !solarInsights}
-                className="ml-auto inline-flex items-center gap-1 rounded-md border border-indigo-200 bg-white px-2 py-1 text-xs text-indigo-700 hover:bg-indigo-100 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="shrink-0 inline-flex items-center gap-1 rounded-md border border-indigo-200 bg-white px-2 py-1 text-xs text-indigo-700 hover:bg-indigo-100 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <Sparkles size={12} />
                 Analyze all views
@@ -462,7 +497,19 @@ export default function RoofStructurePanel({
             </div>
 
             <p className="text-[11px] text-indigo-700">
-              Snapshots are captured automatically from the map around the selected roof center (center + four offsets + wider zoom), then fused into AI cues.
+              {roofCaptureRings?.length ? (
+                <>
+                  Snapshots are <span className="font-semibold">tight satellite crops</span> centered on your traced roof
+                  (max zoom that keeps the outline in frame, with a small pan per tile), plus colored overlays so Gemini
+                  sees the same facets — then ridge / hip / valley / eave / rake cues are fused.
+                </>
+              ) : (
+                <>
+                  Snapshots use the <span className="font-semibold">property center</span> (center + four offsets + wider
+                  zoom). For best accuracy, trace roof sections on the quick map first, then reopen this panel so captures
+                  lock to your outline.
+                </>
+              )}
             </p>
             <div className="rounded-md border border-indigo-100 bg-white px-2 py-1.5 text-[11px] text-indigo-700">
               Captures: {captureCount}/6 · Analyzed (quality {'>=45%'}): {readySlots}/6 ·
@@ -481,13 +528,15 @@ export default function RoofStructurePanel({
                     </div>
 
                     {capture ? (
-                      <img
-                        src={capture.url}
-                        alt={`${slot.label} capture`}
-                        className="w-full h-24 object-cover rounded border border-slate-200"
-                      />
+                      <div className="w-full aspect-square max-h-44 rounded border border-slate-200 bg-slate-900/5 overflow-hidden">
+                        <img
+                          src={capture.url}
+                          alt={`${slot.label} capture`}
+                          className="h-full w-full object-contain object-center"
+                        />
+                      </div>
                     ) : (
-                      <div className="h-24 rounded border border-dashed border-indigo-200 bg-indigo-50/50 flex items-center justify-center text-[11px] text-indigo-500">
+                      <div className="aspect-square max-h-44 rounded border border-dashed border-indigo-200 bg-indigo-50/50 flex items-center justify-center text-[11px] text-indigo-500">
                         No photo
                       </div>
                     )}
@@ -546,7 +595,8 @@ export default function RoofStructurePanel({
                 Solar insights are required before viewpoint analysis can run.
               </p>
             )}
-          </div>
+            </div>
+          </details>
 
           <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
             <div className="flex flex-wrap items-center gap-2">
@@ -598,16 +648,33 @@ export default function RoofStructurePanel({
             )}
           </div>
 
-          <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-2">
-            {metricCards.map(item => (
-              <div key={item.label} className="bg-white rounded-lg p-2 border border-slate-100 text-center">
-                <div className="text-[10px] text-slate-400 leading-none mb-1">{item.label}</div>
-                <div className="text-xs font-bold text-slate-900">{item.value}</div>
-              </div>
-            ))}
+          <div className="rounded-xl border border-slate-200 bg-slate-50/90 p-3 space-y-2">
+            <div>
+              <h3 className="text-xs font-semibold text-slate-800">Numeric rollups (facet model)</h3>
+              <p className="text-[10px] text-slate-500 leading-snug mt-0.5">
+                Totals below are from the same Solar-derived facet graph as the schematic — useful for rough
+                quantities, not as-built takeoff sign-off.
+              </p>
+            </div>
+            <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-2">
+              {metricCards.map(item => (
+                <div key={item.label} className="bg-white rounded-lg p-2 border border-slate-100 text-center">
+                  <div className="text-[10px] text-slate-400 leading-none mb-1">{item.label}</div>
+                  <div className="text-xs font-bold text-slate-900">{item.value}</div>
+                </div>
+              ))}
+            </div>
           </div>
 
-          <div className="rounded-xl border border-slate-200 bg-slate-50 p-2 sm:p-3">
+          <div className="rounded-xl border border-slate-200 bg-slate-50 p-2 sm:p-3 space-y-2">
+            <div>
+              <h3 className="text-xs font-semibold text-slate-800">Indicative diagram (not survey-grade)</h3>
+              <p className="text-[10px] text-slate-500 leading-snug mt-0.5">
+                Map-traced sections use your <span className="font-medium text-slate-600">actual polygon</span> in this
+                view. Solar-only facets stay as rectangles. Classified edge lines apply to rectangular facets; trace
+                edges on the map for real geometry.
+              </p>
+            </div>
             <svg
               viewBox={analysis.svg.viewBox}
               width={analysis.svg.width}
@@ -615,44 +682,82 @@ export default function RoofStructurePanel({
               className="w-full h-auto rounded-lg bg-white border border-slate-200"
               xmlns="http://www.w3.org/2000/svg"
             >
-              {renderEdges(editableFacets, analysis.svg.pxPerFt, handleEdgeCycle)}
-
-              {editableFacets.map(facet => (
-                <g key={facet.index} transform={`translate(${facet.placement.x}, ${facet.placement.y})`}>
-                  <rect
-                    width={facet.placement.w}
-                    height={facet.placement.h}
-                    rx={3}
-                    fill={`${SECTION_COLORS[facet.index % SECTION_COLORS.length]}22`}
-                    stroke={SECTION_COLORS[facet.index % SECTION_COLORS.length]}
-                    strokeWidth={1.6}
-                  />
-                  <text
-                    x={facet.placement.w / 2}
-                    y={facet.placement.h / 2 - 6}
-                    textAnchor="middle"
-                    fontSize={10}
-                    fontWeight={600}
-                    fill="#0f172a"
-                    fontFamily="Inter, system-ui, sans-serif"
-                  >
-                    {facet.pitchLabel} · {facet.facingLabel}
-                  </text>
-                  <text
-                    x={facet.placement.w / 2}
-                    y={facet.placement.h / 2 + 8}
-                    textAnchor="middle"
-                    fontSize={9}
-                    fill="#475569"
-                    fontFamily="Inter, system-ui, sans-serif"
-                  >
-                    {Math.round(facet.actualAreaSqFt).toLocaleString()} sq ft
-                  </text>
-                </g>
-              ))}
+              {editableFacets.map(facet => {
+                const col = SECTION_COLORS[facet.index % SECTION_COLORS.length];
+                const ox = facet.placement.outlinePx;
+                return (
+                  <g key={`facet-fill-${facet.index}`} transform={`translate(${facet.placement.x}, ${facet.placement.y})`}>
+                    {ox && ox.length >= 3 ? (
+                      <polygon
+                        points={ox.map(p => `${p.x},${p.y}`).join(' ')}
+                        fill={`${col}22`}
+                        stroke={col}
+                        strokeWidth={1.6}
+                        strokeLinejoin="round"
+                        strokeLinecap="round"
+                        style={{ pointerEvents: 'none' }}
+                      />
+                    ) : (
+                      <rect
+                        width={facet.placement.w}
+                        height={facet.placement.h}
+                        rx={3}
+                        fill={`${col}22`}
+                        stroke={col}
+                        strokeWidth={1.6}
+                        style={{ pointerEvents: 'none' }}
+                      />
+                    )}
+                  </g>
+                );
+              })}
+              <g className="roof-structure-edges" style={{ pointerEvents: 'visibleStroke' }}>
+                {renderEdges(editableFacets, analysis.svg.pxPerFt, handleEdgeCycle)}
+              </g>
+              {editableFacets.map(facet => {
+                const ox = facet.placement.outlinePx;
+                const lc =
+                  ox && ox.length >= 3
+                    ? {
+                        x: ox.reduce((s, p) => s + p.x, 0) / ox.length,
+                        y: ox.reduce((s, p) => s + p.y, 0) / ox.length,
+                      }
+                    : { x: facet.placement.w / 2, y: facet.placement.h / 2 };
+                return (
+                  <g key={`facet-label-${facet.index}`} transform={`translate(${facet.placement.x}, ${facet.placement.y})`}>
+                    <text
+                      x={lc.x}
+                      y={lc.y - 6}
+                      textAnchor="middle"
+                      fontSize={10}
+                      fontWeight={600}
+                      fill="#0f172a"
+                      fontFamily="Inter, system-ui, sans-serif"
+                      style={{ pointerEvents: 'none' }}
+                    >
+                      {facet.pitchLabel} · {facet.facingLabel}
+                    </text>
+                    <text
+                      x={lc.x}
+                      y={lc.y + 8}
+                      textAnchor="middle"
+                      fontSize={9}
+                      fill="#475569"
+                      fontFamily="Inter, system-ui, sans-serif"
+                      style={{ pointerEvents: 'none' }}
+                    >
+                      {Math.round(facet.actualAreaSqFt).toLocaleString()} sq ft
+                    </text>
+                  </g>
+                );
+              })}
             </svg>
 
-            <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1.5 text-[11px] text-slate-600">
+            <p className="text-[10px] text-slate-500">
+              Legend matches edge colors on rectangular facets. Click an edge to cycle its class (when editing). Traced
+              polygons omit schematic edge handles here — refine on the map.
+            </p>
+            <div className="flex flex-wrap gap-x-4 gap-y-1.5 text-[11px] text-slate-600">
               {(Object.keys(EDGE_STYLES) as FacetEdge['kind'][]).map(kind => (
                 <div key={kind} className="inline-flex items-center gap-1.5">
                   <span
@@ -671,8 +776,8 @@ export default function RoofStructurePanel({
           <div className="flex items-start gap-2 rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-xs text-blue-700">
             <Info size={12} className="mt-0.5 shrink-0" />
             <span>
-              Geometry and edge classes are estimated from Solar segment bounding boxes; use this as a
-              measurement guide, not a sealed engineering drawing. Amber dashed edges indicate low-confidence linework.
+              Low-confidence edges use amber dashes. Treat the whole view as a planning schematic — confirm
+              critical lines in the field or via a future DSM / ML / wizard fusion workflow.
             </span>
           </div>
         </div>

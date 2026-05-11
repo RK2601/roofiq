@@ -29,7 +29,6 @@ import {
   Search,
   MapPin,
   Sun,
-  Zap,
   Map,
   Navigation,
   Camera,
@@ -37,47 +36,136 @@ import {
   X,
   ZoomIn,
 } from 'lucide-react';
-import { saveProject } from '../utils/db';
-import { analyzeRoofImage, analyzeRoofImageFromFile, RoofAnalysis, CONDITION_BG, URGENCY_BG, CONDITION_COLORS } from '../utils/ai';
+import { saveProject, isDbConfigured } from '../utils/db';
+import {
+  analyzeRoofImage,
+  analyzeRoofImageFromFile,
+  analyzeRoofGeometryFromCapture,
+  type RoofAnalysis,
+  type RoofGeometryDetail,
+  CONDITION_BG,
+  URGENCY_BG,
+  CONDITION_COLORS,
+} from '../utils/ai';
 import { readGeminiApiKey } from '../utils/googleAiKey';
 import {
   fetchBuildingInsights,
-  computeDominantAzimuth,
   fetchDataLayers,
   filterUsableRoofSegments,
-  segmentToBoundingPolygon,
-  pitchDegreesToOption,
-  formatImageryDate,
+  validateSolarBuildingInsights,
+  type FetchBuildingInsightsOptions,
   type SolarBuildingInsights,
   type SolarDataLayersResponse,
 } from '../utils/solar';
 import { computeRoofMeasurements, formatFt } from '../utils/measurements';
-import { analyzeSolarSegments, type RoofStructureAnalysis } from '../utils/roofStructure';
+import {
+  analyzeDrawnRoofSections,
+  type DrawnRoofSectionInput,
+  type RoofStructureAnalysis,
+} from '../utils/roofStructure';
 import { buildHeightModel, type HeightModel } from '../utils/heightModel';
 import {
+  computeStaticMapImageBoundsFromCenterZoom,
   deriveHeuristicRoofCues,
   deriveVisionRoofCuesFromStaticMap,
-  deriveVisionRoofCuesFromFile,
-  mapPhotoCuesToAiCues,
-  type RoofPhotoCueAnalysis,
+  DRAWN_OVERLAY_VISION_HINT,
+  type RoofCaptureRing,
 } from '../utils/roofVision';
 import RoofStructurePanel from './RoofStructurePanel';
 import RoofMappingWizard from './RoofMappingWizard';
+import SaveProjectChoiceModal from './SaveProjectChoiceModal';
 import { ErrorBoundary } from './ErrorBoundary';
+
+function buildDrawnRoofSectionInputs(sections: RoofSection[]): DrawnRoofSectionInput[] {
+  const out: DrawnRoofSectionInput[] = [];
+  for (const s of sections) {
+    const pts: { lat: number; lng: number }[] = [];
+    if (s.polygon) {
+      s.polygon.getPath().forEach(p => pts.push({ lat: p.lat(), lng: p.lng() }));
+    } else if (s.polygonPath?.length) {
+      pts.push(...s.polygonPath);
+    }
+    if (pts.length < 3) continue;
+    out.push({
+      id: s.id,
+      path: pts,
+      flatAreaSqFt: s.flatArea,
+      actualAreaSqFt: s.actualArea,
+      pitch: s.pitch,
+    });
+  }
+  return out;
+}
+
+/** Static Maps URL with optional roof-section path overlays (same as save snapshots). */
+function buildSectionStaticMapUrl(
+  coordinates: Coordinates,
+  apiKey: string,
+  sects: RoofSection[],
+  zoom: number,
+  size: string
+): string {
+  const params = new URLSearchParams({
+    center: `${coordinates.lat},${coordinates.lng}`,
+    zoom: String(zoom),
+    size,
+    maptype: 'satellite',
+    scale: '2',
+    key: apiKey,
+  });
+  const paths = sects
+    .filter(s => s.polygon)
+    .map(s => {
+      const pts: string[] = [];
+      s.polygon!.getPath().forEach(p => pts.push(`${p.lat()},${p.lng()}`));
+      if (pts.length) pts.push(pts[0]);
+      const fill = `0x${s.color.replace('#', '')}40`;
+      const stroke = `0x${s.color.replace('#', '')}FF`;
+      return `fillcolor:${fill}|color:${stroke}|weight:2|${pts.join('|')}`;
+    });
+  const base = `https://maps.googleapis.com/maps/api/staticmap?${params}`;
+  return base + paths.map(p => `&path=${encodeURIComponent(p)}`).join('');
+}
 
 interface AnalysisPageProps {
   apiKey: string;
   address: string;
   coordinates: Coordinates;
+  projectId?: string | null;
+  /** Increments when the user should land with the Smart Roof Mapping wizard open (e.g. from Analysis 2). */
+  wizardAutoOpenSignal?: number;
+  /** User chose “Quick analysis” on Analysis 2 — omit polygon hint and wizard CTA in the sidebar. */
+  fromQuickAnalysisChoice?: boolean;
+  /** User chose Smart Roof Mapping Wizard on Analysis 2 — hide draw/quote onboarding until a property is selected. */
+  fromWizardAnalysis2Choice?: boolean;
   /** Called when the user picks a new address from the in-tab search (updates map + clears work in progress). */
   onPropertySelect: (address: string, coordinates: Coordinates) => void;
   onComplete: (sections: Omit<RoofSection, 'polygon'>[], projectId: string | null) => void;
+  /** After Smart Roof Mapping wizard finishes; parent typically navigates to the dashboard report. */
+  onWizardReportReady?: (ctx: { projectId: string; address: string }) => void;
 }
 
-export default function AnalysisPage({ apiKey, address, coordinates, onPropertySelect, onComplete }: AnalysisPageProps) {
+export default function AnalysisPage({
+  apiKey,
+  address,
+  coordinates,
+  projectId: linkedProjectId = null,
+  wizardAutoOpenSignal = 0,
+  fromQuickAnalysisChoice = false,
+  fromWizardAnalysis2Choice = false,
+  onPropertySelect,
+  onComplete,
+  onWizardReportReady,
+}: AnalysisPageProps) {
   const mapRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<google.maps.Map | null>(null);
   const drawingManagerRef = useRef<google.maps.drawing.DrawingManager | null>(null);
+  /** Click-to-draw draft path (map LatLng instances) while user traces a new section. */
+  const draftPathRef = useRef<google.maps.LatLng[]>([]);
+  const draftPolylineRef = useRef<google.maps.Polyline | null>(null);
+  /** Green dot at first click; blue dot follows cursor while drawing. */
+  const draftStartMarkerRef = useRef<google.maps.Marker | null>(null);
+  const draftCursorMarkerRef = useRef<google.maps.Marker | null>(null);
   const sectionsRef = useRef<RoofSection[]>([]);
 
   const [sections, setSections] = useState<RoofSection[]>([]);
@@ -93,9 +181,18 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
   const [aiResult, setAiResult] = useState<RoofAnalysis | null>(null);
   const [aiError, setAiError] = useState<string | null>(null);
   const [aiExpanded, setAiExpanded] = useState(false);
+  const [geometryDetail, setGeometryDetail] = useState<RoofGeometryDetail | null>(null);
   const hasGeminiKey = !!readGeminiApiKey();
   const labelsRef = useRef<google.maps.InfoWindow[]>([]);
   const searchInputRef = useRef<HTMLInputElement>(null);
+
+  const solarFetchOptions: FetchBuildingInsightsOptions = useMemo(() => {
+    const raw = import.meta.env.VITE_SOLAR_REQUIRED_QUALITY;
+    if (raw === 'MEDIUM' || raw === 'HIGH' || raw === 'LOW') return { requiredQuality: raw };
+    return {};
+  }, []);
+
+  const experimentalSolarOutlineEnabled = import.meta.env.VITE_EXPERIMENTAL_SOLAR_OUTLINE === 'true';
 
   const [solarStatus, setSolarStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
   const [solarData, setSolarData] = useState<SolarBuildingInsights | null>(null);
@@ -112,19 +209,177 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
   );
   const usableSolarSegments = filteredSolar.segments;
   const [showWizard, setShowWizard] = useState(false);
+  /** After wizard folder choice with no address yet (e.g. Analysis 2) — open wizard once the user picks a property from search. */
+  const [openWizardAfterPropertySearch, setOpenWizardAfterPropertySearch] = useState(false);
+  const lastWizardAutoOpenSignal = useRef(0);
+  /** Saved with the project as `project_name`; list title becomes name + address. */
+  const [projectFolderName, setProjectFolderName] = useState('');
+  /** When not inherit: user chose new vs existing folder before opening the wizard (no linked project yet). */
+  type WizardAttachState =
+    | { mode: 'inherit' }
+    | { mode: 'new' }
+    | { mode: 'existing'; id: string };
+  const [wizardAttach, setWizardAttach] = useState<WizardAttachState>({ mode: 'inherit' });
+  const [saveChoicePurpose, setSaveChoicePurpose] = useState<'quick' | 'wizard' | null>(null);
+
+  const wizardExistingProjectId =
+    wizardAttach.mode === 'existing'
+      ? wizardAttach.id
+      : wizardAttach.mode === 'new'
+        ? null
+        : linkedProjectId;
+
+  /** Analysis 2 → wizard (or post–folder-choice before address): hide quick-map draw / empty-state chrome. */
+  const hideWizardEntryRoofChrome = useMemo(
+    () =>
+      openWizardAfterPropertySearch || (fromWizardAnalysis2Choice && !address.trim()),
+    [openWizardAfterPropertySearch, fromWizardAnalysis2Choice, address]
+  );
 
   const roofStructurePreview = useMemo(() => {
+    if (solarStatus !== 'ready' || !solarData) return null;
+    const drawnInputs = buildDrawnRoofSectionInputs(sections);
+    if (drawnInputs.length === 0) return null;
+
     const segments = usableSolarSegments;
-    if (solarStatus !== 'ready' || !solarData || segments.length === 0) return null;
     const model = heightModel ?? buildHeightModel(segments, solarDataLayers);
-    const aiCues = roofAiCues ?? deriveHeuristicRoofCues(segments, solarData.center);
-    return analyzeSolarSegments(segments, solarData.center, {
+    const aiCues =
+      roofAiCues ??
+      (segments.length > 0 ? deriveHeuristicRoofCues(segments, solarData.center) : null);
+    const ctx = {
       imageryQuality: solarData.imageryQuality,
       hasDsm: !!solarDataLayers?.dsmUrl,
       heightModel: model,
-      aiCues,
-    });
-  }, [solarData, solarStatus, solarDataLayers, heightModel, roofAiCues, usableSolarSegments]);
+      aiCues: aiCues ?? undefined,
+    };
+
+    return analyzeDrawnRoofSections(drawnInputs, solarData.center, segments, ctx);
+  }, [
+    solarData,
+    solarStatus,
+    solarDataLayers,
+    heightModel,
+    roofAiCues,
+    usableSolarSegments,
+    sections,
+  ]);
+
+  /** Rings for roof-targeted static captures in Roof structure panel (drawn polygons on the map). */
+  const roofCaptureRings = useMemo((): RoofCaptureRing[] | null => {
+    const rings: RoofCaptureRing[] = [];
+    for (const s of sections) {
+      const pts: { lat: number; lng: number }[] = [];
+      if (s.polygon) {
+        s.polygon.getPath().forEach(p => pts.push({ lat: p.lat(), lng: p.lng() }));
+      } else if (s.polygonPath?.length) {
+        pts.push(...s.polygonPath);
+      }
+      if (pts.length >= 3) rings.push({ points: pts, color: s.color });
+    }
+    return rings.length ? rings : null;
+  }, [sections]);
+
+  const executeQuickSave = useCallback(
+    async (target: 'use-linked' | 'new' | string) => {
+      const existingProjectId =
+        target === 'use-linked' ? linkedProjectId : target === 'new' ? null : target;
+
+      const exportSections = sections.map(({ polygon, ...rest }) => ({
+        ...rest,
+        polygonPath: (() => {
+          const pts: { lat: number; lng: number }[] = [];
+          polygon?.getPath().forEach(p => pts.push({ lat: p.lat(), lng: p.lng() }));
+          return pts;
+        })(),
+      }));
+      setSaving(true);
+      let savedProjectId: string | null = null;
+      try {
+        const snapshots = [
+          { label: 'Standard View', url: buildSnapshotUrl(sections, 19) },
+          { label: 'Close-up', url: buildSnapshotUrl(sections, 21) },
+          { label: 'Overview', url: buildSnapshotUrl(sections, 17) },
+        ];
+        const sectionsToSave = sections.map(s => ({
+          id: s.id,
+          name: s.name,
+          flatArea: s.flatArea,
+          pitch: s.pitch,
+          pitchMultiplier: s.pitchMultiplier,
+          actualArea: s.actualArea,
+          color: s.color,
+          polygonPath: (() => {
+            const pts: { lat: number; lng: number }[] = [];
+            s.polygon?.getPath().forEach(p => pts.push({ lat: p.lat(), lng: p.lng() }));
+            return pts;
+          })(),
+        }));
+        savedProjectId = await saveProject(
+          address,
+          coordinates,
+          snapshots,
+          sectionsToSave,
+          roofStructure ?? roofStructurePreview,
+          {
+            projectName: projectFolderName.trim() || null,
+            analysisEntry: 'quick',
+            existingProjectId: existingProjectId ?? undefined,
+          }
+        );
+        setSaveStatus('saved');
+      } catch (err) {
+        console.error('Failed to save project:', err);
+        setSaveStatus('error');
+      } finally {
+        setSaving(false);
+      }
+      onComplete(exportSections, savedProjectId);
+    },
+    [
+      sections,
+      address,
+      coordinates,
+      projectFolderName,
+      roofStructure,
+      roofStructurePreview,
+      linkedProjectId,
+      onComplete,
+    ]
+  );
+
+  const requestOpenWizard = useCallback(() => {
+    if (linkedProjectId) {
+      setShowWizard(true);
+      return;
+    }
+    if (wizardAttach.mode !== 'inherit') {
+      if (address.trim()) {
+        setShowWizard(true);
+      } else {
+        setOpenWizardAfterPropertySearch(true);
+        queueMicrotask(() => searchInputRef.current?.focus());
+      }
+      return;
+    }
+    if (!isDbConfigured()) {
+      setShowWizard(true);
+      return;
+    }
+    setSaveChoicePurpose('wizard');
+  }, [linkedProjectId, wizardAttach.mode, address]);
+
+  useEffect(() => {
+    if (wizardAutoOpenSignal > lastWizardAutoOpenSignal.current) {
+      lastWizardAutoOpenSignal.current = wizardAutoOpenSignal;
+      requestOpenWizard();
+    }
+  }, [wizardAutoOpenSignal, requestOpenWizard]);
+
+  useEffect(() => {
+    if (!openWizardAfterPropertySearch || !address.trim()) return;
+    setOpenWizardAfterPropertySearch(false);
+    setShowWizard(true);
+  }, [address, openWizardAfterPropertySearch]);
 
   // Map view controls
   const [mapType, setMapType] = useState<'satellite' | 'hybrid'>('satellite');
@@ -136,30 +391,6 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
   // Photo upload for AI analysis
   const [uploadedPhoto, setUploadedPhoto] = useState<{ file: File; previewUrl: string } | null>(null);
   const photoInputRef = useRef<HTMLInputElement>(null);
-
-  // Multi-angle photo analysis (sidebar section)
-  const MULTI_ANGLE_SLOTS = [
-    { id: 'front_left' as const,   label: 'Front Left' },
-    { id: 'front_center' as const, label: 'Front Center' },
-    { id: 'front_right' as const,  label: 'Front Right' },
-    { id: 'rear_left' as const,    label: 'Rear Left' },
-    { id: 'rear_center' as const,  label: 'Rear Center' },
-    { id: 'rear_right' as const,   label: 'Rear Right' },
-  ] as const;
-  type MultiSlotId = typeof MULTI_ANGLE_SLOTS[number]['id'];
-  type MultiCapture = { file: File; previewUrl: string };
-  type MultiResult  = { status: 'idle' | 'analyzing' | 'done' | 'error'; result?: RoofPhotoCueAnalysis; error?: string };
-
-  const [showMultiAngle, setShowMultiAngle] = useState(false);
-  const [multiCaptures, setMultiCaptures] = useState<Partial<Record<MultiSlotId, MultiCapture>>>({});
-  const [multiResults,  setMultiResults]  = useState<Partial<Record<MultiSlotId, MultiResult>>>({});
-
-  const multiCaptureCount = Object.keys(multiCaptures).length;
-  const multiReadySlots   = Object.values(multiResults)
-    .filter(r => r?.status === 'done' && (r.result?.qualityScore ?? 0) >= 0.4).length;
-  const multiTotalCues    = Object.values(multiResults)
-    .filter(r => r?.status === 'done' && r.result)
-    .reduce((sum, r) => sum + (r!.result!.cues.length), 0);
 
   // Keep ref in sync
   useEffect(() => {
@@ -239,11 +470,83 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
 
     setSections(prev => [...prev, newSection]);
     setIsDrawing(false);
-    if (drawingManagerRef.current) {
-      drawingManagerRef.current.setDrawingMode(null);
-    }
     setTimeout(() => updateLabel(newSection), 50);
   }, [updateLabel]);
+
+  /** Single Solar `boundingBox` footprint — only when `VITE_EXPERIMENTAL_SOLAR_OUTLINE=true`. User edits one polygon. */
+  const applyExperimentalSolarOutline = useCallback(() => {
+    if (!solarData || !mapInstanceRef.current || !experimentalSolarOutlineEnabled) return;
+    const map = mapInstanceRef.current;
+    sectionsRef.current.forEach(s => {
+      if (s.polygon) {
+        google.maps.event.clearInstanceListeners(s.polygon);
+        s.polygon.setMap(null);
+      }
+    });
+    labelsRef.current.forEach(l => l.close());
+    labelsRef.current = [];
+    sectionsRef.current = [];
+
+    const { sw, ne } = solarData.boundingBox;
+    const pathCoords = [
+      { lat: sw.latitude, lng: sw.longitude },
+      { lat: ne.latitude, lng: sw.longitude },
+      { lat: ne.latitude, lng: ne.longitude },
+      { lat: sw.latitude, lng: ne.longitude },
+    ];
+    const polygon = new google.maps.Polygon({
+      paths: pathCoords,
+      map,
+      editable: true,
+      draggable: false,
+      fillOpacity: 0.28,
+      strokeWeight: 2.5,
+      fillColor: SECTION_COLORS[0],
+      strokeColor: SECTION_COLORS[0],
+      zIndex: 1,
+    });
+
+    const id = `solar-bbox-${Date.now()}`;
+    const flatArea = google.maps.geometry.spherical.computeArea(polygon.getPath()) * 10.7639;
+    const defaultPitch = PITCH_OPTIONS[2];
+    const newSection: RoofSection = {
+      id,
+      name: 'Building outline (experimental)',
+      polygon,
+      flatArea,
+      pitch: defaultPitch.value,
+      pitchMultiplier: defaultPitch.multiplier,
+      actualArea: computeActualArea(flatArea, defaultPitch.multiplier),
+      color: SECTION_COLORS[0],
+    };
+
+    google.maps.event.addListener(polygon.getPath(), 'set_at', () => {
+      const newArea = google.maps.geometry.spherical.computeArea(polygon.getPath()) * 10.7639;
+      setSections(prev =>
+        prev.map(s =>
+          s.id === id
+            ? { ...s, flatArea: newArea, actualArea: computeActualArea(newArea, s.pitchMultiplier) }
+            : s
+        )
+      );
+    });
+    google.maps.event.addListener(polygon.getPath(), 'insert_at', () => {
+      const newArea = google.maps.geometry.spherical.computeArea(polygon.getPath()) * 10.7639;
+      setSections(prev =>
+        prev.map(s =>
+          s.id === id
+            ? { ...s, flatArea: newArea, actualArea: computeActualArea(newArea, s.pitchMultiplier) }
+            : s
+        )
+      );
+    });
+    polygon.addListener('click', () => setSelectedSection(id));
+
+    sectionsRef.current = [newSection];
+    setSections([newSection]);
+    setSelectedSection(id);
+    setTimeout(() => updateLabel(newSection), 50);
+  }, [solarData, experimentalSolarOutlineEnabled, updateLabel]);
 
   useEffect(() => {
     if (!apiKey || !mapRef.current) return;
@@ -308,18 +611,6 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
       drawingManager.setMap(map);
       drawingManagerRef.current = drawingManager;
 
-      google.maps.event.addListener(drawingManager, 'polygoncomplete', (polygon: google.maps.Polygon) => {
-        const areaSqM = google.maps.geometry.spherical.computeArea(polygon.getPath());
-        const areaSqFt = areaSqM * 10.7639;
-        if (areaSqFt < 10) {
-          polygon.setMap(null);
-          setIsDrawing(false);
-          drawingManager.setDrawingMode(null);
-          return;
-        }
-        addSection(polygon, areaSqFt);
-      });
-
       setMapLoaded(true);
       } catch (err) {
         if (!cancelled) setMapError('Failed to initialize map. Please verify your API key and enabled APIs.');
@@ -356,6 +647,7 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
       setAiResult(null);
       setAiStatus('idle');
       setAiError(null);
+      setGeometryDetail(null);
       setSaveStatus('idle');
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -373,16 +665,39 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
     setSolarError(null);
     setRoofStructure(null);
     setShowRoofStructure(false);
+    setGeometryDetail(null);
 
     let cancelled = false;
     (async () => {
       try {
-        const data = await fetchBuildingInsights(coordinates.lat, coordinates.lng, apiKey);
+        const data = await fetchBuildingInsights(
+          coordinates.lat,
+          coordinates.lng,
+          apiKey,
+          solarFetchOptions
+        );
         if (cancelled) return;
+        if (!data) {
+          setSolarError('Empty Solar response');
+          setSolarStatus('error');
+          return;
+        }
+        const validation = validateSolarBuildingInsights(data, coordinates.lat, coordinates.lng);
+        if (!validation.ok) {
+          setSolarError(validation.rejectReason ?? 'Solar validation failed');
+          setSolarStatus('error');
+          return;
+        }
         setSolarData(data);
 
         const segments = filterUsableRoofSegments(data?.roofSegmentStats ?? []).segments;
-        const layers = await fetchDataLayers(coordinates.lat, coordinates.lng, 120, apiKey).catch(() => null);
+        const layers = await fetchDataLayers(
+          coordinates.lat,
+          coordinates.lng,
+          120,
+          apiKey,
+          solarFetchOptions
+        ).catch(() => null);
         if (cancelled) return;
         setSolarDataLayers(layers);
         setHeightModel(buildHeightModel(segments, layers));
@@ -398,13 +713,13 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
     return () => {
       cancelled = true;
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [coordinates.lat, coordinates.lng]);
+  }, [coordinates.lat, coordinates.lng, apiKey, solarFetchOptions]);
 
   useEffect(() => {
     if (!solarData || solarStatus !== 'ready') return;
     const segments = usableSolarSegments;
-    if (segments.length === 0) {
+    const drawnInputs = buildDrawnRoofSectionInputs(sections);
+    if (drawnInputs.length === 0) {
       setRoofAiCues(null);
       setRoofAiCueStatus('idle');
       return;
@@ -413,26 +728,43 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
     let cancelled = false;
     setRoofAiCueStatus('loading');
     (async () => {
-      const staticMapUrl =
-        `https://maps.googleapis.com/maps/api/staticmap?center=${coordinates.lat},${coordinates.lng}` +
-        `&zoom=20&size=640x640&maptype=satellite&scale=2&key=${apiKey}`;
+      const staticMapUrl = buildSectionStaticMapUrl(coordinates, apiKey, sections, 21, '640x640');
+      const staticImageBounds = computeStaticMapImageBoundsFromCenterZoom(coordinates, 21, 640);
 
-      const visionCues = await deriveVisionRoofCuesFromStaticMap(staticMapUrl, solarData).catch(() => null);
+      const visionCues = await deriveVisionRoofCuesFromStaticMap(
+        staticMapUrl,
+        solarData,
+        DRAWN_OVERLAY_VISION_HINT,
+        staticImageBounds,
+        roofCaptureRings
+      ).catch(() => null);
       if (cancelled) return;
       if (visionCues && visionCues.length > 0) {
         setRoofAiCues(visionCues);
         setRoofAiCueStatus('ready');
         return;
       }
-      const fallback = deriveHeuristicRoofCues(segments, solarData.center);
-      setRoofAiCues(fallback);
-      setRoofAiCueStatus('fallback');
+      if (segments.length > 0) {
+        const fallback = deriveHeuristicRoofCues(segments, solarData.center);
+        setRoofAiCues(fallback);
+        setRoofAiCueStatus('fallback');
+      } else {
+        setRoofAiCues(null);
+        setRoofAiCueStatus('idle');
+      }
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [solarData, solarStatus, coordinates.lat, coordinates.lng, apiKey, usableSolarSegments]);
+  }, [solarData, solarStatus, coordinates, apiKey, usableSolarSegments, sections]);
+
+  useEffect(() => {
+    if (sections.length === 0) {
+      setRoofStructure(null);
+      setShowRoofStructure(false);
+    }
+  }, [sections.length]);
 
   // Sync map type (satellite ↔ hybrid)
   useEffect(() => {
@@ -530,17 +862,218 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
   }, [showLabels, sections.length]);
 
   const startDrawing = () => {
-    if (!drawingManagerRef.current) return;
+    if (!mapInstanceRef.current || !mapLoaded) return;
+    draftPathRef.current = [];
+    draftPolylineRef.current?.setMap(null);
+    draftPolylineRef.current = null;
+    draftStartMarkerRef.current?.setMap(null);
+    draftStartMarkerRef.current = null;
+    draftCursorMarkerRef.current?.setMap(null);
+    draftCursorMarkerRef.current = null;
     setIsDrawing(true);
     setSelectedSection(null);
-    drawingManagerRef.current.setDrawingMode(google.maps.drawing.OverlayType.POLYGON);
   };
 
   const cancelDrawing = () => {
-    if (!drawingManagerRef.current) return;
+    draftPathRef.current = [];
+    draftPolylineRef.current?.setMap(null);
+    draftPolylineRef.current = null;
+    draftStartMarkerRef.current?.setMap(null);
+    draftStartMarkerRef.current = null;
+    draftCursorMarkerRef.current?.setMap(null);
+    draftCursorMarkerRef.current = null;
+    mapInstanceRef.current?.setOptions({ disableDoubleClickZoom: false });
     setIsDrawing(false);
-    drawingManagerRef.current.setDrawingMode(null);
   };
+
+  /** Click-to-draw: plain corner placement — double-click finishes (≥3 points). No angle / shape heuristics. */
+  useEffect(() => {
+    if (!isDrawing || !mapLoaded || !mapInstanceRef.current) return;
+    const map = mapInstanceRef.current;
+
+    /** Ignore only true duplicate taps on the same corner (screen jitter). */
+    const MIN_VERTEX_SEP_M = 0.35;
+
+    map.setOptions({ disableDoubleClickZoom: true });
+
+    const draftLine = new google.maps.Polyline({
+      map,
+      path: [],
+      strokeColor: '#2563eb',
+      strokeOpacity: 0.95,
+      strokeWeight: 2.5,
+      clickable: false,
+      zIndex: 3,
+    });
+    draftPolylineRef.current = draftLine;
+    draftPathRef.current = [];
+
+    const vertexIcon = (fill: string, scale: number): google.maps.Symbol => ({
+      path: google.maps.SymbolPath.CIRCLE,
+      scale,
+      fillColor: fill,
+      fillOpacity: 1,
+      strokeColor: '#ffffff',
+      strokeWeight: 2,
+      anchor: new google.maps.Point(0, 0),
+    });
+
+    const startMarker = new google.maps.Marker({
+      map,
+      visible: false,
+      zIndex: 5,
+      clickable: false,
+      optimized: true,
+      icon: vertexIcon('#22c55e', 9),
+    });
+    const cursorMarker = new google.maps.Marker({
+      map,
+      visible: false,
+      zIndex: 6,
+      clickable: false,
+      optimized: true,
+      icon: vertexIcon('#3b82f6', 8),
+    });
+    draftStartMarkerRef.current = startMarker;
+    draftCursorMarkerRef.current = cursorMarker;
+    /** One marker per corner after the first (start marker covers the first). */
+    const cornerMarkers: google.maps.Marker[] = [];
+
+    let detached = false;
+    let clickL: google.maps.MapsEventListener | undefined;
+    let dblL: google.maps.MapsEventListener | undefined;
+    let moveL: google.maps.MapsEventListener | undefined;
+    let outL: google.maps.MapsEventListener | undefined;
+
+    const undoLastDraftPoint = () => {
+      const path = draftPathRef.current;
+      if (path.length === 0) return;
+      path.pop();
+      draftLine.setPath(path);
+      while (cornerMarkers.length > Math.max(0, path.length - 1)) {
+        const m = cornerMarkers.pop();
+        m?.setMap(null);
+      }
+      if (path.length === 0) {
+        startMarker.setVisible(false);
+      } else if (path.length === 1) {
+        startMarker.setPosition(path[0]);
+        startMarker.setVisible(true);
+      }
+    };
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target?.closest('input, textarea, select, [contenteditable="true"]')) return;
+      const mod = e.ctrlKey || e.metaKey;
+      if (!mod || e.shiftKey || e.altKey) return;
+      if (e.key !== 'z' && e.key !== 'Z') return;
+      if (draftPathRef.current.length === 0) return;
+      e.preventDefault();
+      undoLastDraftPoint();
+    };
+
+    const detachDrawingUi = () => {
+      if (detached) return;
+      detached = true;
+      window.removeEventListener('keydown', onKeyDown, true);
+      if (clickL) google.maps.event.removeListener(clickL);
+      if (dblL) google.maps.event.removeListener(dblL);
+      if (moveL) google.maps.event.removeListener(moveL);
+      if (outL) google.maps.event.removeListener(outL);
+      cornerMarkers.forEach(m => m.setMap(null));
+      cornerMarkers.length = 0;
+      draftPolylineRef.current?.setMap(null);
+      draftPolylineRef.current = null;
+      startMarker.setMap(null);
+      cursorMarker.setMap(null);
+      draftStartMarkerRef.current = null;
+      draftCursorMarkerRef.current = null;
+      draftPathRef.current = [];
+      map.setOptions({ disableDoubleClickZoom: false });
+    };
+
+    const completeDraftPolygon = () => {
+      const path = draftPathRef.current;
+      if (path.length < 3) return;
+      const pathCopy = path.map(p => ({ lat: p.lat(), lng: p.lng() }));
+      detachDrawingUi();
+      const polygon = new google.maps.Polygon({
+        paths: pathCopy,
+        map,
+        editable: true,
+        draggable: false,
+        fillColor: '#3b82f6',
+        fillOpacity: 0.28,
+        strokeColor: '#2563eb',
+        strokeWeight: 2.5,
+        zIndex: 2,
+      });
+      const areaSqM = google.maps.geometry.spherical.computeArea(polygon.getPath());
+      const areaSqFt = areaSqM * 10.7639;
+      if (areaSqFt < 10) {
+        polygon.setMap(null);
+        setIsDrawing(false);
+        return;
+      }
+      addSection(polygon, areaSqFt);
+    };
+
+    const tryAddOrClose = (latLng: google.maps.LatLng, fromDoubleClick: boolean) => {
+      const path = draftPathRef.current;
+      if (fromDoubleClick && path.length >= 3) {
+        completeDraftPolygon();
+        return;
+      }
+      if (path.length > 0) {
+        const dLast = google.maps.geometry.spherical.computeDistanceBetween(latLng, path[path.length - 1]);
+        if (dLast < MIN_VERTEX_SEP_M) return;
+      }
+      path.push(latLng);
+      draftLine.setPath(path);
+      if (path.length === 1) {
+        startMarker.setPosition(path[0]);
+        startMarker.setVisible(true);
+      } else {
+        cornerMarkers.push(
+          new google.maps.Marker({
+            map,
+            position: latLng,
+            zIndex: 4,
+            clickable: false,
+            optimized: true,
+            icon: vertexIcon('#94a3b8', 6),
+          })
+        );
+      }
+    };
+
+    const onClick = (e: google.maps.MapMouseEvent) => {
+      if (!e.latLng) return;
+      tryAddOrClose(e.latLng, false);
+    };
+    const onDbl = (e: google.maps.MapMouseEvent) => {
+      if (!e.latLng) return;
+      tryAddOrClose(e.latLng, true);
+    };
+
+    clickL = map.addListener('click', onClick);
+    dblL = map.addListener('dblclick', onDbl);
+    moveL = map.addListener('mousemove', (e: google.maps.MapMouseEvent) => {
+      if (!e.latLng) return;
+      cursorMarker.setPosition(e.latLng);
+      cursorMarker.setVisible(true);
+    });
+    outL = map.addListener('mouseout', () => {
+      cursorMarker.setVisible(false);
+    });
+
+    window.addEventListener('keydown', onKeyDown, true);
+
+    return () => {
+      detachDrawingUi();
+    };
+  }, [isDrawing, mapLoaded, addSection]);
 
   const deleteSection = (id: string) => {
     setSections(prev => {
@@ -579,158 +1112,12 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
     mapInstanceRef.current.setZoom(20);
   };
 
-  const importSolarSegments = useCallback(() => {
-    if (!solarData || !mapInstanceRef.current) return;
-    const segments = usableSolarSegments;
-    if (segments.length === 0) return;
-    const dominantAzimuth = computeDominantAzimuth(segments);
-
-    // Clear existing sections
-    sectionsRef.current.forEach(s => {
-      if (s.polygon) {
-        google.maps.event.clearInstanceListeners(s.polygon);
-        s.polygon.setMap(null);
-      }
-    });
-    labelsRef.current.forEach(l => l.close());
-    labelsRef.current = [];
-    sectionsRef.current = [];
-
-    // Keep only meaningful facets: drop tiny segments (<80 sq ft), cap at 12, largest first
-    // so smaller polygons render on top of larger ones (higher zIndex).
-    const MIN_AREA_SQFT = 80;
-    const filtered = [...segments]
-      .filter(s => s.stats.areaMeters2 * 10.7639 >= MIN_AREA_SQFT)
-      .sort((a, b) => b.stats.areaMeters2 - a.stats.areaMeters2)
-      .slice(0, 12);
-
-    // Build all sections first, then set state once
-    const newSections: RoofSection[] = filtered.map((segment, idx) => {
-      const path = segmentToBoundingPolygon(segment, { dominantAzimuthDegrees: dominantAzimuth });
-      const color = SECTION_COLORS[idx % SECTION_COLORS.length];
-      const pitchOption = pitchDegreesToOption(segment.pitchDegrees);
-      const flatAreaSqFt = segment.stats.areaMeters2 * 10.7639;
-      const id = `solar-${Date.now()}-${idx}`;
-
-      const polygon = new google.maps.Polygon({
-        paths: path,
-        fillColor: color,
-        strokeColor: color,
-        fillOpacity: 0.3,
-        strokeWeight: 2.5,
-        editable: true,
-        draggable: false,
-        zIndex: 1,
-        map: mapInstanceRef.current,
-      });
-
-      const onAreaChange = () => {
-        const newArea = google.maps.geometry.spherical.computeArea(polygon.getPath()) * 10.7639;
-        setSections(prev =>
-          prev.map(s =>
-            s.id === id
-              ? { ...s, flatArea: newArea, actualArea: computeActualArea(newArea, s.pitchMultiplier) }
-              : s
-          )
-        );
-      };
-      google.maps.event.addListener(polygon.getPath(), 'set_at', onAreaChange);
-      google.maps.event.addListener(polygon.getPath(), 'insert_at', onAreaChange);
-      polygon.addListener('click', () => setSelectedSection(id));
-
-      return {
-        id,
-        name: `Section ${idx + 1}`,
-        polygon,
-        flatArea: flatAreaSqFt,
-        pitch: pitchOption.value,
-        pitchMultiplier: pitchOption.multiplier,
-        actualArea: computeActualArea(flatAreaSqFt, pitchOption.multiplier),
-        color,
-      };
-    });
-
-    sectionsRef.current = newSections;
-    setSections(newSections);
-    newSections.forEach(s => setTimeout(() => updateLabel(s), 50));
-  }, [solarData, usableSolarSegments, updateLabel]);
-
   const totalFlat = sections.reduce((s, r) => s + r.flatArea, 0);
   const totalActual = sections.reduce((s, r) => s + r.actualArea, 0);
   const totalSquares = Math.ceil((totalActual * 1.12) / 100);
 
-  const buildSnapshotUrl = (sects: RoofSection[], zoom: number, size = '800x500'): string => {
-    const params = new URLSearchParams({
-      center: `${coordinates.lat},${coordinates.lng}`,
-      zoom: String(zoom),
-      size,
-      maptype: 'satellite',
-      key: apiKey,
-    });
-    const paths = sects
-      .filter(s => s.polygon)
-      .map(s => {
-        const pts: string[] = [];
-        s.polygon!.getPath().forEach(p => pts.push(`${p.lat()},${p.lng()}`));
-        if (pts.length) pts.push(pts[0]);
-        const fill = `0x${s.color.replace('#', '')}40`;
-        const stroke = `0x${s.color.replace('#', '')}FF`;
-        return `fillcolor:${fill}|color:${stroke}|weight:2|${pts.join('|')}`;
-      });
-    const base = `https://maps.googleapis.com/maps/api/staticmap?${params}`;
-    return base + paths.map(p => `&path=${encodeURIComponent(p)}`).join('');
-  };
-
-  const handleMultiCapture = (slotId: MultiSlotId, file: File | null) => {
-    if (!file) return;
-    setMultiCaptures(prev => {
-      const existing = prev[slotId];
-      if (existing) URL.revokeObjectURL(existing.previewUrl);
-      return { ...prev, [slotId]: { file, previewUrl: URL.createObjectURL(file) } };
-    });
-    setMultiResults(prev => ({ ...prev, [slotId]: { status: 'idle' } }));
-  };
-
-  const analyzeMultiSlot = async (slotId: MultiSlotId) => {
-    const capture = multiCaptures[slotId];
-    if (!capture) return;
-    setMultiResults(prev => ({ ...prev, [slotId]: { status: 'analyzing' } }));
-    const label = MULTI_ANGLE_SLOTS.find(s => s.id === slotId)?.label;
-    try {
-      const result = await deriveVisionRoofCuesFromFile(capture.file, label);
-      if (!result) {
-        setMultiResults(prev => ({ ...prev, [slotId]: { status: 'error', error: 'No cues detected.' } }));
-        return;
-      }
-      setMultiResults(prev => ({ ...prev, [slotId]: { status: 'done', result } }));
-    } catch (err) {
-      setMultiResults(prev => ({
-        ...prev,
-        [slotId]: { status: 'error', error: err instanceof Error ? err.message : String(err) },
-      }));
-    }
-  };
-
-  const analyzeAllMultiSlots = async () => {
-    for (const slot of MULTI_ANGLE_SLOTS) {
-      if (!multiCaptures[slot.id] || multiResults[slot.id]?.status === 'analyzing') continue;
-      // eslint-disable-next-line no-await-in-loop
-      await analyzeMultiSlot(slot.id);
-    }
-  };
-
-  const applyMultiCuesToStructure = () => {
-    if (!solarData) return;
-    const rawCues = Object.values(multiResults)
-      .filter(r => r?.status === 'done' && (r.result?.qualityScore ?? 0) >= 0.4)
-      .flatMap(r => r!.result!.cues);
-    if (rawCues.length === 0) return;
-    const aiCues = mapPhotoCuesToAiCues(rawCues, solarData);
-    if (aiCues.length > 0) {
-      setRoofAiCues(aiCues);
-      setRoofAiCueStatus('ready');
-    }
-  };
+  const buildSnapshotUrl = (sects: RoofSection[], zoom: number, size = '800x500') =>
+    buildSectionStaticMapUrl(coordinates, apiKey, sects, zoom, size);
 
   const handlePhotoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -743,6 +1130,7 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
     setAiStatus('idle');
     setAiResult(null);
     setAiError(null);
+    setGeometryDetail(null);
     setAiExpanded(true);
   };
 
@@ -750,14 +1138,28 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
     setAiStatus('analyzing');
     setAiResult(null);
     setAiError(null);
+    setGeometryDetail(null);
     setAiExpanded(true);
     try {
       let result: RoofAnalysis;
       if (useUploadedPhoto && uploadedPhoto) {
         result = await analyzeRoofImageFromFile(uploadedPhoto.file, solarData);
       } else {
-        const url = `https://maps.googleapis.com/maps/api/staticmap?center=${coordinates.lat},${coordinates.lng}&zoom=20&size=640x640&maptype=satellite&scale=2&key=${apiKey}`;
-        result = await analyzeRoofImage(url, solarData);
+        const hasDrawnOverlay = sections.some(s => s.polygon);
+        const zoomHd = hasDrawnOverlay ? 21 : 20;
+        const url = hasDrawnOverlay
+          ? buildSectionStaticMapUrl(coordinates, apiKey, sections, zoomHd, '640x640')
+          : `https://maps.googleapis.com/maps/api/staticmap?center=${coordinates.lat},${coordinates.lng}&zoom=20&size=640x640&maptype=satellite&scale=2&key=${apiKey}`;
+        if (hasDrawnOverlay && hasGeminiKey) {
+          const [r, g] = await Promise.all([
+            analyzeRoofImage(url, solarData),
+            analyzeRoofGeometryFromCapture(url, solarData).catch(() => null),
+          ]);
+          result = r;
+          setGeometryDetail(g);
+        } else {
+          result = await analyzeRoofImage(url, solarData);
+        }
       }
       setAiResult(result);
       setAiStatus('done');
@@ -786,46 +1188,16 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
     }
   };
 
-  const handleComplete = async () => {
-    const exportSections = sections.map(({ polygon, ...rest }) => ({
-      ...rest,
-      polygonPath: (() => {
-        const pts: { lat: number; lng: number }[] = [];
-        polygon?.getPath().forEach(p => pts.push({ lat: p.lat(), lng: p.lng() }));
-        return pts;
-      })(),
-    }));
-    setSaving(true);
-    let projectId: string | null = null;
-    try {
-      const snapshots = [
-        { label: 'Standard View',  url: buildSnapshotUrl(sections, 19) },
-        { label: 'Close-up',       url: buildSnapshotUrl(sections, 21) },
-        { label: 'Overview',       url: buildSnapshotUrl(sections, 17) },
-      ];
-      const sectionsToSave = sections.map(s => ({
-        id: s.id,
-        name: s.name,
-        flatArea: s.flatArea,
-        pitch: s.pitch,
-        pitchMultiplier: s.pitchMultiplier,
-        actualArea: s.actualArea,
-        color: s.color,
-        polygonPath: (() => {
-          const pts: { lat: number; lng: number }[] = [];
-          s.polygon?.getPath().forEach(p => pts.push({ lat: p.lat(), lng: p.lng() }));
-          return pts;
-        })(),
-      }));
-      projectId = await saveProject(address, coordinates, snapshots, sectionsToSave, roofStructure ?? roofStructurePreview);
-      setSaveStatus('saved');
-    } catch (err) {
-      console.error('Failed to save project:', err);
-      setSaveStatus('error');
-    } finally {
-      setSaving(false);
+  const handleComplete = () => {
+    if (linkedProjectId) {
+      void executeQuickSave('use-linked');
+      return;
     }
-    onComplete(exportSections, projectId);
+    if (!isDbConfigured()) {
+      void executeQuickSave('new');
+      return;
+    }
+    setSaveChoicePurpose('quick');
   };
 
   return (
@@ -987,7 +1359,9 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
           <div className="absolute bottom-[max(0.75rem,env(safe-area-inset-bottom,0px))] left-2 right-2 sm:left-1/2 sm:right-auto sm:-translate-x-1/2 z-10 sm:max-w-[min(92vw,28rem)]">
             <div className="bg-slate-900/90 text-white text-[11px] sm:text-sm font-medium px-3 py-2 sm:px-4 sm:py-2.5 rounded-2xl shadow-xl flex flex-wrap items-center gap-2 backdrop-blur">
               <div className="w-2 h-2 shrink-0 rounded-full bg-orange-400 animate-pulse" />
-              <span className="min-w-0 flex-1 leading-snug">Tap to add points · Double-tap to close</span>
+              <span className="min-w-0 flex-1 leading-snug">
+                Tap each corner — Ctrl+Z or Cmd+Z undoes the last point — double-click to finish (≥3 corners)
+              </span>
               <button
                 type="button"
                 onClick={cancelDrawing}
@@ -1013,26 +1387,48 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
               </span>
             )}
           </div>
-          <p className="hidden text-xs text-slate-500 sm:block">Draw polygons on the map to measure each roof section</p>
+          {!fromQuickAnalysisChoice && (
+            <>
+              {!hideWizardEntryRoofChrome && (
+                <p className="hidden text-xs text-slate-500 sm:block">
+                  Draw polygons on the map to measure each roof section
+                </p>
+              )}
 
-          {/* Smart Roof Mapping Wizard launch button */}
-          <button
-            type="button"
-            onClick={() => setShowWizard(true)}
-            className="mt-2 w-full flex items-center justify-center gap-2 bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-500 hover:to-blue-500 text-white text-xs font-semibold py-2.5 px-4 rounded-xl transition-all shadow-sm"
-          >
-            <Brain size={13} />
-            Smart Roof Mapping Wizard
-            <ArrowRight size={13} />
-          </button>
+              {/* Smart Roof Mapping Wizard launch button */}
+              <button
+                type="button"
+                onClick={() => requestOpenWizard()}
+                className="mt-2 w-full flex items-center justify-center gap-2 bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-500 hover:to-blue-500 text-white text-xs font-semibold py-2.5 px-4 rounded-xl transition-all shadow-sm"
+              >
+                <Brain size={13} />
+                Smart Roof Mapping Wizard
+                <ArrowRight size={13} />
+              </button>
+            </>
+          )}
 
-          <div className="mt-2 space-y-2 border-t border-slate-200 pt-2 sm:mt-3 sm:pt-3">
+          <div className={`space-y-2 border-t border-slate-200 pt-2 sm:pt-3 ${fromQuickAnalysisChoice ? 'mt-0 sm:mt-1' : 'mt-2 sm:mt-3'}`}>
             <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
               <MapPin size={12} className="shrink-0 text-blue-600" aria-hidden />
               Current property
             </div>
             <p className="line-clamp-2 text-xs leading-snug text-slate-800 sm:line-clamp-3" title={address}>
               {address || '—'}
+            </p>
+            <label htmlFor="analysis-project-folder-name" className="text-[11px] font-medium text-slate-600 block mt-2">
+              Project folder name
+            </label>
+            <input
+              id="analysis-project-folder-name"
+              type="text"
+              value={projectFolderName}
+              onChange={e => setProjectFolderName(e.target.value)}
+              placeholder="e.g. Client or job name (optional)"
+              className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 shadow-sm outline-none placeholder:text-slate-400 focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+            />
+            <p className="mt-1 text-[10px] text-slate-400 leading-snug">
+              Saved as <span className="font-medium text-slate-600">name + address</span> in Projects. Address above stays the property location.
             </p>
             <label htmlFor="analysis-property-search" className="sr-only">
               Search for another property address
@@ -1045,13 +1441,29 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
                 type="text"
                 autoComplete="off"
                 disabled={!mapLoaded}
-                placeholder={mapLoaded ? 'Search another address…' : 'Loading map…'}
-                className="touch-manipulation w-full min-h-[44px] rounded-xl border border-slate-200 bg-white py-2.5 pl-10 pr-3 text-base text-slate-800 shadow-sm outline-none placeholder:text-slate-400 focus:border-blue-400 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-100 disabled:text-slate-400"
+                placeholder={
+                  mapLoaded
+                    ? openWizardAfterPropertySearch
+                      ? 'Search address — wizard opens after you pick…'
+                      : 'Search another address…'
+                    : 'Loading map…'
+                }
+                className={`touch-manipulation w-full min-h-[44px] rounded-xl border bg-white py-2.5 pl-10 pr-3 text-base text-slate-800 shadow-sm outline-none placeholder:text-slate-400 focus:ring-2 disabled:bg-slate-100 disabled:text-slate-400 ${
+                  openWizardAfterPropertySearch
+                    ? 'border-blue-400 ring-blue-100'
+                    : 'border-slate-200 focus:border-blue-400 focus:ring-blue-100'
+                }`}
               />
             </div>
-            <p className="hidden text-[11px] leading-snug text-slate-400 sm:block">
-              Choose a suggestion from the dropdown to load that roof.
-            </p>
+            {openWizardAfterPropertySearch ? (
+              <p className="rounded-lg bg-blue-50 px-2.5 py-2 text-[11px] font-medium leading-snug text-blue-900">
+                Choose a property from the suggestions — the Smart Roof Mapping Wizard opens right after the map loads that address.
+              </p>
+            ) : (
+              <p className="hidden text-[11px] leading-snug text-slate-400 sm:block">
+                Choose a suggestion from the dropdown to load that roof.
+              </p>
+            )}
           </div>
         </div>
 
@@ -1065,97 +1477,22 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
               <span>Fetching Solar imagery data…</span>
             </div>
           )}
-          {solarStatus === 'ready' && solarData && (
-            <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs space-y-1.5">
-              <div className="flex items-center gap-1.5 font-semibold text-amber-800">
-                <Sun size={13} className="text-amber-500 shrink-0" />
-                Solar data loaded
-                <span className={`ml-auto text-[10px] font-bold px-1.5 py-0.5 rounded-full ${
-                  solarData.imageryQuality === 'HIGH' ? 'bg-green-100 text-green-700' :
-                  solarData.imageryQuality === 'MEDIUM' ? 'bg-amber-100 text-amber-700' :
-                  'bg-slate-100 text-slate-500'
-                }`}>
-                  {solarData.imageryQuality} quality
-                </span>
-              </div>
-              <p className="text-amber-700">
-                {usableSolarSegments.length} usable roof segment{usableSolarSegments.length !== 1 ? 's' : ''} detected
-                · imagery {formatImageryDate(solarData.imageryDate)}
-              </p>
-              {filteredSolar.summary.droppedCount > 0 && (
-                <p className="text-[10px] text-amber-800/70">
-                  Filtered out {filteredSolar.summary.droppedCount} micro-segment
-                  {filteredSolar.summary.droppedCount !== 1 ? 's' : ''} to improve stability.
-                </p>
+          {solarStatus === 'ready' && solarData && mapLoaded && (
+            <div className="space-y-1.5">
+              {experimentalSolarOutlineEnabled && !hideWizardEntryRoofChrome && (
+                <button
+                  type="button"
+                  onClick={applyExperimentalSolarOutline}
+                  className="w-full rounded-lg border border-dashed border-amber-400 bg-amber-50/80 px-2 py-1.5 text-[10px] font-semibold text-amber-950 hover:bg-amber-100/70"
+                >
+                  Add one building outline from Solar bounding box (experimental — replaces sections)
+                </button>
               )}
-              <p className="text-[10px] text-amber-800/70">
-                Geometry retention: {Math.round(filteredSolar.summary.retainedAreaRatio * 100)}% of detected roof area.
-              </p>
-              <p className="text-[10px] text-amber-800/80">
-                Height source: {heightModel?.source === 'dsm' ? 'DSM (data layers)' : heightModel?.source === 'solar-plane' ? 'Solar plane heights' : 'none'}
-              </p>
-              <p className="text-[10px] text-amber-800/70">
-                AI cues: {(roofAiCues?.length ?? 0)} inferred lines
-                {' · '}
-                {roofAiCueStatus === 'ready' ? 'vision model' : roofAiCueStatus === 'loading' ? 'analyzing…' : 'heuristic fallback'}
-              </p>
-              {mapLoaded && usableSolarSegments.length > 0 && (
-                <div className="space-y-1.5">
-                  <button
-                    type="button"
-                    onClick={importSolarSegments}
-                    className="touch-manipulation w-full flex items-center justify-center gap-1.5 bg-amber-500 hover:bg-amber-600 text-white text-xs font-semibold px-3 py-2 rounded-lg transition-colors"
-                  >
-                    <Zap size={12} />
-                    Auto-import roof segments
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const segments = usableSolarSegments;
-                      if (segments.length === 0) return;
-                      if (!roofStructure) {
-                        const aiCues = roofAiCues ?? deriveHeuristicRoofCues(segments, solarData.center);
-                        setRoofStructure(
-                          analyzeSolarSegments(segments, solarData.center, {
-                            imageryQuality: solarData.imageryQuality,
-                            hasDsm: !!solarDataLayers?.dsmUrl,
-                            heightModel: heightModel ?? buildHeightModel(segments, solarDataLayers),
-                            aiCues,
-                          })
-                        );
-                      }
-                      setShowRoofStructure(true);
-                    }}
-                    className="touch-manipulation w-full flex items-center justify-center gap-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold px-3 py-2 rounded-lg transition-colors"
-                  >
-                    <Ruler size={12} />
-                    View Roof Structure
-                  </button>
-                  {(roofStructurePreview || roofStructure) && (
-                    <div className="space-y-1">
-                      <div className="flex items-center justify-between rounded-md border border-blue-200 bg-blue-50 px-2 py-1">
-                        <span className="text-[10px] font-semibold uppercase tracking-wide text-blue-700">Structure confidence</span>
-                        <span
-                          className={`text-[10px] font-bold rounded-full px-1.5 py-0.5 ${
-                            (roofStructure ?? roofStructurePreview)?.confidenceBand === 'high'
-                              ? 'bg-green-100 text-green-700'
-                              : (roofStructure ?? roofStructurePreview)?.confidenceBand === 'medium'
-                                ? 'bg-amber-100 text-amber-700'
-                                : 'bg-red-100 text-red-700'
-                          }`}
-                        >
-                          {(roofStructure ?? roofStructurePreview)?.confidenceBand.toUpperCase()}
-                        </span>
-                      </div>
-                      {(roofStructure ?? roofStructurePreview)?.confidenceBand === 'low' && (
-                        <p className="text-[10px] text-amber-700 leading-snug">
-                          Run auto map viewpoints to improve ridge/valley accuracy.
-                        </p>
-                      )}
-                    </div>
-                  )}
-                </div>
+              {sections.length === 0 && !hideWizardEntryRoofChrome && (
+                <p className="rounded-lg border border-slate-100 bg-slate-50 px-3 py-2 text-[11px] text-slate-600 leading-snug">
+                  Trace roof sections on the map first. Roof structure and AI cues then use satellite captures cropped to
+                  your outlines for better alignment.
+                </p>
               )}
             </div>
           )}
@@ -1167,157 +1504,17 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
           )}
         </div>
 
-        {/* ── Multi-Angle Photo Analysis ──────────────────────────── */}
-        <div className="mx-3 mt-2">
-          <button
-            type="button"
-            onClick={() => setShowMultiAngle(v => !v)}
-            className="w-full flex items-center gap-2 text-xs font-semibold text-indigo-700 px-3 py-2 bg-indigo-50 hover:bg-indigo-100 rounded-xl transition-colors"
-          >
-            <Camera size={13} className="text-indigo-500 shrink-0" />
-            Multi-Angle Photo Analysis
-            {multiCaptureCount > 0 && (
-              <span className="ml-auto text-[10px] font-medium text-indigo-500">
-                {multiCaptureCount}/6 uploaded · {multiTotalCues} cues
-              </span>
-            )}
-            {showMultiAngle ? <ChevronUp size={12} className="ml-1 shrink-0" /> : <ChevronDown size={12} className="ml-1 shrink-0" />}
-          </button>
-
-          {showMultiAngle && (
-            <div className="mt-1 rounded-xl border border-indigo-100 bg-indigo-50/60 p-2.5 space-y-2">
-              <p className="text-[10px] text-indigo-600 leading-snug">
-                Upload roof photos from different angles. AI extracts ridge, hip, valley, eave and rake cues to
-                improve structure accuracy.
-              </p>
-
-              <div className="grid grid-cols-2 gap-1.5">
-                {MULTI_ANGLE_SLOTS.map(slot => {
-                  const capture = multiCaptures[slot.id];
-                  const result  = multiResults[slot.id];
-                  const analyzing = result?.status === 'analyzing';
-                  const done      = result?.status === 'done' && result.result;
-                  const error     = result?.status === 'error';
-                  return (
-                    <div key={slot.id} className="rounded-lg border border-indigo-100 bg-white p-1.5 space-y-1">
-                      <p className="text-[10px] font-semibold text-slate-600">{slot.label}</p>
-
-                      {capture ? (
-                        <img
-                          src={capture.previewUrl}
-                          alt={slot.label}
-                          className="w-full h-14 object-cover rounded border border-slate-200"
-                        />
-                      ) : (
-                        <label className="flex flex-col items-center justify-center w-full h-14 rounded border-2 border-dashed border-indigo-200 bg-indigo-50/50 cursor-pointer hover:bg-indigo-100 transition-colors">
-                          <Camera size={16} className="text-indigo-300 mb-0.5" />
-                          <span className="text-[9px] text-indigo-400">Upload</span>
-                          <input
-                            type="file"
-                            accept="image/*"
-                            className="sr-only"
-                            onChange={e => handleMultiCapture(slot.id, e.target.files?.[0] ?? null)}
-                          />
-                        </label>
-                      )}
-
-                      <div className="flex items-center gap-1 flex-wrap">
-                        {capture && (
-                          <>
-                            <label className="text-[10px] text-slate-500 cursor-pointer hover:text-indigo-600 border border-slate-200 rounded px-1.5 py-0.5">
-                              Change
-                              <input
-                                type="file"
-                                accept="image/*"
-                                className="sr-only"
-                                onChange={e => handleMultiCapture(slot.id, e.target.files?.[0] ?? null)}
-                              />
-                            </label>
-                            <button
-                              type="button"
-                              onClick={() => analyzeMultiSlot(slot.id)}
-                              disabled={analyzing}
-                              className="text-[10px] text-indigo-700 bg-indigo-50 border border-indigo-200 rounded px-1.5 py-0.5 disabled:opacity-50"
-                            >
-                              {analyzing ? (
-                                <Loader2 size={10} className="inline animate-spin" />
-                              ) : 'Analyze'}
-                            </button>
-                          </>
-                        )}
-                        {done && (
-                          <span className="ml-auto text-[10px] text-emerald-600 font-medium">
-                            {result!.result!.cues.length}c · {Math.round(result!.result!.qualityScore * 100)}%
-                          </span>
-                        )}
-                        {error && (
-                          <span className="text-[10px] text-red-500 truncate" title={result?.error}>Err</span>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-
-              {/* Summary + actions */}
-              <div className="rounded-lg border border-indigo-100 bg-white px-2 py-1.5 text-[10px] text-slate-600 space-y-0.5">
-                <p className="font-semibold text-slate-700">
-                  {multiReadySlots}/{MULTI_ANGLE_SLOTS.length} quality angles · {multiTotalCues} total cues
-                </p>
-                {multiTotalCues > 0 && (
-                  <p>
-                    {Object.values(multiResults).filter(r => r?.status === 'done').map(r => r!.result!).reduce((s, r) => s + r.byType.ridge, 0)} ridge ·{' '}
-                    {Object.values(multiResults).filter(r => r?.status === 'done').map(r => r!.result!).reduce((s, r) => s + r.byType.hip, 0)} hip ·{' '}
-                    {Object.values(multiResults).filter(r => r?.status === 'done').map(r => r!.result!).reduce((s, r) => s + r.byType.valley, 0)} valley
-                  </p>
-                )}
-              </div>
-
-              <div className="flex items-center gap-1.5 flex-wrap">
-                <button
-                  type="button"
-                  onClick={analyzeAllMultiSlots}
-                  disabled={multiCaptureCount === 0}
-                  className="text-[10px] font-semibold text-indigo-700 border border-indigo-200 bg-white rounded px-2.5 py-1.5 hover:bg-indigo-50 disabled:opacity-40 disabled:cursor-not-allowed"
-                >
-                  Analyze All
-                </button>
-                {solarData && multiReadySlots >= 2 && (
-                  <button
-                    type="button"
-                    onClick={applyMultiCuesToStructure}
-                    className="text-[10px] font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded px-2.5 py-1.5 transition-colors"
-                  >
-                    Apply to Structure Analysis
-                  </button>
-                )}
-                {!solarData && multiReadySlots >= 2 && (
-                  <span className="text-[10px] text-indigo-500 italic">Waiting for Solar data to apply cues…</span>
-                )}
-                {solarData && multiReadySlots < 2 && multiCaptureCount > 0 && (
-                  <span className="text-[10px] text-indigo-400">Analyze at least 2 angles to apply</span>
-                )}
-              </div>
-
-              {roofAiCueStatus === 'ready' && multiReadySlots >= 2 && (
-                <div className="rounded-lg bg-emerald-50 border border-emerald-100 px-2 py-1 text-[10px] text-emerald-700">
-                  Photo cues applied — structure analysis updated.
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-
         {/* Sections list */}
         <div className="space-y-2 p-3 pb-1">
-          {sections.length === 0 && !isDrawing && (
+          {sections.length === 0 && !isDrawing && !hideWizardEntryRoofChrome && (
             <div className="flex flex-col items-center justify-center py-12 text-center px-4">
               <div className="w-12 h-12 bg-blue-50 rounded-2xl flex items-center justify-center mb-3">
                 <Pencil size={20} className="text-blue-500" />
               </div>
               <p className="text-slate-700 font-medium text-sm mb-1">No sections yet</p>
               <p className="text-slate-400 text-xs leading-relaxed">
-                Click "Draw Section" to start tracing the roof outline on the satellite map
+                Use &quot;Draw section&quot; to place corners, then double-click to finish. Then open Roof
+                structure and run satellite AI for HD geometry and condition.
               </p>
             </div>
           )}
@@ -1380,6 +1577,40 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
             </div>
           ))}
         </div>
+
+        {sections.length > 0 && solarStatus === 'ready' && solarData && (
+          <div className="mx-3 mb-2 rounded-xl border border-blue-100 bg-blue-50/90 p-3 shadow-sm">
+            <div className="flex items-start gap-2">
+              <Ruler size={15} className="text-blue-600 shrink-0 mt-0.5" aria-hidden />
+              <div className="min-w-0 flex-1 space-y-1">
+                <p className="text-xs font-semibold text-blue-950">Roof structure and vision</p>
+                <p className="text-[11px] text-blue-900/90 leading-snug">
+                  Opens a schematic from your drawn sections, Solar facets, and Gemini line detection on a static map that
+                  includes your colored outlines.
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              disabled={!roofStructurePreview && !roofStructure}
+              onClick={() => {
+                if (!roofStructurePreview) return;
+                if (!roofStructure) setRoofStructure(roofStructurePreview);
+                setShowRoofStructure(true);
+              }}
+              className="touch-manipulation mt-2.5 flex w-full items-center justify-center gap-1.5 rounded-lg bg-blue-600 px-3 py-2.5 text-xs font-semibold text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <Ruler size={12} aria-hidden />
+              View Roof Structure
+            </button>
+            {roofAiCueStatus === 'loading' && sections.length > 0 && (
+              <p className="mt-2 flex items-center gap-1.5 text-[10px] text-blue-800/80">
+                <Loader2 size={11} className="animate-spin shrink-0" aria-hidden />
+                Refining AI vision cues from your map selection…
+              </p>
+            )}
+          </div>
+        )}
 
         {/* Measurements Summary — scroll with sections */}
         {sections.length > 0 && (() => {
@@ -1547,6 +1778,57 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
                       </ul>
                     )}
                     <p className="text-slate-600 italic bg-white rounded-lg px-2 py-1.5 border border-purple-100">"{aiResult.recommendation}"</p>
+                    {geometryDetail && (
+                      <div className="rounded-lg border border-blue-100 bg-blue-50/80 p-2.5 space-y-1.5 text-[11px] text-slate-800">
+                        <p className="font-semibold text-blue-950">Gemini HD geometry (slopes · valleys · ridges)</p>
+                        <p className="text-slate-700 leading-snug">{geometryDetail.summary}</p>
+                        {geometryDetail.steep_slopes.length > 0 && (
+                          <div>
+                            <span className="font-semibold text-slate-600">Steep / complex:</span>
+                            <ul className="mt-0.5 list-disc pl-4 text-slate-600">
+                              {geometryDetail.steep_slopes.map((t, i) => (
+                                <li key={`s-${i}`}>{t}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                        {geometryDetail.valleys.length > 0 && (
+                          <div>
+                            <span className="font-semibold text-slate-600">Valleys:</span>
+                            <ul className="mt-0.5 list-disc pl-4 text-slate-600">
+                              {geometryDetail.valleys.map((t, i) => (
+                                <li key={`v-${i}`}>{t}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                        {geometryDetail.ridges_hips.length > 0 && (
+                          <div>
+                            <span className="font-semibold text-slate-600">Ridges / hips:</span>
+                            <ul className="mt-0.5 list-disc pl-4 text-slate-600">
+                              {geometryDetail.ridges_hips.map((t, i) => (
+                                <li key={`r-${i}`}>{t}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                        {geometryDetail.perimeters_eaves_rakes.length > 0 && (
+                          <div>
+                            <span className="font-semibold text-slate-600">Eaves / rakes / perimeter:</span>
+                            <ul className="mt-0.5 list-disc pl-4 text-slate-600">
+                              {geometryDetail.perimeters_eaves_rakes.map((t, i) => (
+                                <li key={`e-${i}`}>{t}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                        {geometryDetail.caveats.length > 0 && (
+                          <p className="text-[10px] text-amber-900/90 leading-snug">
+                            <span className="font-semibold">Note:</span> {geometryDetail.caveats.join(' ')}
+                          </p>
+                        )}
+                      </div>
+                    )}
                     <div className="flex gap-2">
                       <button onClick={() => analyzeWithAI(false)} className="text-purple-500 hover:text-purple-700 text-[10px] underline">Re-analyze satellite</button>
                       {uploadedPhoto && <button onClick={() => analyzeWithAI(true)} className="text-purple-500 hover:text-purple-700 text-[10px] underline">Use my photo</button>}
@@ -1563,6 +1845,7 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
         {/* Primary actions — outside scroll region so Draw / Save stay visible without scrolling (mobile + desktop sidebar) */}
         <div className="shrink-0 border-t border-slate-200 bg-white p-2.5 pb-[max(0.5rem,env(safe-area-inset-bottom,0px))] shadow-[0_-6px_20px_-8px_rgba(15,23,42,0.12)] lg:p-3 lg:shadow-none">
           {!isDrawing ? (
+            hideWizardEntryRoofChrome ? null : (
             <div className="grid grid-cols-2 gap-2 lg:flex lg:w-full lg:flex-col lg:gap-2">
               <button
                 type="button"
@@ -1601,6 +1884,7 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
                 )}
               </button>
             </div>
+            )
           ) : (
             <button
               type="button"
@@ -1623,6 +1907,7 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
           mapCenter={coordinates}
           mapsApiKey={apiKey}
           solarInsights={solarData}
+          roofCaptureRings={roofCaptureRings}
           onApply={next => setRoofStructure(next)}
           onClose={() => setShowRoofStructure(false)}
         />
@@ -1635,10 +1920,57 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
             address={address}
             coordinates={coordinates}
             solarData={solarData}
-            onClose={() => setShowWizard(false)}
+            existingProjectId={wizardExistingProjectId}
+            projectFolderName={projectFolderName.trim() || null}
+            onReportReady={ctx => {
+              onWizardReportReady?.(ctx);
+              setShowWizard(false);
+              setWizardAttach({ mode: 'inherit' });
+              setOpenWizardAfterPropertySearch(false);
+            }}
+            onClose={() => {
+              setShowWizard(false);
+              setWizardAttach({ mode: 'inherit' });
+              setOpenWizardAfterPropertySearch(false);
+            }}
           />
         </ErrorBoundary>
       )}
+
+      <SaveProjectChoiceModal
+        open={saveChoicePurpose !== null}
+        purpose={saveChoicePurpose}
+        currentAddress={address}
+        onCancel={() => setSaveChoicePurpose(null)}
+        onChooseNew={() => {
+          const p = saveChoicePurpose;
+          setSaveChoicePurpose(null);
+          if (p === 'quick') void executeQuickSave('new');
+          else if (p === 'wizard') {
+            setWizardAttach({ mode: 'new' });
+            if (address.trim()) {
+              setShowWizard(true);
+            } else {
+              setOpenWizardAfterPropertySearch(true);
+              queueMicrotask(() => searchInputRef.current?.focus());
+            }
+          }
+        }}
+        onChooseExisting={id => {
+          const p = saveChoicePurpose;
+          setSaveChoicePurpose(null);
+          if (p === 'quick') void executeQuickSave(id);
+          else if (p === 'wizard') {
+            setWizardAttach({ mode: 'existing', id });
+            if (address.trim()) {
+              setShowWizard(true);
+            } else {
+              setOpenWizardAfterPropertySearch(true);
+              queueMicrotask(() => searchInputRef.current?.focus());
+            }
+          }
+        }}
+      />
     </div>
   );
 }

@@ -6,6 +6,8 @@ import {
 } from '@google/generative-ai';
 import type { GenerateContentResult, Schema, Part } from '@google/generative-ai';
 import { readGeminiApiKey } from './googleAiKey';
+import { isGemini429OrQuotaError, withGemini429Retries } from './gemini429';
+import { callOpenAiFallbackJson } from './openaiFallback';
 import type { SolarBuildingInsights } from './solar';
 import { azimuthLabel, formatImageryDate } from './solar';
 
@@ -223,7 +225,7 @@ async function runGeminiLoop(parts: Part[]): Promise<RoofAnalysis> {
           generationConfig,
           safetySettings: SAFETY_RELAXED,
         });
-        const result = await model.generateContent(parts);
+        const result = await withGemini429Retries(() => model.generateContent(parts));
         const text = readResponseText(result);
         return parseRoofJson(text);
       } catch (e: unknown) {
@@ -233,6 +235,7 @@ async function runGeminiLoop(parts: Part[]): Promise<RoofAnalysis> {
         if (isGeminiAuthError(msg)) throw new Error('GEMINI_AUTH_FAILED');
         if (mode === 'structured' && structuredOutputUnsupported(msg)) continue;
         if (isModelOrEndpointUnavailable(msg)) break;
+        if (isGemini429OrQuotaError(e)) continue;
         throw e;
       }
     }
@@ -251,10 +254,22 @@ export async function analyzeRoofImage(
   const prompt = solarInsights
     ? ANALYSIS_PROMPT + buildSolarContext(solarInsights)
     : ANALYSIS_PROMPT;
-  return runGeminiLoop([
+  const parts: Part[] = [
     { inlineData: { mimeType: imageData.mimeType || 'image/png', data: imageData.data } } as Part,
     { text: prompt } as Part,
-  ]);
+  ];
+  try {
+    return await runGeminiLoop(parts);
+  } catch (e) {
+    if (!isGemini429OrQuotaError(e)) throw e;
+    const fallbackPrompt =
+      `${prompt}\n\nReturn JSON only with keys: condition, condition_score, issues, urgency, estimated_remaining_life, recommendation, marketing_message.`;
+    return callOpenAiFallbackJson<RoofAnalysis>({
+      task: 'roof_analysis',
+      prompt: fallbackPrompt,
+      image: { data: imageData.data, mimeType: imageData.mimeType || 'image/png' },
+    });
+  }
 }
 
 /** Analyse a roof from a user-uploaded File (drone photo, site photo, etc.). */
@@ -266,8 +281,136 @@ export async function analyzeRoofImageFromFile(
   const prompt =
     `${ANALYSIS_PROMPT}\n\nNote: This image was uploaded directly by the user (e.g. a drone photo or on-site photo). Analyze it with the same criteria — the image may show the roof at an angle or from street level; do your best to assess visible condition.` +
     (solarInsights ? buildSolarContext(solarInsights) : '');
-  return runGeminiLoop([
+  const parts: Part[] = [
     { inlineData: { mimeType: mimeType || 'image/jpeg', data } } as Part,
     { text: prompt } as Part,
-  ]);
+  ];
+  try {
+    return await runGeminiLoop(parts);
+  } catch (e) {
+    if (!isGemini429OrQuotaError(e)) throw e;
+    const fallbackPrompt =
+      `${prompt}\n\nReturn JSON only with keys: condition, condition_score, issues, urgency, estimated_remaining_life, recommendation, marketing_message.`;
+    return callOpenAiFallbackJson<RoofAnalysis>({
+      task: 'roof_analysis',
+      prompt: fallbackPrompt,
+      image: { data, mimeType: mimeType || 'image/jpeg' },
+    });
+  }
+}
+
+/** Structured Gemini read on a max-res static capture (often with user-drawn overlays). */
+export interface RoofGeometryDetail {
+  summary: string;
+  steep_slopes: string[];
+  valleys: string[];
+  ridges_hips: string[];
+  perimeters_eaves_rakes: string[];
+  caveats: string[];
+}
+
+const GEOMETRY_PROMPT = `You are a senior roofing estimator viewing a MAXIMUM-RESOLUTION north-up satellite capture of a rooftop (Static Maps at high zoom, scale=2). The image may include semi-transparent colored polygons from field tracing — treat them as approximate facet boundaries, not survey-grade.
+Act as if you had a sharper inspection pass: infer likely ridges, hips, valleys, eaves, rakes, and steeper pitches from shadows, texture breaks, and edges. Note uncertainty where pixels blur.
+Return JSON only matching the schema. Use short phrases in arrays (max 6 items each).`;
+
+const GEOMETRY_RESPONSE_SCHEMA: Schema = {
+  type: SchemaType.OBJECT,
+  properties: {
+    summary: { type: SchemaType.STRING },
+    steep_slopes: { type: SchemaType.ARRAY, items: { type: SchemaType.STRING }, maxItems: 8 },
+    valleys: { type: SchemaType.ARRAY, items: { type: SchemaType.STRING }, maxItems: 8 },
+    ridges_hips: { type: SchemaType.ARRAY, items: { type: SchemaType.STRING }, maxItems: 8 },
+    perimeters_eaves_rakes: { type: SchemaType.ARRAY, items: { type: SchemaType.STRING }, maxItems: 8 },
+    caveats: { type: SchemaType.ARRAY, items: { type: SchemaType.STRING }, maxItems: 6 },
+  },
+  required: ['summary', 'steep_slopes', 'valleys', 'ridges_hips', 'perimeters_eaves_rakes', 'caveats'],
+};
+
+function parseGeometryJson(text: string): RoofGeometryDetail {
+  const cleaned = text.replace(/```json\n?/gi, '').replace(/```\n?/g, '').trim();
+  const parsed = JSON.parse(cleaned) as RoofGeometryDetail;
+  if (!parsed || typeof parsed.summary !== 'string') throw new Error('GEMINI_BAD_JSON');
+  return {
+    summary: parsed.summary,
+    steep_slopes: Array.isArray(parsed.steep_slopes) ? parsed.steep_slopes : [],
+    valleys: Array.isArray(parsed.valleys) ? parsed.valleys : [],
+    ridges_hips: Array.isArray(parsed.ridges_hips) ? parsed.ridges_hips : [],
+    perimeters_eaves_rakes: Array.isArray(parsed.perimeters_eaves_rakes) ? parsed.perimeters_eaves_rakes : [],
+    caveats: Array.isArray(parsed.caveats) ? parsed.caveats : [],
+  };
+}
+
+async function runGeminiGeometryLoop(parts: Part[]): Promise<RoofGeometryDetail> {
+  const apiKey = readGeminiApiKey();
+  if (!apiKey) throw new Error('GOOGLE_AI_KEY_MISSING');
+
+  const genAI = new GoogleGenerativeAI(apiKey);
+  const structuredConfig = {
+    responseMimeType: 'application/json' as const,
+    responseSchema: GEOMETRY_RESPONSE_SCHEMA,
+    temperature: 0.15,
+    maxOutputTokens: 2048,
+  };
+  const plainJsonConfig = {
+    responseMimeType: 'application/json' as const,
+    temperature: 0.15,
+    maxOutputTokens: 2048,
+  };
+
+  let lastError: unknown;
+  for (const modelId of GEMINI_MODEL_IDS) {
+    for (const mode of ['structured', 'plain'] as const) {
+      try {
+        const generationConfig = mode === 'structured' ? structuredConfig : plainJsonConfig;
+        const model = genAI.getGenerativeModel({
+          model: modelId,
+          generationConfig,
+          safetySettings: SAFETY_RELAXED,
+        });
+        const result = await withGemini429Retries(() => model.generateContent(parts));
+        const text = readResponseText(result);
+        return parseGeometryJson(text);
+      } catch (e: unknown) {
+        lastError = e;
+        const msg = e instanceof Error ? e.message : String(e);
+        if (msg.startsWith('GEMINI_BLOCKED') || msg.startsWith('GEMINI_FINISH')) throw e;
+        if (isGeminiAuthError(msg)) throw new Error('GEMINI_AUTH_FAILED');
+        if (mode === 'structured' && structuredOutputUnsupported(msg)) continue;
+        if (isModelOrEndpointUnavailable(msg)) break;
+        if (isGemini429OrQuotaError(e)) continue;
+        throw e;
+      }
+    }
+  }
+  if (lastError instanceof Error) throw lastError;
+  throw new Error('GEMINI_MODEL_UNAVAILABLE');
+}
+
+/**
+ * Second-pass Gemini vision on the same HD static capture used for condition checks:
+ * explicit slopes, valleys, ridges/hips, and perimeters (complements line-cue detection).
+ */
+export async function analyzeRoofGeometryFromCapture(
+  imageUrl: string,
+  solarInsights?: SolarBuildingInsights | null
+): Promise<RoofGeometryDetail> {
+  const imageData = await urlToBase64(imageUrl);
+  const prompt =
+    GEOMETRY_PROMPT + (solarInsights ? `\n\nSolar context for alignment:\n${buildSolarContext(solarInsights)}` : '');
+  const parts: Part[] = [
+    { inlineData: { mimeType: imageData.mimeType || 'image/png', data: imageData.data } } as Part,
+    { text: prompt } as Part,
+  ];
+  try {
+    return await runGeminiGeometryLoop(parts);
+  } catch (e) {
+    if (!isGemini429OrQuotaError(e)) throw e;
+    const fallbackPrompt =
+      `${prompt}\n\nReturn JSON only with keys: summary, steep_slopes, valleys, ridges_hips, perimeters_eaves_rakes, caveats.`;
+    return callOpenAiFallbackJson<RoofGeometryDetail>({
+      task: 'roof_geometry',
+      prompt: fallbackPrompt,
+      image: { data: imageData.data, mimeType: imageData.mimeType || 'image/png' },
+    });
+  }
 }

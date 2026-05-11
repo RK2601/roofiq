@@ -69,6 +69,78 @@ function solarProxyUrl(original: string): string {
   return `${window.location.origin}/api/proxy-solar?u=${encodeURIComponent(original)}`;
 }
 
+const EARTH_RADIUS_M = 6_371_000;
+
+/** Great-circle distance between two WGS84 points in meters. */
+export function haversineDistanceMeters(a: SolarLatLng, b: SolarLatLng): number {
+  const r1 = (a.latitude * Math.PI) / 180;
+  const r2 = (b.latitude * Math.PI) / 180;
+  const dLat = ((b.latitude - a.latitude) * Math.PI) / 180;
+  const dLng = ((b.longitude - a.longitude) * Math.PI) / 180;
+  const sinDLat = Math.sin(dLat / 2);
+  const sinDLng = Math.sin(dLng / 2);
+  const h = sinDLat * sinDLat + Math.cos(r1) * Math.cos(r2) * sinDLng * sinDLng;
+  return 2 * EARTH_RADIUS_M * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+
+export interface SolarValidationResult {
+  ok: boolean;
+  warnings: string[];
+  rejectReason?: string;
+}
+
+/**
+ * Post-fetch checks: pin vs Solar building center, segment presence.
+ * `ok: false` means the UI should reject this response (likely wrong building).
+ */
+export function validateSolarBuildingInsights(
+  insights: SolarBuildingInsights,
+  requestLat: number,
+  requestLng: number
+): SolarValidationResult {
+  const warnings: string[] = [];
+  const c = insights.center;
+  if (!Number.isFinite(c.latitude) || !Number.isFinite(c.longitude)) {
+    return { ok: false, warnings, rejectReason: 'Solar response is missing a valid building center.' };
+  }
+  if (Math.abs(c.latitude) < 1e-8 && Math.abs(c.longitude) < 1e-8) {
+    return { ok: false, warnings, rejectReason: 'Solar returned an invalid (zero) building center.' };
+  }
+
+  const pin: SolarLatLng = { latitude: requestLat, longitude: requestLng };
+  const distM = haversineDistanceMeters(pin, c);
+  const hardRejectM = 450;
+  const warnOffsetM = 55;
+  if (distM > hardRejectM) {
+    return {
+      ok: false,
+      warnings,
+      rejectReason: `Solar building center is about ${Math.round(distM)} m from the map pin — likely a different building. Adjust the pin or address.`,
+    };
+  }
+  if (distM > warnOffsetM) {
+    warnings.push(
+      `Solar center is ~${Math.round(distM)} m from your pin — confirm this is the intended building.`
+    );
+  }
+
+  const segs = insights.roofSegmentStats ?? [];
+  if (segs.length === 0) {
+    warnings.push(
+      'Solar returned no roof segments for this building. Trace sections manually, use the wizard, or capture drone imagery for survey-grade work.'
+    );
+  }
+
+  return { ok: true, warnings };
+}
+
+export type SolarRequiredQuality = 'LOW' | 'MEDIUM' | 'HIGH';
+
+export interface FetchBuildingInsightsOptions {
+  /** Passed to `requiredQuality` on the Solar API (default LOW). */
+  requiredQuality?: SolarRequiredQuality;
+}
+
 function normalizeBuildingInsights(raw: RawSolarBuildingInsights): SolarBuildingInsights {
   const roofSegmentStats = raw.roofSegmentStats ?? raw.solarPotential?.roofSegmentStats ?? [];
   const imageryDate =
@@ -176,9 +248,13 @@ export function filterUsableRoofSegments(segments: SolarRoofSegment[]): {
 export async function fetchBuildingInsights(
   lat: number,
   lng: number,
-  apiKey: string
+  apiKey: string,
+  options?: FetchBuildingInsightsOptions
 ): Promise<SolarBuildingInsights | null> {
-  const url = `${SOLAR_API_BASE}/buildingInsights:findClosest?location.latitude=${lat}&location.longitude=${lng}&requiredQuality=LOW&key=${apiKey}`;
+  const requiredQuality = options?.requiredQuality ?? 'LOW';
+  const url =
+    `${SOLAR_API_BASE}/buildingInsights:findClosest?location.latitude=${lat}` +
+    `&location.longitude=${lng}&requiredQuality=${requiredQuality}&key=${apiKey}`;
 
   const tryFetch = async (u: string): Promise<SolarBuildingInsights> => {
     const res = await fetch(u);
@@ -206,11 +282,13 @@ export async function fetchDataLayers(
   lat: number,
   lng: number,
   radiusMeters: number,
-  apiKey: string
+  apiKey: string,
+  options?: FetchBuildingInsightsOptions
 ): Promise<SolarDataLayersResponse | null> {
+  const requiredQuality = options?.requiredQuality ?? 'LOW';
   const url =
     `${SOLAR_API_BASE}/dataLayers:get?location.latitude=${lat}` +
-    `&location.longitude=${lng}&radiusMeters=${radiusMeters}&requiredQuality=LOW&key=${apiKey}`;
+    `&location.longitude=${lng}&radiusMeters=${radiusMeters}&requiredQuality=${requiredQuality}&key=${apiKey}`;
 
   const tryFetch = async (u: string): Promise<SolarDataLayersResponse | null> => {
     const res = await fetch(u);

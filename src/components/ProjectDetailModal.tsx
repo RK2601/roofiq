@@ -1,12 +1,37 @@
-import { useEffect, useState } from 'react';
-import { X, MapPin, Layers, Ruler, Calendar, ZoomIn, ChevronLeft, ChevronRight, Image, Brain, Loader2, AlertTriangle } from 'lucide-react';
-import { getProjectDetails, getProjectSnapshots, getProjectSections } from '../utils/db';
+import { useEffect, useLayoutEffect, useState, useCallback } from 'react';
+import { X, MapPin, Layers, Ruler, Calendar, ZoomIn, ChevronLeft, ChevronRight, Image, Brain, Loader2, AlertTriangle, FileText } from 'lucide-react';
+import {
+  getProjectDetails,
+  getProjectSnapshots,
+  getProjectSections,
+  getWizardWorkflowReport,
+  isDbConfigured,
+  projectTagLabel,
+  updateProjectSnapshotAiAnalysis,
+  type WizardWorkflowReportPayload,
+} from '../utils/db';
+import WizardWorkflowReportView from './WizardWorkflowReportView';
+import ProjectTagMenu, { projectTagTone } from './ProjectTagMenu';
 import { analyzeRoofImage, RoofAnalysis, CONDITION_BG, URGENCY_BG, CONDITION_COLORS } from '../utils/ai';
 import { readGeminiApiKey } from '../utils/googleAiKey';
+
+type ProjectDetailTab = 'overview' | 'wizard';
 
 interface Props {
   projectId: string;
   onClose: () => void;
+  /** When true on mount, open the Smart Roof Mapping wizard report tab first. */
+  defaultWizardTab?: boolean;
+  onDefaultWizardTabConsumed?: () => void;
+  /** Opens full quote view with sections loaded from this project. */
+  onOpenQuoteFromProject?: (projectId: string) => void | Promise<void>;
+  /** After the project row is deleted from the database (modal should close). */
+  onProjectDeleted?: (projectId: string) => void;
+  /**
+   * `layer` — absolute inset-0 inside a relative parent (e.g. Projects list shell).
+   * `column` — fixed to the main content column below the app header, beside the sidebar (dashboard home).
+   */
+  layout?: 'layer' | 'column';
 }
 
 interface ProjectDetail {
@@ -16,14 +41,28 @@ interface ProjectDetail {
   lng: number;
   snapshot_url: string | null;
   created_at: string;
+  project_name: string | null;
+  display_name: string | null;
+  analysis_entry: string | null;
+  project_tag: string | null;
   section_count: number;
   total_area: number;
+}
+
+function analysisEntryLabel(entry: string | null | undefined): string | null {
+  const e = (entry ?? '').trim().toLowerCase();
+  if (e === 'both' || e === 'quick+wizard') return 'Quick map + Wizard';
+  if (e === 'wizard') return 'Wizard';
+  if (e === 'quick') return 'Quick map';
+  if (!e) return null;
+  return 'Mixed analyses';
 }
 
 interface Snapshot {
   id: string;
   label: string;
   snapshot_url: string;
+  ai_analysis?: RoofAnalysis | null;
 }
 
 interface Section {
@@ -42,7 +81,36 @@ interface SnapAI {
   error?: string;
 }
 
-export default function ProjectDetailModal({ projectId, onClose }: Props) {
+function isPersistableSnapshotId(id: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id);
+}
+
+function snapAiFromRows(rows: Snapshot[]): Record<string, SnapAI> {
+  const out: Record<string, SnapAI> = {};
+  for (const r of rows) {
+    const a = r.ai_analysis;
+    if (a && typeof a === 'object' && 'condition' in a && 'urgency' in a) {
+      out[r.id] = { status: 'done', result: a as RoofAnalysis };
+    }
+  }
+  return out;
+}
+
+const SHELL_LAYER =
+  'absolute inset-0 z-10 flex min-h-0 flex-col overflow-hidden bg-white shadow-xl ring-1 ring-slate-200/60 motion-safe:animate-fade-in';
+/** Fixed below dashboard header, to the right of the lg sidebar (w-64). */
+const SHELL_COLUMN =
+  'fixed bottom-0 right-0 left-0 top-[max(3.25rem,env(safe-area-inset-top,0px))] z-[60] flex min-h-0 flex-col overflow-hidden bg-white shadow-xl ring-1 ring-slate-200/60 motion-safe:animate-fade-in sm:top-16 lg:left-64';
+
+export default function ProjectDetailModal({
+  projectId,
+  onClose,
+  defaultWizardTab,
+  onDefaultWizardTabConsumed,
+  onOpenQuoteFromProject,
+  onProjectDeleted,
+  layout = 'column',
+}: Props) {
   const [project, setProject] = useState<ProjectDetail | null>(null);
   const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
   const [sections, setSections] = useState<Section[]>([]);
@@ -51,11 +119,103 @@ export default function ProjectDetailModal({ projectId, onClose }: Props) {
   const [snapAI, setSnapAI] = useState<Record<string, SnapAI>>({});
   const hasGeminiKey = !!readGeminiApiKey();
 
+  const [activeTab, setActiveTab] = useState<ProjectDetailTab>(() => (defaultWizardTab ? 'wizard' : 'overview'));
+  const [wizardReport, setWizardReport] = useState<WizardWorkflowReportPayload | null>(null);
+  const [wizardReportLoading, setWizardReportLoading] = useState(false);
+  const [wizardReportError, setWizardReportError] = useState<string | null>(null);
+
+  useLayoutEffect(() => {
+    if (defaultWizardTab) {
+      onDefaultWizardTabConsumed?.();
+    }
+    // Intentionally once per modal mount (parent resets defaultWizardTab after this).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const loadWizardReport = useCallback(async () => {
+    if (!isDbConfigured()) {
+      setWizardReportError('Database not configured.');
+      setWizardReport(null);
+      return;
+    }
+    setWizardReportLoading(true);
+    setWizardReportError(null);
+    try {
+      const row = await getWizardWorkflowReport(projectId);
+      setWizardReport(row);
+    } catch (e: unknown) {
+      setWizardReportError(e instanceof Error ? e.message : 'Failed to load wizard report');
+      setWizardReport(null);
+    } finally {
+      setWizardReportLoading(false);
+    }
+  }, [projectId]);
+
+  useEffect(() => {
+    if (activeTab !== 'wizard') return;
+    let cancelled = false;
+
+    (async () => {
+      if (!isDbConfigured()) {
+        setWizardReportError('Database not configured.');
+        setWizardReport(null);
+        setWizardReportLoading(false);
+        return;
+      }
+      setWizardReportLoading(true);
+      setWizardReportError(null);
+      try {
+        const row = await getWizardWorkflowReport(projectId);
+        if (cancelled) return;
+        setWizardReport(row);
+      } catch (e: unknown) {
+        if (!cancelled) {
+          setWizardReportError(e instanceof Error ? e.message : 'Failed to load wizard report');
+          setWizardReport(null);
+        }
+      } finally {
+        if (!cancelled) setWizardReportLoading(false);
+      }
+    })();
+
+    const interval = window.setInterval(async () => {
+      if (cancelled || !isDbConfigured()) return;
+      try {
+        const row = await getWizardWorkflowReport(projectId);
+        if (cancelled) return;
+        setWizardReport(row);
+        if (row?.finalAnalysis != null) {
+          window.clearInterval(interval);
+        }
+      } catch {
+        /* keep last good payload */
+      }
+    }, 2000);
+
+    const stop = window.setTimeout(() => window.clearInterval(interval), 48_000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+      window.clearTimeout(stop);
+    };
+  }, [activeTab, projectId]);
+
   const analyzeSnap = async (snapId: string, url: string) => {
     setSnapAI(prev => ({ ...prev, [snapId]: { status: 'analyzing' } }));
     try {
       const result = await analyzeRoofImage(url);
       setSnapAI(prev => ({ ...prev, [snapId]: { status: 'done', result } }));
+      if (isPersistableSnapshotId(snapId) && isDbConfigured()) {
+        try {
+          await updateProjectSnapshotAiAnalysis(snapId, result);
+        } catch (e) {
+          console.error('[ProjectDetail] persist snapshot AI', e);
+        }
+      }
+      setSnapshots(prev =>
+        prev.map(s => (s.id === snapId ? { ...s, ai_analysis: result } : s))
+      );
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Analysis failed';
       setSnapAI(prev => ({ ...prev, [snapId]: { status: 'error', error: msg } }));
@@ -74,8 +234,10 @@ export default function ProjectDetailModal({ projectId, onClose }: Props) {
       const snapList = snaps as Snapshot[];
       if (snapList.length === 0 && proj.snapshot_url) {
         setSnapshots([{ id: 'primary', label: 'Satellite View', snapshot_url: proj.snapshot_url }]);
+        setSnapAI({});
       } else {
         setSnapshots(snapList);
+        setSnapAI(snapAiFromRows(snapList));
       }
       setSections(sects as Section[]);
     }).catch(console.error)
@@ -88,18 +250,12 @@ export default function ProjectDetailModal({ projectId, onClose }: Props) {
   const prevImage = () => setLightboxIdx(i => (i !== null ? (i - 1 + snapshots.length) % snapshots.length : 0));
   const nextImage = () => setLightboxIdx(i => (i !== null ? (i + 1) % snapshots.length : 0));
 
-  return (
-    <>
-      {/* Backdrop */}
-      <div
-        className="fixed inset-0 bg-black/50 z-40 backdrop-blur-sm"
-        onClick={onClose}
-      />
+  const shellClass = layout === 'layer' ? SHELL_LAYER : SHELL_COLUMN;
 
-      {/* Panel */}
-      <div className="fixed right-0 top-0 h-full w-full max-w-3xl bg-white z-50 shadow-2xl flex flex-col overflow-hidden animate-slide-in-right">
+  return (
+    <div className={shellClass}>
         {/* Header */}
-        <div className="flex items-start justify-between px-6 py-5 border-b border-slate-200 bg-slate-50 flex-shrink-0">
+        <div className="flex flex-shrink-0 items-start justify-between border-b border-slate-200 bg-slate-50 px-4 py-4 sm:px-8 sm:py-5">
           <div className="min-w-0 pr-4">
             <div className="flex items-center gap-2 text-blue-600 text-xs font-semibold uppercase tracking-wider mb-1">
               <MapPin size={12} />
@@ -108,23 +264,133 @@ export default function ProjectDetailModal({ projectId, onClose }: Props) {
             {loading ? (
               <div className="h-6 w-64 bg-slate-200 rounded animate-pulse" />
             ) : (
-              <h2 className="text-lg font-bold text-slate-900 leading-snug">{project?.address}</h2>
+              <>
+                <div className="flex flex-wrap items-center gap-2">
+                  <h2 className="text-lg font-bold text-slate-900 leading-snug break-words">
+                    {(project?.display_name?.trim() || project?.address) ?? '—'}
+                  </h2>
+                  {project && projectTagLabel(project.project_tag) && (
+                    <span
+                      className={`shrink-0 rounded-full px-2.5 py-0.5 text-xs font-semibold ${projectTagTone(project.project_tag)}`}
+                    >
+                      {projectTagLabel(project.project_tag)}
+                    </span>
+                  )}
+                </div>
+                {analysisEntryLabel(project?.analysis_entry) && (
+                  <p className="mt-2 text-[11px] font-medium uppercase tracking-wide text-slate-500">
+                    Project folder · {analysisEntryLabel(project?.analysis_entry)}
+                  </p>
+                )}
+                {project?.address && (
+                  <p className="text-xs text-slate-500 mt-1.5 leading-snug" title={project.address}>
+                    {project.address}
+                  </p>
+                )}
+              </>
             )}
           </div>
+          <div className="flex shrink-0 items-start gap-1 sm:gap-2">
+            {!loading && project && (
+              <ProjectTagMenu
+                projectId={project.id}
+                currentTag={project.project_tag}
+                onTagUpdated={tag => setProject(prev => (prev ? { ...prev, project_tag: tag } : null))}
+                onProjectDeleted={
+                  onProjectDeleted
+                    ? deletedId => {
+                        onProjectDeleted(deletedId);
+                        onClose();
+                      }
+                    : undefined
+                }
+              />
+            )}
+            <button
+              type="button"
+              onClick={onClose}
+              className="flex-shrink-0 p-2 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-200 transition-colors"
+              aria-label="Close"
+            >
+              <X size={20} />
+            </button>
+          </div>
+        </div>
+
+        <div className="flex shrink-0 border-b border-slate-200 bg-white px-4 sm:px-8">
           <button
-            onClick={onClose}
-            className="flex-shrink-0 p-2 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-200 transition-colors"
+            type="button"
+            onClick={() => setActiveTab('overview')}
+            className={`flex items-center gap-2 px-4 py-3 text-sm font-semibold border-b-2 -mb-px transition-colors ${
+              activeTab === 'overview'
+                ? 'border-blue-600 text-blue-700'
+                : 'border-transparent text-slate-500 hover:text-slate-700'
+            }`}
           >
-            <X size={20} />
+            <Layers size={16} aria-hidden />
+            Overview
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('wizard')}
+            className={`flex items-center gap-2 px-4 py-3 text-sm font-semibold border-b-2 -mb-px transition-colors ${
+              activeTab === 'wizard'
+                ? 'border-blue-600 text-blue-700'
+                : 'border-transparent text-slate-500 hover:text-slate-700'
+            }`}
+          >
+            <FileText size={16} aria-hidden />
+            Wizard report
           </button>
         </div>
 
-        <div className="flex-1 overflow-y-auto">
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-y-contain [-webkit-overflow-scrolling:touch]">
+          <div className="mx-auto w-full max-w-6xl px-4 pb-8 sm:px-8">
           {loading ? (
-            <div className="p-6 space-y-4">
+            <div className="space-y-4 py-6">
               {[1, 2, 3].map(i => (
                 <div key={i} className="h-40 bg-slate-100 rounded-xl animate-pulse" />
               ))}
+            </div>
+          ) : activeTab === 'wizard' ? (
+            <div className="py-4 sm:py-6">
+              {wizardReportLoading && !wizardReport && (
+                <div className="flex flex-col items-center py-12 gap-3">
+                  <Loader2 className="h-8 w-8 animate-spin text-blue-500" aria-hidden />
+                  <p className="text-sm text-slate-600">Loading wizard report…</p>
+                </div>
+              )}
+              {wizardReport && wizardReport.finalAnalysis == null && (
+                <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                  Final AI fusion is not in the saved report yet. Data will refresh automatically while the wizard finishes saving.
+                </div>
+              )}
+              {wizardReportError && (
+                <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800 mb-4">
+                  {wizardReportError}
+                  <button
+                    type="button"
+                    onClick={() => void loadWizardReport()}
+                    className="block mt-2 text-xs font-semibold text-red-700 underline"
+                  >
+                    Retry
+                  </button>
+                </div>
+              )}
+              {wizardReport && (
+                <WizardWorkflowReportView
+                  report={wizardReport}
+                  savedSectionCount={project?.section_count ?? 0}
+                  onOpenQuoteBuilder={
+                    onOpenQuoteFromProject ? () => void onOpenQuoteFromProject(projectId) : undefined
+                  }
+                />
+              )}
+              {!wizardReportLoading && !wizardReport && !wizardReportError && (
+                <div className="rounded-xl border border-slate-200 bg-slate-50 p-8 text-center text-slate-500 text-sm">
+                  No Smart Roof Mapping wizard data saved for this project yet.
+                </div>
+              )}
             </div>
           ) : (
             <>
@@ -146,7 +412,7 @@ export default function ProjectDetailModal({ projectId, onClose }: Props) {
               </div>
 
               {/* Snapshots gallery */}
-              <div className="p-6">
+              <div className="py-6">
                 <h3 className="text-sm font-semibold text-slate-700 uppercase tracking-wider mb-4 flex items-center gap-2">
                   <Image size={14} />
                   Saved Images ({snapshots.length})
@@ -157,7 +423,7 @@ export default function ProjectDetailModal({ projectId, onClose }: Props) {
                     No snapshots saved for this project.
                   </div>
                 ) : (
-                  <div className="grid grid-cols-3 gap-4">
+                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 sm:gap-4 lg:grid-cols-4">
                     {snapshots.map((snap, idx) => {
                       const ai = snapAI[snap.id];
                       return (
@@ -245,7 +511,7 @@ export default function ProjectDetailModal({ projectId, onClose }: Props) {
               </div>
 
               {/* Sections table */}
-              <div className="px-6 pb-6">
+              <div className="pb-6">
                 <h3 className="text-sm font-semibold text-slate-700 uppercase tracking-wider mb-4 flex items-center gap-2">
                   <Layers size={14} />
                   Roof Sections ({sections.length})
@@ -302,13 +568,13 @@ export default function ProjectDetailModal({ projectId, onClose }: Props) {
               </div>
             </>
           )}
+          </div>
         </div>
-      </div>
 
-      {/* Lightbox */}
+      {/* Lightbox — covers the same region as the project shell */}
       {lightboxIdx !== null && snapshots[lightboxIdx] && (
         <div
-          className="fixed inset-0 bg-black/90 flex items-center justify-center" style={{ zIndex: 60 }}
+          className="absolute inset-0 z-20 flex items-center justify-center bg-black/90"
           onClick={() => setLightboxIdx(null)}
         >
           <button
@@ -345,6 +611,6 @@ export default function ProjectDetailModal({ projectId, onClose }: Props) {
           </button>
         </div>
       )}
-    </>
+    </div>
   );
 }

@@ -1,11 +1,21 @@
 import { useEffect, useState } from 'react';
 import { MapPin, FolderOpen, FileText, Ruler, DollarSign } from 'lucide-react';
-import { getStats, getRecentProjects, getRecentQuotes } from '../utils/db';
+import { getStats, getRecentProjects, getRecentQuotes, projectTagLabel } from '../utils/db';
 import ProjectDetailModal from './ProjectDetailModal';
+import ProjectTagMenu, { projectTagTone } from './ProjectTagMenu';
 import QuoteDetailModal from './QuoteDetailModal';
+
+interface OpenProjectDetailRequest {
+  projectId: string;
+  initialTab: 'overview' | 'wizard';
+}
 
 interface DashboardHomeProps {
   onNewAnalysis: () => void;
+  openProjectDetailRequest?: OpenProjectDetailRequest | null;
+  onOpenProjectDetailRequestHandled?: () => void;
+  /** Load project sections and open the quote builder (full app view). */
+  onOpenQuoteFromProject?: (projectId: string) => void | Promise<void>;
 }
 
 interface Stats {
@@ -22,6 +32,9 @@ interface Project {
   lng: number;
   snapshot_url: string | null;
   created_at: string;
+  project_name: string | null;
+  display_name: string | null;
+  project_tag: string | null;
   section_count: number;
   total_area: number;
 }
@@ -47,7 +60,12 @@ function SkeletonCard() {
   );
 }
 
-export default function DashboardHome({ onNewAnalysis }: DashboardHomeProps) {
+export default function DashboardHome({
+  onNewAnalysis,
+  openProjectDetailRequest,
+  onOpenProjectDetailRequestHandled,
+  onOpenQuoteFromProject,
+}: DashboardHomeProps) {
   const [stats, setStats] = useState<Stats | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [quotes, setQuotes] = useState<Quote[]>([]);
@@ -56,6 +74,7 @@ export default function DashboardHome({ onNewAnalysis }: DashboardHomeProps) {
   const [loadingQuotes, setLoadingQuotes] = useState(true);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [selectedQuoteId, setSelectedQuoteId] = useState<string | null>(null);
+  const [defaultWizardTab, setDefaultWizardTab] = useState(false);
 
   useEffect(() => {
     getStats()
@@ -73,6 +92,13 @@ export default function DashboardHome({ onNewAnalysis }: DashboardHomeProps) {
       .catch(console.error)
       .finally(() => setLoadingQuotes(false));
   }, []);
+
+  useEffect(() => {
+    if (!openProjectDetailRequest) return;
+    setSelectedProjectId(openProjectDetailRequest.projectId);
+    setDefaultWizardTab(openProjectDetailRequest.initialTab === 'wizard');
+    onOpenProjectDetailRequestHandled?.();
+  }, [openProjectDetailRequest, onOpenProjectDetailRequestHandled]);
 
   const statCards = [
     {
@@ -173,8 +199,26 @@ export default function DashboardHome({ onNewAnalysis }: DashboardHomeProps) {
                 tabIndex={0}
                 onClick={() => setSelectedProjectId(p.id)}
                 onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSelectedProjectId(p.id); } }}
-                className="touch-manipulation bg-white rounded-xl border border-slate-200 overflow-hidden active:scale-[0.99] transition-transform sm:transition-shadow sm:hover:border-blue-300 sm:hover:shadow-md sm:cursor-pointer group"
+                className="touch-manipulation relative bg-white rounded-xl border border-slate-200 overflow-hidden active:scale-[0.99] transition-transform sm:transition-shadow sm:hover:border-blue-300 sm:hover:shadow-md sm:cursor-pointer group"
               >
+                <div
+                  className="absolute top-2 right-2 z-20"
+                  onClick={e => e.stopPropagation()}
+                  onKeyDown={e => e.stopPropagation()}
+                >
+                  <ProjectTagMenu
+                    projectId={p.id}
+                    currentTag={p.project_tag}
+                    compact
+                    onTagUpdated={tag =>
+                      setProjects(prev => prev.map(x => (x.id === p.id ? { ...x, project_tag: tag } : x)))
+                    }
+                    onProjectDeleted={deletedId => {
+                      setProjects(prev => prev.filter(x => x.id !== deletedId));
+                      setSelectedProjectId(cur => (cur === deletedId ? null : cur));
+                    }}
+                  />
+                </div>
                 <div
                   className="h-40 sm:h-32 bg-slate-100 bg-cover bg-center relative"
                   style={p.snapshot_url ? { backgroundImage: `url(${p.snapshot_url})` } : undefined}
@@ -192,7 +236,18 @@ export default function DashboardHome({ onNewAnalysis }: DashboardHomeProps) {
                   </div>
                 </div>
                 <div className="p-4">
-                  <p className="text-sm font-semibold text-slate-800 line-clamp-2 sm:truncate">{p.address}</p>
+                  <div className="flex items-start gap-2">
+                    <p className="text-sm font-semibold text-slate-800 line-clamp-2 sm:truncate min-w-0 flex-1">
+                      {p.display_name?.trim() || p.address}
+                    </p>
+                    {projectTagLabel(p.project_tag) && (
+                      <span
+                        className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold ${projectTagTone(p.project_tag)}`}
+                      >
+                        {projectTagLabel(p.project_tag)}
+                      </span>
+                    )}
+                  </div>
                   <p className="text-xs text-slate-400 mt-1">
                     {p.section_count} section{p.section_count !== 1 ? 's' : ''} ·{' '}
                     {p.total_area.toLocaleString('en-US', { maximumFractionDigits: 0 })} sq ft
@@ -287,7 +342,22 @@ export default function DashboardHome({ onNewAnalysis }: DashboardHomeProps) {
       </section>
 
       {selectedProjectId && (
-        <ProjectDetailModal projectId={selectedProjectId} onClose={() => setSelectedProjectId(null)} />
+        <ProjectDetailModal
+          key={selectedProjectId}
+          projectId={selectedProjectId}
+          defaultWizardTab={defaultWizardTab}
+          onDefaultWizardTabConsumed={() => setDefaultWizardTab(false)}
+          onOpenQuoteFromProject={onOpenQuoteFromProject}
+          onProjectDeleted={deletedId => {
+            setProjects(prev => prev.filter(x => x.id !== deletedId));
+            setSelectedProjectId(null);
+            setDefaultWizardTab(false);
+          }}
+          onClose={() => {
+            setSelectedProjectId(null);
+            setDefaultWizardTab(false);
+          }}
+        />
       )}
       {selectedQuoteId && (
         <QuoteDetailModal quoteId={selectedQuoteId} onClose={() => setSelectedQuoteId(null)} />

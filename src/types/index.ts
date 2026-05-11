@@ -50,7 +50,18 @@ export interface QuoteData {
   generatedAt: Date;
 }
 
-export type AppView = 'landing' | 'login' | 'dashboard' | 'analysis' | 'quote' | 'projects' | 'quotes-list' | 'settings' | 'reports' | 'marketing';
+export type AppView =
+  | 'landing'
+  | 'login'
+  | 'dashboard'
+  | 'analysis'
+  | 'analysis-2'
+  | 'quote'
+  | 'projects'
+  | 'quotes-list'
+  | 'settings'
+  | 'reports'
+  | 'marketing';
 
 export interface User {
   email: string;

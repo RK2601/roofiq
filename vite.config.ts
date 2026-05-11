@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 import type { Plugin } from 'vite'
 import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
+import { runOpenAiProxy } from './api/openaiProxyCore'
 
 const projectRoot = path.dirname(fileURLToPath(import.meta.url))
 
@@ -33,6 +34,25 @@ function loadDotEnvFiles(): Record<string, string> {
   const a = parseEnvFile(path.join(projectRoot, '.env'))
   const b = parseEnvFile(path.join(projectRoot, '.env.local'))
   return { ...a, ...b }
+}
+
+/** OpenAI key for server-side proxy only (never VITE_* — do not embed in the client bundle). */
+function resolveOpenAiKey(mode: string): string {
+  const fromProcess =
+    (process.env.OPENAI_API_KEY || '').trim() ||
+    (process.env.OPENAI_KEY || '').trim()
+  if (fromProcess) return fromProcess
+  const envAll = loadEnv(mode, projectRoot, '')
+  const fromViteLoad =
+    (envAll.OPENAI_API_KEY || '').trim() ||
+    (envAll.OPENAI_KEY || '').trim()
+  if (fromViteLoad) return fromViteLoad
+  const file = loadDotEnvFiles()
+  return (
+    (file.OPENAI_API_KEY || '').trim() ||
+    (file.OPENAI_KEY || '').trim() ||
+    (file.VITE_OPENAI_API_KEY || '').trim()
+  )
 }
 
 /** Connection string for Neon: accept VITE_DATABASE_URL or plain DATABASE_URL (shell or .env). */
@@ -136,6 +156,47 @@ function solarProxyDevPlugin(): Plugin {
   }
 }
 
+/** Dev: same-origin POST `/api/proxy-openai` so Gemini fallback works with `npm run dev` + `.env`. */
+function openaiProxyDevPlugin(mode: string): Plugin {
+  return {
+    name: 'roofiq-proxy-openai',
+    configureServer(server) {
+      server.middlewares.use('/api/proxy-openai', async (req, res, next) => {
+        res.setHeader('Access-Control-Allow-Origin', '*')
+        res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS')
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+        if (req.method === 'OPTIONS') {
+          res.statusCode = 204
+          return res.end()
+        }
+        if (req.method !== 'POST') return next()
+
+        const chunks: Buffer[] = []
+        req.on('data', (c: Buffer) => chunks.push(c))
+        req.on('error', () => {
+          res.statusCode = 400
+          res.end('bad request')
+        })
+        req.on('end', async () => {
+          try {
+            const raw = Buffer.concat(chunks).toString('utf8')
+            const body = raw ? (JSON.parse(raw) as unknown) : {}
+            const key = resolveOpenAiKey(mode)
+            const out = await runOpenAiProxy(key, body)
+            res.statusCode = out.status
+            res.setHeader('Content-Type', out.contentType)
+            return res.end(out.body)
+          } catch {
+            res.statusCode = 502
+            res.setHeader('Content-Type', 'application/json')
+            return res.end(JSON.stringify({ error: 'proxy error' }))
+          }
+        })
+      })
+    },
+  }
+}
+
 export default defineConfig(({ mode }) => {
   const viteEnv = loadEnv(mode, projectRoot)
   const resolvedDbUrl = resolveDatabaseUrl(mode)
@@ -166,7 +227,7 @@ export default defineConfig(({ mode }) => {
   }
 
   return {
-    plugins: [react(), staticMapProxyDevPlugin(), solarProxyDevPlugin()],
+    plugins: [react(), staticMapProxyDevPlugin(), solarProxyDevPlugin(), openaiProxyDevPlugin(mode)],
     envDir: projectRoot,
     define: {
       __ROOFIQ_DATABASE_URL__: JSON.stringify(resolvedDbUrl),

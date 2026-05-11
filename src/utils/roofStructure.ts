@@ -1,9 +1,11 @@
 import {
   azimuthLabel,
   pitchDegreesToOption,
+  haversineDistanceMeters,
   type SolarLatLng,
   type SolarRoofSegment,
 } from './solar';
+import { pitchStringToPitchDegrees } from './roofCalculations';
 import type { HeightModel } from './heightModel';
 
 const METERS_PER_DEG_LAT = 111_320;
@@ -94,6 +96,8 @@ export interface RoofFacet {
   slopedLengthFt: number;
   planeHeightAtCenterMeters?: number;
   edges: FacetEdge[];
+  /** Map-traced section only: polygon vertices in meters (building frame) for diagram fidelity. */
+  diagramFootprintMeters?: Vec2[];
 }
 
 export interface RoofStructureMeasurements {
@@ -119,6 +123,8 @@ export interface UnfoldedFacetPlacement {
   w: number;
   h: number;
   rotationDeg: number;
+  /** When set, diagram fill uses this closed polygon in local px (0…w, 0…h) instead of a rectangle. */
+  outlinePx?: { x: number; y: number }[];
 }
 
 export interface RoofStructureFacet extends RoofFacet {
@@ -231,6 +237,86 @@ function classifyPair(
     return { kind: 'step', confidence: clamp(0.35 + 0.25 * heightQuality, 0.35, 0.7) };
   }
   return { kind: 'valley', confidence: clamp(heightDiff / 3 + 0.2 * heightQuality, 0.4, 1) };
+}
+
+function findNearestSolarSegmentByPathCentroid(
+  path: { lat: number; lng: number }[],
+  segments: SolarRoofSegment[]
+): SolarRoofSegment | null {
+  if (segments.length === 0) return null;
+  const cLat = path.reduce((s, p) => s + p.lat, 0) / path.length;
+  const cLng = path.reduce((s, p) => s + p.lng, 0) / path.length;
+  const from: SolarLatLng = { latitude: cLat, longitude: cLng };
+  let best = segments[0]!;
+  let bestD = Infinity;
+  for (const seg of segments) {
+    const d = haversineDistanceMeters(from, seg.center);
+    if (d < bestD) {
+      bestD = d;
+      best = seg;
+    }
+  }
+  return best;
+}
+
+/** User-traced polygon footprint in meters + Solar hints for pitch/azimuth (not Solar bbox quads). */
+function buildRoofFacetFromDrawnSection(
+  path: { lat: number; lng: number }[],
+  index: number,
+  buildingCenter: SolarLatLng,
+  flatAreaSqFt: number,
+  actualAreaSqFt: number,
+  nearest: SolarRoofSegment | null,
+  userPitch: string
+): RoofFacet {
+  const pitchDegrees = nearest?.pitchDegrees ?? pitchStringToPitchDegrees(userPitch);
+  const azimuthDegrees = nearest?.azimuthDegrees ?? 180;
+
+  const corners = path.map(p => latLngToMeters({ latitude: p.lat, longitude: p.lng }, buildingCenter));
+  const xs = corners.map(p => p.x);
+  const ys = corners.map(p => p.y);
+  const sw: Vec2 = { x: Math.min(...xs), y: Math.min(...ys) };
+  const ne: Vec2 = { x: Math.max(...xs), y: Math.max(...ys) };
+
+  const cLat = path.reduce((s, p) => s + p.lat, 0) / path.length;
+  const cLng = path.reduce((s, p) => s + p.lng, 0) / path.length;
+  const centroidMeters = latLngToMeters({ latitude: cLat, longitude: cLng }, buildingCenter);
+
+  const azimuthRad = (azimuthDegrees * Math.PI) / 180;
+  const slopeDir = { x: Math.sin(azimuthRad), y: Math.cos(azimuthRad) };
+  const perpDir = { x: Math.cos(azimuthRad), y: -Math.sin(azimuthRad) };
+
+  const slopeProjections = corners.map(corner => dot(corner, slopeDir));
+  const perpProjections = corners.map(corner => dot(corner, perpDir));
+
+  const groundRunM = Math.max(0.05, Math.max(...slopeProjections) - Math.min(...slopeProjections));
+  const widthM = Math.max(0.05, Math.max(...perpProjections) - Math.min(...perpProjections));
+  const pitchRad = (pitchDegrees * Math.PI) / 180;
+  const safeCosPitch = Math.max(Math.cos(pitchRad), 0.05);
+  const slopedLengthM = groundRunM / safeCosPitch;
+
+  const pitchOption = pitchDegreesToOption(pitchDegrees);
+  const groundAreaSqFt = flatAreaSqFt;
+
+  return {
+    index,
+    pitchDegrees,
+    azimuthDegrees,
+    pitchLabel: pitchOption.value,
+    facingLabel: azimuthLabel(azimuthDegrees),
+    actualAreaSqFt,
+    groundAreaSqFt,
+    centroidMeters,
+    bboxMeters: { sw, ne, corners },
+    slopeDir,
+    perpDir,
+    groundRunFt: groundRunM * M2FT,
+    widthFt: widthM * M2FT,
+    slopedLengthFt: slopedLengthM * M2FT,
+    planeHeightAtCenterMeters: nearest?.planeHeightAtCenterMeters,
+    edges: [],
+    diagramFootprintMeters: corners.map(c => ({ x: c.x, y: c.y })),
+  };
 }
 
 function extractFacet(segment: SolarRoofSegment, index: number, center: SolarLatLng): RoofFacet {
@@ -486,16 +572,39 @@ function nudgePlacement(
   return { ...placement, y: placement.y + direction * step };
 }
 
+/** Diagram placement: real traced footprint vs. schematic rectangle from pitch/run. */
+function initialPlacementForFacet(facet: RoofFacet): UnfoldedFacetPlacement {
+  const fp = facet.diagramFootprintMeters;
+  if (fp && fp.length >= 3) {
+    const xs = fp.map(p => p.x);
+    const ys = fp.map(p => p.y);
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+    const spanXM = Math.max(0.05, maxX - minX);
+    const spanYM = Math.max(0.05, maxY - minY);
+    const w = Math.max(28, spanXM * M2FT * LAYOUT_PX_PER_FT * 1.06);
+    const h = Math.max(28, spanYM * M2FT * LAYOUT_PX_PER_FT * 1.06);
+    const outlinePx = fp.map(p => ({
+      x: ((p.x - minX) / spanXM) * w,
+      y: ((p.y - minY) / spanYM) * h,
+    }));
+    return { x: 0, y: 0, w, h, rotationDeg: 0, outlinePx };
+  }
+  return {
+    x: 0,
+    y: 0,
+    w: Math.max(24, facet.widthFt * LAYOUT_PX_PER_FT),
+    h: Math.max(24, facet.slopedLengthFt * LAYOUT_PX_PER_FT),
+    rotationDeg: 0,
+  };
+}
+
 function layoutFacets(facets: RoofFacet[]): RoofStructureFacet[] {
   const withPlacement: RoofStructureFacet[] = facets.map(facet => ({
     ...facet,
-    placement: {
-      x: 0,
-      y: 0,
-      w: Math.max(24, facet.widthFt * LAYOUT_PX_PER_FT),
-      h: Math.max(24, facet.slopedLengthFt * LAYOUT_PX_PER_FT),
-      rotationDeg: 0,
-    },
+    placement: initialPlacementForFacet(facet),
   }));
 
   if (withPlacement.length === 0) return withPlacement;
@@ -884,6 +993,69 @@ function emptyAnalysis(context?: RoofStructureContext): RoofStructureAnalysis {
     review: { reviewed: false, editsCount: 0 },
     notes: ['No segments available for reconstruction.'],
     svg: { viewBox: '0 0 640 360', width: 640, height: 360, pxPerFt: LAYOUT_PX_PER_FT },
+  };
+}
+
+export interface DrawnRoofSectionInput {
+  id: string;
+  path: { lat: number; lng: number }[];
+  flatAreaSqFt: number;
+  actualAreaSqFt: number;
+  pitch: string;
+}
+
+/**
+ * Build roof structure from **user-drawn** section polygons (map traces), using Solar segments only
+ * to pick **nearest facet pitch/azimuth** (and plane height when present) — not Solar bbox footprints.
+ */
+export function analyzeDrawnRoofSections(
+  drawn: DrawnRoofSectionInput[],
+  buildingCenter: SolarLatLng,
+  solarSegmentsForHints: SolarRoofSegment[],
+  context?: RoofStructureContext
+): RoofStructureAnalysis {
+  const valid = drawn.filter(d => d.path.length >= 3);
+  if (valid.length === 0) return emptyAnalysis(context);
+
+  const facets = valid.map((d, index) => {
+    const nearest =
+      solarSegmentsForHints.length > 0
+        ? findNearestSolarSegmentByPathCentroid(d.path, solarSegmentsForHints)
+        : null;
+    return buildRoofFacetFromDrawnSection(
+      d.path,
+      index,
+      buildingCenter,
+      d.flatAreaSqFt,
+      d.actualAreaSqFt,
+      nearest,
+      d.pitch
+    );
+  });
+
+  const pairAdjacencies = buildPairAdjacencies(facets, context);
+  buildEdges(facets, pairAdjacencies);
+  const measurements = computeMeasurements(facets);
+  const laidOutFacets = layoutFacets(facets);
+  const svg = computeSvgBounds(laidOutFacets);
+  const { band, breakdown, flags, dataSources } = computeConfidence(laidOutFacets, context);
+
+  return {
+    version: 'v2',
+    facets: laidOutFacets,
+    measurements,
+    confidenceBand: band,
+    confidence: breakdown,
+    qualityFlags: flags,
+    dataSources,
+    aiCuesUsed: context?.aiCues,
+    review: { reviewed: false, editsCount: 0 },
+    notes: [
+      'Structure derived from user-drawn roof sections on the map.',
+      'Indicative diagram uses your traced footprint shape; pitch/azimuth use the nearest Solar facet where available.',
+      'Low-confidence reports should be reviewed with additional imagery or Tier B/C capture.',
+    ],
+    svg,
   };
 }
 
