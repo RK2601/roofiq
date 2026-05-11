@@ -47,7 +47,8 @@ import {
   FileSpreadsheet,
 } from 'lucide-react';
 import type { Coordinates } from '../types';
-import type { SolarBuildingInsights } from '../utils/solar';
+import type { SolarBuildingInsights, SolarDataLayersResponse } from '../utils/solar';
+import { analyzeDsmForSegments, pitchDegToRatio, type DsmAnalysisResult } from '../utils/roofDsm';
 import {
   analyzeRoofOutline,
   analyzeRoofSegment,
@@ -179,6 +180,7 @@ interface Props {
   address: string;
   coordinates: Coordinates;
   solarData: SolarBuildingInsights | null;
+  solarDataLayers?: SolarDataLayersResponse | null;
   onClose: () => void;
 }
 
@@ -212,7 +214,7 @@ function QualityBadge({ score }: { score: number }) {
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
-export default function RoofMappingWizard({ apiKey, address, coordinates, solarData, onClose }: Props) {
+export default function RoofMappingWizard({ apiKey, address, coordinates, solarData, solarDataLayers, onClose }: Props) {
   // Map refs
   const mapRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<google.maps.Map | null>(null);
@@ -232,6 +234,10 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
   const [structureAnalyzing, setStructureAnalyzing] = useState(false);
   const [structureError, setStructureError] = useState<string | null>(null);
   const [structureSource, setStructureSource] = useState<'ai' | 'fallback' | null>(null);
+
+  const [dsmResult, setDsmResult] = useState<DsmAnalysisResult | null>(null);
+  const [dsmAnalyzing, setDsmAnalyzing] = useState(false);
+  const [dsmError, setDsmError] = useState<string | null>(null);
 
   const [photoSlots, setPhotoSlots] = useState<PhotoSlot[]>(INITIAL_PHOTO_SLOTS);
   const [activeCaptureSlot, setActiveCaptureSlot] = useState<PhotoSlotId>('top');
@@ -676,6 +682,8 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
     setStructureError(null);
     setStructureSource(null);
     setStructureAnalyzing(true);
+    setDsmResult(null);
+    setDsmError(null);
     clearStructureLines();
 
     const allNorm = segments.map(s => s.path.map(p => latLngToImageNorm(p, coordinates, 20, 640)));
@@ -683,7 +691,10 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
     const totalAreaSqFt = segments.reduce((sum, s) => sum + safeComputeAreaSqFt(s.polygon), 0);
 
     try {
-      const result = await detectRoofStructure(imgData, allNorm);
+      const result = await Promise.race([
+        detectRoofStructure(imgData, allNorm),
+        new Promise<null>(resolve => setTimeout(() => resolve(null), 30_000)),
+      ]);
       const resolved = result && result.cues.length > 0
         ? result
         : buildFallbackStructureDetection(allNorm, segments, totalAreaSqFt);
@@ -746,6 +757,36 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
       setStructureAnalyzing(false);
     }
   }, [segments, coordinates, safeComputeAreaSqFt]);
+
+  // ── DSM analysis ────────────────────────────────────────────────────────────
+
+  const runDsmAnalysis = useCallback(async () => {
+    const dsmUrl = solarDataLayers?.dsmUrl;
+    if (!dsmUrl || segments.length === 0) return;
+    setDsmAnalyzing(true);
+    setDsmError(null);
+    setDsmResult(null);
+    try {
+      const result = await analyzeDsmForSegments(dsmUrl, segments.map(s => s.path), apiKey);
+      if (result) {
+        setDsmResult(result);
+      } else {
+        setDsmError('DSM data unavailable for this location — Solar API may not have coverage here.');
+      }
+    } catch {
+      setDsmError('DSM fetch failed. Check console for details.');
+    } finally {
+      setDsmAnalyzing(false);
+    }
+  }, [solarDataLayers, segments, apiKey]);
+
+  // Auto-run DSM analysis when structure detection completes and DSM URL is available
+  useEffect(() => {
+    if (!structureResult || dsmResult || dsmAnalyzing) return;
+    if (!solarDataLayers?.dsmUrl) return;
+    void runDsmAnalysis();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [structureResult]);
 
   // ── Phase 2: Photo upload ───────────────────────────────────────────────────
 
@@ -1321,7 +1362,9 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
             ? 610
             : 690
     : 450;
-  const areaSquares = Math.max(1, Math.round((structureResult?.totalAreaSqFt ?? mappedAreaSqFt) / 100));
+  // Prefer DSM 3D area (most accurate) > AI structure estimate > mapped polygon area
+  const bestAreaSqFt = dsmResult?.totalSloped3dAreaSqFt ?? structureResult?.totalAreaSqFt ?? mappedAreaSqFt;
+  const areaSquares = Math.max(1, Math.round(bestAreaSqFt / 100));
   const quoteSubtotal = Math.round(areaSquares * quoteBaseRatePerSq);
   const quoteLineItems = [
     { label: 'Roof system replacement', qty: `${areaSquares} sq`, unit: `$${quoteBaseRatePerSq}`, total: `$${quoteSubtotal}` },
@@ -1780,11 +1823,11 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
                     <div className="flex flex-col gap-2">
                       <button
                         onClick={runStructureDetection}
-                        disabled={!hasGeminiKey}
+                        disabled={segments.length === 0}
                         className="flex items-center justify-center gap-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white text-sm font-medium py-2.5 px-4 rounded-lg transition-colors"
                       >
                         <Brain size={15} />
-                        {hasGeminiKey ? 'Detect Roof Structure' : 'Gemini key required'}
+                        {hasGeminiKey ? 'Detect Roof Structure' : 'Build Structure (Fallback)'}
                       </button>
                     </div>
                   )}
@@ -1829,8 +1872,12 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
                             <span className="text-white font-medium">{structureResult.predominantPitch}</span>
                           </div>
                           <div className="flex justify-between col-span-2">
-                            <span className="text-slate-400">Area est.</span>
-                            <span className="text-white font-medium">{Math.round(structureResult.totalAreaSqFt).toLocaleString()} sqft</span>
+                            <span className="text-slate-400">{dsmResult ? 'DSM 3D area' : 'Area est.'}</span>
+                            <span className={`font-medium ${dsmResult ? 'text-cyan-300' : 'text-white'}`}>
+                              {dsmResult
+                                ? `${dsmResult.totalSloped3dAreaSqFt.toLocaleString()} sqft`
+                                : `${Math.round(structureResult.totalAreaSqFt).toLocaleString()} sqft`}
+                            </span>
                           </div>
                         </div>
                         <div className="border-t border-slate-700 pt-2 mt-2 flex flex-col gap-1">
@@ -1854,6 +1901,110 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
                         <RotateCcw size={12} /> Re-run detection
                       </button>
                     </div>
+                  )}
+
+                  {/* DSM Measurements panel */}
+                  {structureResult && (dsmAnalyzing || dsmResult || dsmError) && (
+                    <div className="bg-cyan-900/20 border border-cyan-700/40 rounded-xl p-3">
+                      <div className="flex items-center gap-2 mb-2">
+                        <Layers size={13} className="text-cyan-400" />
+                        <span className="text-xs font-semibold text-white">DSM Measurements</span>
+                        {dsmResult && (
+                          <span className="ml-auto text-[10px] text-cyan-500 font-medium">{dsmResult.dsmResolutionM}m/px</span>
+                        )}
+                        {!dsmAnalyzing && (
+                          <button
+                            onClick={runDsmAnalysis}
+                            className="ml-auto text-[10px] text-slate-400 hover:text-cyan-300 flex items-center gap-1"
+                            title="Re-run DSM analysis"
+                          >
+                            <RotateCcw size={10} />
+                          </button>
+                        )}
+                      </div>
+
+                      {dsmAnalyzing && (
+                        <div className="flex items-center gap-2 text-cyan-400 text-xs">
+                          <Loader2 size={12} className="animate-spin" />
+                          Fetching Solar DSM elevation data…
+                        </div>
+                      )}
+
+                      {dsmError && !dsmAnalyzing && (
+                        <div className="text-xs text-amber-300 leading-relaxed">{dsmError}</div>
+                      )}
+
+                      {dsmResult && !dsmAnalyzing && (
+                        <div className="flex flex-col gap-2">
+                          {/* Overall totals */}
+                          <div className="grid grid-cols-1 gap-1 text-xs">
+                            <div className="flex justify-between">
+                              <span className="text-slate-400">True 3D area</span>
+                              <span className="text-cyan-300 font-semibold">{dsmResult.totalSloped3dAreaSqFt.toLocaleString()} sqft</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-slate-400">Ground footprint</span>
+                              <span className="text-white font-medium">{dsmResult.totalGroundAreaSqFt.toLocaleString()} sqft</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-slate-400">Avg pitch</span>
+                              <span className="text-white font-medium">
+                                {dsmResult.overallPitchDeg}° · {pitchDegToRatio(dsmResult.overallPitchDeg)}
+                              </span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-slate-400">Predominant facing</span>
+                              <span className="text-white font-medium">{dsmResult.overallFacingDirection}</span>
+                            </div>
+                          </div>
+
+                          {/* Per-segment breakdown */}
+                          {dsmResult.segments.some(s => s.pixelCount > 0) && (
+                            <div className="border-t border-slate-700 pt-2">
+                              <div className="text-[10px] text-slate-500 mb-1.5 uppercase tracking-wide">Per segment</div>
+                              <div className="flex flex-col gap-1.5">
+                                {dsmResult.segments.map((seg, i) => seg.pixelCount > 0 && (
+                                  <div key={i} className="rounded-lg bg-slate-800/60 px-2 py-1.5">
+                                    <div className="flex items-center justify-between mb-1">
+                                      <div className="flex items-center gap-1.5">
+                                        <div
+                                          className="w-2.5 h-2.5 rounded-full shrink-0"
+                                          style={{ backgroundColor: SEGMENT_COLORS[i % SEGMENT_COLORS.length] }}
+                                        />
+                                        <span className="text-xs font-medium text-white">Segment {i + 1}</span>
+                                      </div>
+                                      <span className="text-[10px] text-cyan-300 font-semibold">{seg.sloped3dAreaSqFt.toLocaleString()} sqft</span>
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-[10px] text-slate-400">
+                                      <div>Pitch: <span className="text-slate-200">{seg.pitchDeg}° ({seg.pitchRatio})</span></div>
+                                      <div>Facing: <span className="text-slate-200">{seg.facingDirection}</span></div>
+                                      <div>Ground: <span className="text-slate-200">{seg.groundAreaSqFt.toLocaleString()} sqft</span></div>
+                                      <div>Rise: <span className="text-slate-200">{seg.heightDiffFt} ft</span></div>
+                                      <div>Ridge ht: <span className="text-slate-200">{seg.ridgeElevationFt} ft</span></div>
+                                      <div>Eave ht: <span className="text-slate-200">{seg.eaveElevationFt} ft</span></div>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
+                          <div className="text-[10px] text-slate-600 italic">
+                            Measured from Google Solar DSM · {dsmResult.dsmResolutionM}m/pixel resolution
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Button to manually trigger DSM if not available yet */}
+                  {structureResult && !dsmResult && !dsmAnalyzing && !dsmError && solarDataLayers?.dsmUrl && (
+                    <button
+                      onClick={runDsmAnalysis}
+                      className="flex items-center justify-center gap-2 bg-cyan-700 hover:bg-cyan-600 text-white text-xs font-medium py-2 px-4 rounded-lg transition-colors"
+                    >
+                      <Layers size={13} /> Measure with DSM
+                    </button>
                   )}
 
                   {/* Show "Next" whenever detection is done (success or skip) */}

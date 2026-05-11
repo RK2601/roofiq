@@ -12,6 +12,9 @@ import QuotesListPage from './components/QuotesListPage';
 import SettingsPage from './components/SettingsPage';
 import ReportsPage from './components/ReportsPage';
 import MarketingPage from './components/MarketingPage';
+import AnalysisHub from './components/AnalysisHub';
+import HoverMeasurePage from './components/HoverMeasurePage';
+import DepthAnalysisPage from './components/DepthAnalysisPage';
 import { initDb, isDbConfigured } from './utils/db';
 import { readMapsApiKey } from './utils/googleMapsKey';
 import { readAuthSession, writeAuthSession, clearAuthSession } from './utils/authSession';
@@ -44,6 +47,7 @@ export default function App() {
   const [pendingAddr, setPendingAddr] = useState('');
   const [pendingCoords, setPendingCoords] = useState<Coordinates>({ lat: 37.422, lng: -122.084 });
   const [dbBanner, setDbBanner] = useState<string | null>(null);
+  const [startInWizardMode, setStartInWizardMode] = useState(false);
 
   useEffect(() => {
     setApiKey(readMapsApiKey());
@@ -143,7 +147,7 @@ export default function App() {
     setCoordinates({ lat: 37.422, lng: -122.084 });
     setRoofSections([]);
     setProjectId(null);
-    setView('analysis');
+    setView('analysis-hub');
   }, []);
 
   const handleApiKeySave = (key: string) => {
@@ -175,7 +179,8 @@ export default function App() {
 
   /** Flex column + overflow-hidden on main so children can use flex-1 min-h-0 and scroll (mobile Safari). */
   const fullHeightMain =
-    view === 'analysis' || view === 'marketing' || view === 'quote' || view === 'projects' || view === 'quotes-list';
+    view === 'analysis' || view === 'analysis-hub' || view === 'hover-measure' || view === 'depth-measure' ||
+    view === 'marketing' || view === 'quote' || view === 'projects' || view === 'quotes-list';
 
   return (
     <DashboardLayout
@@ -187,6 +192,28 @@ export default function App() {
       dbBanner={dbBanner}
     >
       {view === 'dashboard' && <DashboardHome onNewAnalysis={handleNewAnalysisFromPanel} />}
+      {view === 'analysis-hub' && (
+        <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-y-contain [-webkit-overflow-scrolling:touch]">
+          <AnalysisHub onNavigate={(v, wizardMode) => {
+            setStartInWizardMode(!!wizardMode);
+            setView(v);
+          }} />
+        </div>
+      )}
+      {view === 'hover-measure' && (
+        <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-y-contain [-webkit-overflow-scrolling:touch]">
+          <HoverMeasurePage
+            address={address}
+            coordinates={coordinates}
+            onBack={() => setView('analysis-hub')}
+          />
+        </div>
+      )}
+      {view === 'depth-measure' && (
+        <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-y-contain [-webkit-overflow-scrolling:touch]">
+          <DepthAnalysisPage onBack={() => setView('analysis-hub')} />
+        </div>
+      )}
       {view === 'analysis' && (
         <AnalysisPage
           apiKey={apiKey}
@@ -194,6 +221,7 @@ export default function App() {
           coordinates={coordinates}
           onPropertySelect={handleAnalysisPropertySelect}
           onComplete={handleAnalysisComplete}
+          startInWizardMode={startInWizardMode}
         />
       )}
       {view === 'quote' && (

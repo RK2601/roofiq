@@ -27,7 +27,10 @@ interface DashboardLayoutProps {
 
 const PAGE_TITLES: Partial<Record<AppView, string>> = {
   dashboard: 'Dashboard',
-  analysis: 'New Analysis',
+  'analysis-hub': 'New Analysis',
+  analysis: 'Analysis',
+  'hover-measure': 'HOVER Measurement',
+  'depth-measure': 'AI Depth Analysis',
   projects: 'Projects',
   'quotes-list': 'Quotes',
   reports: 'Reports',
@@ -38,7 +41,7 @@ const PAGE_TITLES: Partial<Record<AppView, string>> = {
 
 const MAIN_NAV: Array<{ view: AppView; label: string; icon: React.ReactNode }> = [
   { view: 'dashboard',   label: 'Dashboard',   icon: <LayoutDashboard size={18} /> },
-  { view: 'analysis',    label: 'New Analysis', icon: <MapPin size={18} /> },
+  { view: 'analysis-hub', label: 'New Analysis', icon: <MapPin size={18} /> },
   { view: 'projects',    label: 'Projects',     icon: <FolderOpen size={18} /> },
   { view: 'quotes-list', label: 'Quotes',       icon: <FileText size={18} /> },
   { view: 'marketing',   label: 'Marketing',    icon: <Megaphone size={18} /> },

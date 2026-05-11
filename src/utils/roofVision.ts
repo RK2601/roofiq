@@ -23,7 +23,7 @@ const SAFETY_RELAXED = [
   { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
   { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
   { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
-  { category: HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
+  // HARM_CATEGORY_CIVIC_INTEGRITY omitted — not supported on all model versions and causes 400 errors
 ];
 
 const ROOF_CUE_SCHEMA: Schema = {
@@ -89,6 +89,15 @@ function latLngToMeters(point: SolarLatLng, origin: SolarLatLng): Vec2 {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`TIMEOUT_${label}_${ms}ms`)), ms)
+    ),
+  ]);
 }
 
 function staticMapProxyUrl(original: string): string {
@@ -495,17 +504,19 @@ function buildImagePart(imageData: { data: string; mimeType: string } | null | u
   return { inlineData: { mimeType: imageData.mimeType || 'image/png', data: imageData.data } } as Part;
 }
 
+type GeminiResult<T> = { result: T; error: null } | { result: null; error: string };
+
 async function runGeminiWithSchema<T>(
   parts: Part[],
   schema: Schema,
   temperature = 0.25
-): Promise<T | null> {
+): Promise<GeminiResult<T>> {
   const apiKey = readGeminiApiKey();
-  if (!apiKey) return null;
-  // Remove any null/falsy parts (e.g., missing image)
+  if (!apiKey) return { result: null, error: 'NO_API_KEY' };
   const validParts = parts.filter(Boolean) as Part[];
-  if (validParts.length === 0) return null;
+  if (validParts.length === 0) return { result: null, error: 'NO_VALID_PARTS' };
   const genAI = new GoogleGenerativeAI(apiKey);
+  let lastError = 'ALL_MODELS_FAILED';
   for (const modelId of GEMINI_MODEL_IDS) {
     try {
       const model = genAI.getGenerativeModel({
@@ -518,15 +529,15 @@ async function runGeminiWithSchema<T>(
         },
         safetySettings: SAFETY_RELAXED,
       });
-      const result = await model.generateContent(validParts);
-      const text = result.response.text();
+      const raw = await withTimeout(model.generateContent(validParts), 25_000, modelId);
+      const text = raw.response.text();
       const cleaned = text.replace(/```json\n?/gi, '').replace(/```\n?/g, '').trim();
-      return JSON.parse(cleaned) as T;
-    } catch {
-      // try next model
+      return { result: JSON.parse(cleaned) as T, error: null };
+    } catch (err) {
+      lastError = err instanceof Error ? err.message.slice(0, 200) : String(err);
     }
   }
-  return null;
+  return { result: null, error: lastError };
 }
 
 // ─── Wizard Gemini Calls ──────────────────────────────────────────────────────
@@ -552,7 +563,9 @@ Evaluate:
 Return JSON only.`,
   } as Part;
   const parts: Part[] = [imgPart, textPart].filter(Boolean) as Part[];
-  return runGeminiWithSchema<OutlineAnalysis>(parts, OUTLINE_ANALYSIS_SCHEMA);
+  const { result, error } = await runGeminiWithSchema<OutlineAnalysis>(parts, OUTLINE_ANALYSIS_SCHEMA);
+  if (error) console.warn('[RoofVision] analyzeRoofOutline failed:', error);
+  return result;
 }
 
 /** Step 1b: Analyze a single user-drawn roof segment against the satellite image. */
@@ -582,7 +595,9 @@ Classify this roof segment:
 Return JSON only.`,
   } as Part;
   const parts: Part[] = [imgPart, textPart].filter(Boolean) as Part[];
-  return runGeminiWithSchema<SegmentAnalysis>(parts, SEGMENT_ANALYSIS_SCHEMA);
+  const { result, error } = await runGeminiWithSchema<SegmentAnalysis>(parts, SEGMENT_ANALYSIS_SCHEMA);
+  if (error) console.warn('[RoofVision] analyzeRoofSegment failed:', error);
+  return result;
 }
 
 /** Step 1c: Detect structural roof lines across all user-drawn segments. */
@@ -615,7 +630,9 @@ Also return:
 Return 4-20 cues total. Return JSON only.`,
   } as Part;
   const parts: Part[] = [imgPart, textPart].filter(Boolean) as Part[];
-  return runGeminiWithSchema<StructuralDetection>(parts, STRUCTURAL_DETECTION_SCHEMA);
+  const { result, error } = await runGeminiWithSchema<StructuralDetection>(parts, STRUCTURAL_DETECTION_SCHEMA);
+  if (error) console.warn('[RoofVision] detectRoofStructure failed:', error);
+  return result;
 }
 
 /** Step 3: Combined final analysis from structural map + multi-angle photos. */
@@ -677,7 +694,9 @@ Based on all available data, provide a complete roof assessment:
 Return JSON only.`,
   } as Part);
 
-  return runGeminiWithSchema<CombinedRoofAnalysis>(parts, COMBINED_ANALYSIS_SCHEMA, 0.3);
+  const { result, error } = await runGeminiWithSchema<CombinedRoofAnalysis>(parts, COMBINED_ANALYSIS_SCHEMA, 0.3);
+  if (error) console.warn('[RoofVision] analyzeCombinedRoof failed:', error);
+  return result;
 }
 
 // ─── Legacy helpers (unchanged below) ────────────────────────────────────────

@@ -70,9 +70,11 @@ interface AnalysisPageProps {
   /** Called when the user picks a new address from the in-tab search (updates map + clears work in progress). */
   onPropertySelect: (address: string, coordinates: Coordinates) => void;
   onComplete: (sections: Omit<RoofSection, 'polygon'>[], projectId: string | null) => void;
+  /** When true, the Smart Roof Mapping Wizard opens immediately on mount. */
+  startInWizardMode?: boolean;
 }
 
-export default function AnalysisPage({ apiKey, address, coordinates, onPropertySelect, onComplete }: AnalysisPageProps) {
+export default function AnalysisPage({ apiKey, address, coordinates, onPropertySelect, onComplete, startInWizardMode = false }: AnalysisPageProps) {
   const mapRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<google.maps.Map | null>(null);
   const drawingManagerRef = useRef<google.maps.drawing.DrawingManager | null>(null);
@@ -104,7 +106,7 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
   const [solarError, setSolarError] = useState<string | null>(null);
   const [roofStructure, setRoofStructure] = useState<RoofStructureAnalysis | null>(null);
   const [showRoofStructure, setShowRoofStructure] = useState(false);
-  const [showWizard, setShowWizard] = useState(false);
+  const [showWizard, setShowWizard] = useState(startInWizardMode);
 
   const roofStructurePreview = useMemo(() => {
     const segments = solarData?.roofSegmentStats ?? [];
@@ -577,6 +579,11 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
     const segments = solarData.roofSegmentStats ?? [];
     if (segments.length === 0) return;
 
+    if (
+      sectionsRef.current.length > 0 &&
+      !window.confirm(`This will replace your ${sectionsRef.current.length} existing section(s) with Solar API data. Continue?`)
+    ) return;
+
     // Clear existing sections
     sectionsRef.current.forEach(s => {
       if (s.polygon) {
@@ -714,7 +721,7 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
   const applyMultiCuesToStructure = () => {
     if (!solarData) return;
     const rawCues = Object.values(multiResults)
-      .filter(r => r?.status === 'done' && (r.result?.qualityScore ?? 0) >= 0.4)
+      .filter(r => r?.status === 'done' && r.result != null && (r.result.qualityScore ?? 0) >= 0.4)
       .flatMap(r => r!.result!.cues);
     if (rawCues.length === 0) return;
     const aiCues = mapPhotoCuesToAiCues(rawCues, solarData);
@@ -1615,6 +1622,7 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
             address={address}
             coordinates={coordinates}
             solarData={solarData}
+            solarDataLayers={solarDataLayers}
             onClose={() => setShowWizard(false)}
           />
         </ErrorBoundary>
