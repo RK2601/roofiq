@@ -269,7 +269,7 @@ export default function QuotePage({ address, coordinates, sections, projectId, m
             <button
               type="button"
               onClick={handleGenerate}
-              disabled={generating}
+              disabled={generating || sections.length === 0}
               className="btn-accent min-h-[52px] w-full justify-center py-3.5 text-base touch-manipulation disabled:opacity-80"
             >
               {generating ? (
@@ -296,7 +296,7 @@ export default function QuotePage({ address, coordinates, sections, projectId, m
             <button
               type="button"
               onClick={handleGenerate}
-              disabled={generating}
+              disabled={generating || sections.length === 0}
               className="tap-target btn-accent inline-flex min-h-[52px] w-full items-center justify-center gap-2 rounded-xl px-4 py-3.5 text-base font-semibold disabled:opacity-80"
             >
               {generating ? (

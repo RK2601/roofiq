@@ -2,7 +2,6 @@ import { useState, useEffect, useCallback, useMemo } from 'react';
 import { AppView, Coordinates, RoofSection, User } from './types';
 import LandingPage from './components/LandingPage';
 import AnalysisPage from './components/AnalysisPage';
-import Analysis2Page from './components/Analysis2Page';
 import QuotePage from './components/QuotePage';
 import ApiKeySetup from './components/ApiKeySetup';
 import LoginPage from './components/LoginPage';
@@ -13,38 +12,12 @@ import QuotesListPage from './components/QuotesListPage';
 import SettingsPage from './components/SettingsPage';
 import ReportsPage from './components/ReportsPage';
 import MarketingPage from './components/MarketingPage';
-import { initDb, isDbConfigured, getProjectDetails, getProjectSections } from './utils/db';
+import AnalysisHub from './components/AnalysisHub';
+import HoverMeasurePage from './components/HoverMeasurePage';
+import DepthAnalysisPage from './components/DepthAnalysisPage';
+import { initDb, isDbConfigured } from './utils/db';
 import { readMapsApiKey } from './utils/googleMapsKey';
 import { readAuthSession, writeAuthSession, clearAuthSession } from './utils/authSession';
-
-function mapDbRowToRoofSection(row: Record<string, unknown>): Omit<RoofSection, 'polygon'> {
-  const pathRaw = row.polygon_path;
-  let polygonPath: RoofSection['polygonPath'];
-  if (Array.isArray(pathRaw)) {
-    polygonPath = pathRaw as NonNullable<RoofSection['polygonPath']>;
-  } else if (typeof pathRaw === 'string') {
-    try {
-      polygonPath = JSON.parse(pathRaw) as NonNullable<RoofSection['polygonPath']>;
-    } catch {
-      polygonPath = undefined;
-    }
-  } else {
-    polygonPath = undefined;
-  }
-  const base: Omit<RoofSection, 'polygon'> = {
-    id: String(row.id),
-    name: String(row.name),
-    flatArea: Number(row.flat_area),
-    pitch: String(row.pitch),
-    pitchMultiplier: Number(row.pitch_multiplier),
-    actualArea: Number(row.actual_area),
-    color: String(row.color),
-  };
-  if (polygonPath && polygonPath.length > 0) {
-    return { ...base, polygonPath };
-  }
-  return base;
-}
 
 function getStoredUser(): User | null {
   try {
@@ -69,21 +42,12 @@ export default function App() {
   const [apiKey, setApiKey] = useState(() => readMapsApiKey());
   const [showKeySetup, setShowKeySetup] = useState(false);
   const [projectId, setProjectId] = useState<string | null>(() => initial.projectId);
-  const [openProjectDetailRequest, setOpenProjectDetailRequest] = useState<{
-    projectId: string;
-    initialTab: 'overview' | 'wizard';
-  } | null>(null);
-  /** Bumped when navigating from New analysis hub to open the Smart Roof Mapping Wizard on the map view. */
-  const [wizardAutoOpenSignal, setWizardAutoOpenSignal] = useState(0);
-  /** True only after user picks "Quick analysis" on the New analysis hub (hides wizard promo on the map sidebar). */
-  const [fromQuickAnalysisChoice, setFromQuickAnalysisChoice] = useState(false);
-  /** True after user picks Smart Roof Mapping Wizard on the New analysis hub — map sidebar omits draw/quote onboarding until a property is chosen. */
-  const [fromWizardAnalysis2Choice, setFromWizardAnalysis2Choice] = useState(false);
   const [user, setUser] = useState<User | null>(() => initial.user);
   // pending address/coords saved before login
   const [pendingAddr, setPendingAddr] = useState('');
   const [pendingCoords, setPendingCoords] = useState<Coordinates>({ lat: 37.422, lng: -122.084 });
   const [dbBanner, setDbBanner] = useState<string | null>(null);
+  const [startInWizardMode, setStartInWizardMode] = useState(false);
 
   useEffect(() => {
     setApiKey(readMapsApiKey());
@@ -111,14 +75,6 @@ export default function App() {
   }, [user, view, address, coordinates, roofSections, projectId]);
 
   useEffect(() => {
-    if (view !== 'analysis') {
-      setWizardAutoOpenSignal(0);
-      setFromQuickAnalysisChoice(false);
-      setFromWizardAnalysis2Choice(false);
-    }
-  }, [view]);
-
-  useEffect(() => {
     if (!user) {
       clearAuthSession();
       if (view !== 'landing' && view !== 'login') {
@@ -131,7 +87,6 @@ export default function App() {
     setAddress(addr);
     setCoordinates(coords);
     setRoofSections([]);
-    setProjectId(null);
   }, []);
 
   const handleAddressSelect = (addr: string, coords: Coordinates) => {
@@ -144,7 +99,6 @@ export default function App() {
     setAddress(addr);
     setCoordinates(coords);
     setRoofSections([]);
-    setProjectId(null);
     setView('analysis');
   };
 
@@ -156,7 +110,6 @@ export default function App() {
       setCoordinates(pendingCoords);
       setPendingAddr('');
       setRoofSections([]);
-      setProjectId(null);
       setView('analysis');
     } else {
       setView('dashboard');
@@ -194,54 +147,7 @@ export default function App() {
     setCoordinates({ lat: 37.422, lng: -122.084 });
     setRoofSections([]);
     setProjectId(null);
-    setWizardAutoOpenSignal(0);
-    setFromWizardAnalysis2Choice(false);
-    setView('analysis');
-  }, []);
-
-  const handleAnalysis2Quick = useCallback(() => {
-    setAddress('');
-    setCoordinates({ lat: 37.422, lng: -122.084 });
-    setRoofSections([]);
-    setProjectId(null);
-    setWizardAutoOpenSignal(0);
-    setFromQuickAnalysisChoice(true);
-    setFromWizardAnalysis2Choice(false);
-    setView('analysis');
-  }, []);
-
-  const handleAnalysis2Wizard = useCallback(() => {
-    setAddress('');
-    setCoordinates({ lat: 37.422, lng: -122.084 });
-    setRoofSections([]);
-    setProjectId(null);
-    setWizardAutoOpenSignal(n => n + 1);
-    setFromQuickAnalysisChoice(false);
-    setFromWizardAnalysis2Choice(true);
-    setView('analysis');
-  }, []);
-
-  const handleWizardReportReady = useCallback((ctx: { projectId: string }) => {
-    setProjectId(ctx.projectId);
-    setOpenProjectDetailRequest({ projectId: ctx.projectId, initialTab: 'wizard' });
-    setView('dashboard');
-  }, []);
-
-  const handleOpenQuoteFromProject = useCallback(async (pid: string) => {
-    if (!isDbConfigured()) return;
-    try {
-      const details = await getProjectDetails(pid);
-      const rows = (await getProjectSections(pid)) as Record<string, unknown>[];
-      const mapped = rows.map(mapDbRowToRoofSection);
-      setAddress(details.address);
-      setCoordinates({ lat: details.lat, lng: details.lng });
-      setRoofSections(mapped);
-      setProjectId(pid);
-      setView('quote');
-      window.scrollTo({ top: 0, behavior: 'smooth' });
-    } catch (e) {
-      console.error('[RoofIQ] open quote from project', e);
-    }
+    setView('analysis-hub');
   }, []);
 
   const handleApiKeySave = (key: string) => {
@@ -273,12 +179,8 @@ export default function App() {
 
   /** Flex column + overflow-hidden on main so children can use flex-1 min-h-0 and scroll (mobile Safari). */
   const fullHeightMain =
-    view === 'analysis' ||
-    view === 'analysis-2' ||
-    view === 'marketing' ||
-    view === 'quote' ||
-    view === 'projects' ||
-    view === 'quotes-list';
+    view === 'analysis' || view === 'analysis-hub' || view === 'hover-measure' || view === 'depth-measure' ||
+    view === 'marketing' || view === 'quote' || view === 'projects' || view === 'quotes-list';
 
   return (
     <DashboardLayout
@@ -289,32 +191,37 @@ export default function App() {
       fullHeight={fullHeightMain}
       dbBanner={dbBanner}
     >
-      {view === 'dashboard' && (
-        <DashboardHome
-          onNewAnalysis={handleNewAnalysisFromPanel}
-          openProjectDetailRequest={openProjectDetailRequest}
-          onOpenProjectDetailRequestHandled={() => setOpenProjectDetailRequest(null)}
-          onOpenQuoteFromProject={handleOpenQuoteFromProject}
-        />
+      {view === 'dashboard' && <DashboardHome onNewAnalysis={handleNewAnalysisFromPanel} />}
+      {view === 'analysis-hub' && (
+        <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-y-contain [-webkit-overflow-scrolling:touch]">
+          <AnalysisHub onNavigate={(v, wizardMode) => {
+            setStartInWizardMode(!!wizardMode);
+            setView(v);
+          }} />
+        </div>
+      )}
+      {view === 'hover-measure' && (
+        <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-y-contain [-webkit-overflow-scrolling:touch]">
+          <HoverMeasurePage
+            address={address}
+            coordinates={coordinates}
+            onBack={() => setView('analysis-hub')}
+          />
+        </div>
+      )}
+      {view === 'depth-measure' && (
+        <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-y-contain [-webkit-overflow-scrolling:touch]">
+          <DepthAnalysisPage onBack={() => setView('analysis-hub')} />
+        </div>
       )}
       {view === 'analysis' && (
         <AnalysisPage
           apiKey={apiKey}
           address={address}
           coordinates={coordinates}
-          projectId={projectId}
-          wizardAutoOpenSignal={wizardAutoOpenSignal}
-          fromQuickAnalysisChoice={fromQuickAnalysisChoice}
-          fromWizardAnalysis2Choice={fromWizardAnalysis2Choice}
           onPropertySelect={handleAnalysisPropertySelect}
           onComplete={handleAnalysisComplete}
-          onWizardReportReady={handleWizardReportReady}
-        />
-      )}
-      {view === 'analysis-2' && (
-        <Analysis2Page
-          onQuickAnalysis={handleAnalysis2Quick}
-          onSmartRoofMappingWizard={handleAnalysis2Wizard}
+          startInWizardMode={startInWizardMode}
         />
       )}
       {view === 'quote' && (
@@ -331,8 +238,8 @@ export default function App() {
         </div>
       )}
       {view === 'projects' && (
-        <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-          <ProjectsPage onNewAnalysis={handleNewAnalysisFromPanel} onOpenQuoteFromProject={handleOpenQuoteFromProject} />
+        <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-y-contain [-webkit-overflow-scrolling:touch]">
+          <ProjectsPage onNewAnalysis={handleNewAnalysisFromPanel} />
         </div>
       )}
       {view === 'marketing' && <MarketingPage apiKey={apiKey} />}
