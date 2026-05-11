@@ -46,10 +46,12 @@ import {
   Share2,
   FileSpreadsheet,
   Zap,
+  Sparkles,
 } from 'lucide-react';
 import type { Coordinates } from '../types';
 import type { SolarBuildingInsights, SolarDataLayersResponse } from '../utils/solar';
 import { analyzeDsmForSegments, autoSegmentRoofPlanes, pitchDegToRatio, type DsmAnalysisResult } from '../utils/roofDsm';
+import { segmentRoofFromSatellite } from '../utils/roofAiSegment';
 import {
   analyzeRoofOutline,
   analyzeRoofSegment,
@@ -190,6 +192,8 @@ interface Props {
   onPersisted?: (projectId: string) => void;
   /** When true, auto-runs DSM plane detection as soon as solar data is available. */
   autoSegmentMode?: boolean;
+  /** When true, auto-runs Gemini AI visual segmentation as soon as satellite image is ready. */
+  aiSegmentMode?: boolean;
   onClose: () => void;
 }
 
@@ -223,7 +227,7 @@ function QualityBadge({ score }: { score: number }) {
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
-export default function RoofMappingWizard({ apiKey, address, coordinates, solarData, solarDataLayers, existingProjectId = null, forceNewProject = false, onPersisted, autoSegmentMode = false, onClose }: Props) {
+export default function RoofMappingWizard({ apiKey, address, coordinates, solarData, solarDataLayers, existingProjectId = null, forceNewProject = false, onPersisted, autoSegmentMode = false, aiSegmentMode = false, onClose }: Props) {
   // Map refs
   const mapRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<google.maps.Map | null>(null);
@@ -251,6 +255,10 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
   const [autoSegmenting, setAutoSegmenting] = useState(false);
   const [autoSegmentError, setAutoSegmentError] = useState<string | null>(null);
   const autoSegmentRanRef = useRef(false);
+
+  const [aiSegmenting, setAiSegmenting] = useState(false);
+  const [aiSegmentError, setAiSegmentError] = useState<string | null>(null);
+  const aiSegmentRanRef = useRef(false);
 
   const [photoSlots, setPhotoSlots] = useState<PhotoSlot[]>(INITIAL_PHOTO_SLOTS);
   const [activeCaptureSlot, setActiveCaptureSlot] = useState<PhotoSlotId>('top');
@@ -866,6 +874,78 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
     void runAutoSegment();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoSegmentMode, mapLoaded, solarDataLayers, solarData]);
+
+  // ── AI Visual Segmentation (Gemini DeepLabv3+-inspired) ──────────────────────
+
+  const runAiSegment = useCallback(async () => {
+    const imgData = satelliteImageRef.current;
+    if (!imgData?.data) return;
+    if (segments.length > 0) return;
+    setAiSegmenting(true);
+    setAiSegmentError(null);
+    try {
+      const detected = await segmentRoofFromSatellite(
+        imgData.data,
+        imgData.mimeType,
+        coordinates.lat,
+        coordinates.lng,
+        20,   // zoom level used when capturing satellite image
+        640,  // logical image size
+      );
+      if (detected.length === 0) {
+        setAiSegmentError('No roof planes detected — Gemini could not identify distinct planes in this image. Try the DSM Auto-Map route or draw manually.');
+        return;
+      }
+      if (!mapInstanceRef.current) {
+        setAiSegmentError('Map not ready — please try again.');
+        return;
+      }
+      const newSegments = detected.map((seg, i) => {
+        const color = SEGMENT_COLORS[i % SEGMENT_COLORS.length];
+        const polygon = new google.maps.Polygon({
+          paths: seg.path,
+          map: mapInstanceRef.current!,
+          fillColor: color,
+          strokeColor: color,
+          fillOpacity: 0.3,
+          strokeWeight: 2.5,
+          editable: true,
+          zIndex: 2,
+        });
+        return {
+          id: `ai_${i}_${Date.now()}`,
+          index: i,
+          polygon,
+          path: seg.path,
+          color,
+          analysis: null,
+          analyzing: false,
+        };
+      });
+      setSegments(newSegments);
+      setStep1Sub('structure');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setAiSegmentError(
+        msg.includes('NO_GEMINI_KEY')
+          ? 'No Gemini API key found. Add your key in Settings → API Keys.'
+          : msg.includes('NO_IMAGE')
+          ? 'Satellite image not yet loaded — please wait a moment and try again.'
+          : 'AI segmentation failed. Please draw segments manually or use DSM Auto-Map.'
+      );
+    } finally {
+      setAiSegmenting(false);
+    }
+  }, [satelliteImageRef, segments.length, coordinates, mapInstanceRef]);
+
+  // When aiSegmentMode is on, trigger once the satellite image is ready
+  useEffect(() => {
+    if (!aiSegmentMode || aiSegmentRanRef.current) return;
+    if (!imageReady || !satelliteImageRef.current?.data) return;
+    aiSegmentRanRef.current = true;
+    void runAiSegment();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [aiSegmentMode, imageReady]);
 
   // ── Phase 2: Photo upload ───────────────────────────────────────────────────
 
@@ -1890,7 +1970,7 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
                   </div>
 
                   {/* DSM Auto-detect */}
-                  {solarDataLayers?.dsmUrl && segments.length === 0 && !autoSegmenting && (
+                  {solarDataLayers?.dsmUrl && segments.length === 0 && !autoSegmenting && !aiSegmenting && (
                     <button
                       onClick={runAutoSegment}
                       className="flex items-center justify-center gap-2 bg-cyan-700 hover:bg-cyan-600 text-white text-xs font-semibold py-2.5 px-4 rounded-lg transition-colors"
@@ -1898,16 +1978,44 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
                       <Zap size={13} /> Auto-detect roof planes from DSM
                     </button>
                   )}
+
+                  {/* AI Visual Segment (Gemini vision) */}
+                  {segments.length === 0 && !autoSegmenting && !aiSegmenting && imageReady && (
+                    <button
+                      onClick={runAiSegment}
+                      className="flex items-center justify-center gap-2 bg-rose-700 hover:bg-rose-600 text-white text-xs font-semibold py-2.5 px-4 rounded-lg transition-colors"
+                    >
+                      <Sparkles size={13} /> AI Visual Segment (Gemini Vision)
+                    </button>
+                  )}
+                  {aiSegmenting && (
+                    <div className="flex flex-col items-center gap-2 py-3 text-rose-300 text-xs">
+                      <Loader2 size={18} className="animate-spin" />
+                      <span>Gemini is analysing the satellite image…</span>
+                    </div>
+                  )}
+                  {aiSegmentError && (
+                    <div className="rounded-lg border border-rose-600/40 bg-rose-900/30 px-3 py-2 text-xs text-rose-200">
+                      {aiSegmentError}
+                    </div>
+                  )}
+
                   {autoSegmentError && (
                     <div className="rounded-lg border border-amber-600/40 bg-amber-900/30 px-3 py-2 text-xs text-amber-200">
                       {autoSegmentError}
                     </div>
                   )}
-                  {segments.length > 0 && !autoSegmenting && (
+                  {segments.length > 0 && !autoSegmenting && !aiSegmenting && (
                     <>
                       {autoSegmentRanRef.current && (
                         <div className="rounded-lg bg-cyan-900/20 border border-cyan-700/40 px-3 py-2 text-xs text-cyan-300">
-                          {segments.length} roof plane{segments.length !== 1 ? 's' : ''} auto-detected · Adjust vertices if needed
+                          {segments.length} roof plane{segments.length !== 1 ? 's' : ''} auto-detected via DSM · Adjust vertices if needed
+                        </div>
+                      )}
+                      {aiSegmentRanRef.current && (
+                        <div className="rounded-lg bg-rose-900/20 border border-rose-700/40 px-3 py-2 text-xs text-rose-300">
+                          <Sparkles size={11} className="inline mr-1" />
+                          {segments.length} roof plane{segments.length !== 1 ? 's' : ''} detected via AI Vision · Adjust vertices if needed
                         </div>
                       )}
                       <button

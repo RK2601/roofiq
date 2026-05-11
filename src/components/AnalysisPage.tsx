@@ -84,9 +84,11 @@ interface AnalysisPageProps {
   fromAnalysisHub?: boolean;
   /** When true, wizard opens in DSM auto-segmentation mode. */
   startInAutoSegmentMode?: boolean;
+  /** When true, wizard opens in AI visual segmentation mode (Gemini vision). */
+  startInAiSegmentMode?: boolean;
 }
 
-export default function AnalysisPage({ apiKey, address, coordinates, onPropertySelect, onComplete, startInWizardMode = false, onWizardProjectPersisted, fromAnalysisHub = false, startInAutoSegmentMode = false }: AnalysisPageProps) {
+export default function AnalysisPage({ apiKey, address, coordinates, onPropertySelect, onComplete, startInWizardMode = false, onWizardProjectPersisted, fromAnalysisHub = false, startInAutoSegmentMode = false, startInAiSegmentMode = false }: AnalysisPageProps) {
   const mapRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<google.maps.Map | null>(null);
   const drawingManagerRef = useRef<google.maps.drawing.DrawingManager | null>(null);
@@ -1683,6 +1685,7 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
             existingProjectId={wizardAttach.mode === 'existing' ? (wizardAttach.projectId ?? null) : null}
             forceNewProject={wizardAttach.mode === 'new'}
             autoSegmentMode={startInAutoSegmentMode}
+            aiSegmentMode={startInAiSegmentMode}
             onPersisted={(pid) => {
               onWizardProjectPersisted?.(pid);
             }}

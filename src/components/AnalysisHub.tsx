@@ -1,14 +1,15 @@
-import { Zap, Map, Camera, Cpu, Layers } from 'lucide-react';
+import { Zap, Map, Camera, Cpu, Layers, Sparkles } from 'lucide-react';
 import { AppView } from '../types';
 
 interface AnalysisHubProps {
-  onNavigate: (view: AppView, wizardMode?: boolean, autoSegmentMode?: boolean) => void;
+  onNavigate: (view: AppView, wizardMode?: boolean, autoSegmentMode?: boolean, aiSegmentMode?: boolean) => void;
 }
 
 interface RouteCard {
   view: AppView;
   wizardMode?: boolean;
   autoSegmentMode?: boolean;
+  aiSegmentMode?: boolean;
   icon: React.ReactNode;
   badge?: string;
   badgeColor?: string;
@@ -116,6 +117,26 @@ const ROUTES: RouteCard[] = [
     borderColor: 'border-cyan-200 hover:border-cyan-400',
     iconBg: 'bg-cyan-100 text-cyan-600',
   },
+  {
+    view: 'analysis',
+    wizardMode: true,
+    aiSegmentMode: true,
+    icon: <Sparkles size={28} />,
+    badge: 'AI · Vision',
+    badgeColor: 'bg-rose-100 text-rose-700',
+    title: 'AI Visual Segment',
+    subtitle: 'DeepLabv3+-inspired segmentation from satellite imagery',
+    features: [
+      'Gemini vision reads the satellite image directly',
+      'Detects each roof plane by visual boundaries',
+      'Returns polygon outlines + pitch & facing per plane',
+      'Complements DSM — works on any roof type',
+    ],
+    cta: 'Segment with AI Vision',
+    gradient: 'from-rose-50 to-pink-50',
+    borderColor: 'border-rose-200 hover:border-rose-400',
+    iconBg: 'bg-rose-100 text-rose-600',
+  },
 ];
 
 export default function AnalysisHub({ onNavigate }: AnalysisHubProps) {
@@ -133,7 +154,7 @@ export default function AnalysisHub({ onNavigate }: AnalysisHubProps) {
           {ROUTES.map((route, i) => (
             <button
               key={i}
-              onClick={() => onNavigate(route.view, route.wizardMode, route.autoSegmentMode)}
+              onClick={() => onNavigate(route.view, route.wizardMode, route.autoSegmentMode, route.aiSegmentMode)}
               className={`text-left bg-gradient-to-br ${route.gradient} border-2 ${route.borderColor} rounded-2xl p-6 transition-all duration-200 hover:shadow-lg hover:-translate-y-0.5 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500`}
             >
               <div className="flex items-start gap-4 mb-4">
@@ -173,7 +194,7 @@ export default function AnalysisHub({ onNavigate }: AnalysisHubProps) {
         </div>
 
         <p className="text-center text-xs text-slate-400 mt-8">
-          Quick Analysis and Smart Roof Wizard require a Google Maps API key.
+          Quick Analysis, Smart Roof Wizard, DSM Auto-Map and AI Visual Segment require a Google Maps + Gemini API key.
           HOVER requires a HOVER API key. AI Depth requires a Replicate token.
         </p>
       </div>
