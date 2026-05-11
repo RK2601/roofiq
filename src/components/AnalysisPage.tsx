@@ -132,11 +132,11 @@ interface AnalysisPageProps {
   address: string;
   coordinates: Coordinates;
   projectId?: string | null;
-  /** Increments when the user should land with the Smart Roof Mapping wizard open (e.g. from Analysis 2). */
+  /** Increments when the user should land with the Smart Roof Mapping wizard open (e.g. from New analysis hub). */
   wizardAutoOpenSignal?: number;
-  /** User chose “Quick analysis” on Analysis 2 — omit polygon hint and wizard CTA in the sidebar. */
+  /** User chose “Quick analysis” on the New analysis hub — omit polygon hint and wizard CTA in the sidebar. */
   fromQuickAnalysisChoice?: boolean;
-  /** User chose Smart Roof Mapping Wizard on Analysis 2 — hide draw/quote onboarding until a property is selected. */
+  /** User chose Smart Roof Mapping Wizard on the New analysis hub — hide draw/quote onboarding until a property is selected. */
   fromWizardAnalysis2Choice?: boolean;
   /** Called when the user picks a new address from the in-tab search (updates map + clears work in progress). */
   onPropertySelect: (address: string, coordinates: Coordinates) => void;
@@ -209,7 +209,7 @@ export default function AnalysisPage({
   );
   const usableSolarSegments = filteredSolar.segments;
   const [showWizard, setShowWizard] = useState(false);
-  /** After wizard folder choice with no address yet (e.g. Analysis 2) — open wizard once the user picks a property from search. */
+  /** After wizard folder choice with no address yet (e.g. from New analysis hub) — open wizard once the user picks a property from search. */
   const [openWizardAfterPropertySearch, setOpenWizardAfterPropertySearch] = useState(false);
   const lastWizardAutoOpenSignal = useRef(0);
   /** Saved with the project as `project_name`; list title becomes name + address. */
@@ -229,7 +229,7 @@ export default function AnalysisPage({
         ? null
         : linkedProjectId;
 
-  /** Analysis 2 → wizard (or post–folder-choice before address): hide quick-map draw / empty-state chrome. */
+  /** New analysis hub → wizard (or post–folder-choice before address): hide quick-map draw / empty-state chrome. */
   const hideWizardEntryRoofChrome = useMemo(
     () =>
       openWizardAfterPropertySearch || (fromWizardAnalysis2Choice && !address.trim()),

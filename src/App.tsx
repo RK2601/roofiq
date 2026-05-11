@@ -73,11 +73,11 @@ export default function App() {
     projectId: string;
     initialTab: 'overview' | 'wizard';
   } | null>(null);
-  /** Bumped when navigating from Analysis 2 to open the Smart Roof Mapping Wizard on New Analysis. */
+  /** Bumped when navigating from New analysis hub to open the Smart Roof Mapping Wizard on the map view. */
   const [wizardAutoOpenSignal, setWizardAutoOpenSignal] = useState(0);
-  /** True only after user picks "Quick analysis" on Analysis 2 (hides wizard promo on the map sidebar). */
+  /** True only after user picks "Quick analysis" on the New analysis hub (hides wizard promo on the map sidebar). */
   const [fromQuickAnalysisChoice, setFromQuickAnalysisChoice] = useState(false);
-  /** True after user picks Smart Roof Mapping Wizard on Analysis 2 — map sidebar omits draw/quote onboarding until a property is chosen. */
+  /** True after user picks Smart Roof Mapping Wizard on the New analysis hub — map sidebar omits draw/quote onboarding until a property is chosen. */
   const [fromWizardAnalysis2Choice, setFromWizardAnalysis2Choice] = useState(false);
   const [user, setUser] = useState<User | null>(() => initial.user);
   // pending address/coords saved before login
