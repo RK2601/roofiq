@@ -338,6 +338,11 @@ export async function saveProject(
 export interface SaveWizardWorkflowReportOptions {
   /** When set, upsert workflow JSON to this project (must exist). Skips address-based project resolution. */
   projectId?: string | null;
+  /**
+   * When true and no `projectId` is set yet, always INSERT a new `projects` row instead of reusing an existing
+   * project at the same address (e.g. user explicitly chose "new folder" in the wizard attach flow).
+   */
+  forceNewProject?: boolean;
 }
 
 export async function saveWizardWorkflowReport(
@@ -371,17 +376,21 @@ export async function saveWizardWorkflowReport(
   }
 
   if (!projectId) {
-    const existing = await sql`
-      SELECT id
-      FROM projects
-      WHERE address = ${report.address}
-        AND ABS(lat - ${report.coordinates.lat}) < 0.000001
-        AND ABS(lng - ${report.coordinates.lng}) < 0.000001
-      ORDER BY created_at DESC
-      LIMIT 1
-    `;
+    const skipAddressDedup = options?.forceNewProject === true;
 
-    projectId = existing[0]?.id as string | undefined;
+    if (!skipAddressDedup) {
+      const existing = await sql`
+        SELECT id
+        FROM projects
+        WHERE address = ${report.address}
+          AND ABS(lat - ${report.coordinates.lat}) < 0.000001
+          AND ABS(lng - ${report.coordinates.lng}) < 0.000001
+        ORDER BY created_at DESC
+        LIMIT 1
+      `;
+      projectId = existing[0]?.id as string | undefined;
+    }
+
     if (!projectId) {
       const wfName = report.projectFolderName?.trim() ? report.projectFolderName.trim() : null;
       const displayName = buildProjectDisplayName(wfName, report.address);
