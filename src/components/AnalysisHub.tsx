@@ -1,4 +1,4 @@
-import { Zap, Map, Camera, Cpu, Layers, Sparkles } from 'lucide-react';
+import { Zap, Map, Camera, Cpu, Layers, Sparkles, Box } from 'lucide-react';
 import { AppView } from '../types';
 
 interface AnalysisHubProps {
@@ -137,6 +137,24 @@ const ROUTES: RouteCard[] = [
     borderColor: 'border-rose-200 hover:border-rose-400',
     iconBg: 'bg-rose-100 text-rose-600',
   },
+  {
+    view: 'depth-pipeline',
+    icon: <Box size={28} />,
+    badge: 'Open3D · Railway',
+    badgeColor: 'bg-violet-100 text-violet-700',
+    title: '3D Depth Pipeline',
+    subtitle: 'Full depth map → point cloud → mesh → RANSAC segmentation',
+    features: [
+      'Depth Anything V2 via Replicate',
+      'Open3D Poisson mesh reconstruction',
+      'Iterative RANSAC roof plane detection',
+      'Per-plane pitch, facing & area output',
+    ],
+    cta: 'Run 3D Pipeline',
+    gradient: 'from-violet-50 to-purple-50',
+    borderColor: 'border-violet-200 hover:border-violet-400',
+    iconBg: 'bg-violet-100 text-violet-600',
+  },
 ];
 
 export default function AnalysisHub({ onNavigate }: AnalysisHubProps) {
@@ -194,8 +212,8 @@ export default function AnalysisHub({ onNavigate }: AnalysisHubProps) {
         </div>
 
         <p className="text-center text-xs text-slate-400 mt-8">
-          Quick Analysis, Smart Roof Wizard, DSM Auto-Map and AI Visual Segment require a Google Maps + Gemini API key.
-          HOVER requires a HOVER API key. AI Depth requires a Replicate token.
+          Quick Analysis, Smart Roof Wizard, DSM Auto-Map and AI Visual Segment require Google Maps + Gemini API keys.
+          HOVER requires a HOVER API key. AI Depth &amp; 3D Pipeline require a Replicate token (server-side).
         </p>
       </div>
     </div>
