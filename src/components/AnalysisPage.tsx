@@ -605,7 +605,7 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
 
     // Build all sections first, then set state once
     const newSections: RoofSection[] = filtered.map((segment, idx) => {
-      const path = segmentToBoundingPolygon(segment, solarData.boundingBox);
+      const path = segmentToBoundingPolygon(segment);
       const color = SECTION_COLORS[idx % SECTION_COLORS.length];
       const pitchOption = pitchDegreesToOption(segment.pitchDegrees);
       const flatAreaSqFt = segment.stats.areaMeters2 * 10.7639;
