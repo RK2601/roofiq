@@ -143,6 +143,8 @@ interface AnalysisPageProps {
   onComplete: (sections: Omit<RoofSection, 'polygon'>[], projectId: string | null) => void;
   /** After Smart Roof Mapping wizard finishes; parent typically navigates to the dashboard report. */
   onWizardReportReady?: (ctx: { projectId: string; address: string }) => void;
+  /** Whenever wizard workflow JSON saves successfully (keeps session `projectId` aligned with the DB row). */
+  onWizardProjectPersisted?: (projectId: string) => void;
 }
 
 export default function AnalysisPage({
@@ -156,6 +158,7 @@ export default function AnalysisPage({
   onPropertySelect,
   onComplete,
   onWizardReportReady,
+  onWizardProjectPersisted,
 }: AnalysisPageProps) {
   const mapRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<google.maps.Map | null>(null);
@@ -1920,8 +1923,11 @@ export default function AnalysisPage({
             address={address}
             coordinates={coordinates}
             solarData={solarData}
+            solarDataLayers={solarDataLayers}
             existingProjectId={wizardExistingProjectId}
             projectFolderName={projectFolderName.trim() || null}
+            forceNewProject={wizardAttach.mode === 'new'}
+            onPersisted={onWizardProjectPersisted}
             onReportReady={ctx => {
               onWizardReportReady?.(ctx);
               setShowWizard(false);

@@ -51,11 +51,14 @@ import {
   detectRoofStructure,
   analyzeCombinedRoof,
   latLngToImageNorm,
+  computeStaticMapImageBoundsFromCenterZoom,
   type OutlineAnalysis,
   type SegmentAnalysis,
   type StructuralDetection,
   type StructuralLine,
 } from '../utils/roofVision';
+import { analyzeDsmForSegments, pitchDegToRatio, type DsmAnalysisResult } from '../utils/roofDsm';
+import type { SolarDataLayersResponse } from '../utils/solar';
 import { deriveVisionRoofCuesFromFile, type RoofPhotoCueAnalysis } from '../utils/roofVisionPhoto';
 import { readGeminiApiKey } from '../utils/googleAiKey';
 import { isDbConfigured, saveWizardWorkflowReport, type WizardWorkflowReportPayload } from '../utils/db';
@@ -180,6 +183,12 @@ interface Props {
   onReportReady?: (ctx: { projectId: string; address: string }) => void;
   /** Same folder naming as Quick analysis: stored as name + address on the project row when set. */
   projectFolderName?: string | null;
+  /** True when the user chose a brand-new project folder (skip DB dedup by address for the first save). */
+  forceNewProject?: boolean;
+  /** Fires after each successful workflow persist so the app shell can keep `projectId` in sync. */
+  onPersisted?: (projectId: string) => void;
+  /** Solar data layers (provides dsmUrl for GeoTIFF elevation analysis). */
+  solarDataLayers?: SolarDataLayersResponse | null;
 }
 
 // ─── Helper components ────────────────────────────────────────────────────────
@@ -221,6 +230,9 @@ export default function RoofMappingWizard({
   existingProjectId = null,
   onReportReady,
   projectFolderName = null,
+  forceNewProject = false,
+  onPersisted,
+  solarDataLayers = null,
 }: Props) {
   // Map refs
   const mapRef = useRef<HTMLDivElement>(null);
@@ -241,6 +253,10 @@ export default function RoofMappingWizard({
   const [structureAnalyzing, setStructureAnalyzing] = useState(false);
   const [structureError, setStructureError] = useState<string | null>(null);
   const [structureSource, setStructureSource] = useState<'ai' | 'fallback' | null>(null);
+
+  const [dsmResult, setDsmResult] = useState<DsmAnalysisResult | null>(null);
+  const [dsmAnalyzing, setDsmAnalyzing] = useState(false);
+  const [dsmError, setDsmError] = useState<string | null>(null);
 
   const [photoSlots, setPhotoSlots] = useState<PhotoSlot[]>(INITIAL_PHOTO_SLOTS);
   const [activeCaptureSlot, setActiveCaptureSlot] = useState<PhotoSlotId>('top');
@@ -710,23 +726,15 @@ export default function RoofMappingWizard({
 
       // Draw structural lines on map
       if (resolved && mapInstanceRef.current) {
-        // Compute map bounds from satellite image logical size
-        const zoom = 20;
-        const worldPx = 256 * Math.pow(2, zoom);
-        const halfLng = (320 / worldPx) * 360;
-        const halfLat = halfLng; // approx at these scales
-        const bounds = {
-          sw: { lat: coordinates.lat - halfLat, lng: coordinates.lng - halfLng },
-          ne: { lat: coordinates.lat + halfLat, lng: coordinates.lng + halfLng },
-        };
+        const imgBounds = computeStaticMapImageBoundsFromCenterZoom(coordinates, 20, 640);
 
         const lines = resolved.cues.filter(c => c.confidence >= 0.4);
         lines.forEach(cue => {
-          // denormalize from [0,1] image space back to lat/lng
-          const lat1 = bounds.ne.lat - cue.y1 * (bounds.ne.lat - bounds.sw.lat);
-          const lng1 = bounds.sw.lng + cue.x1 * (bounds.ne.lng - bounds.sw.lng);
-          const lat2 = bounds.ne.lat - cue.y2 * (bounds.ne.lat - bounds.sw.lat);
-          const lng2 = bounds.sw.lng + cue.x2 * (bounds.ne.lng - bounds.sw.lng);
+          // denormalize from [0,1] image space back to lat/lng using accurate image bounds
+          const lat1 = imgBounds.neLat - cue.y1 * (imgBounds.neLat - imgBounds.swLat);
+          const lng1 = imgBounds.swLng + cue.x1 * (imgBounds.neLng - imgBounds.swLng);
+          const lat2 = imgBounds.neLat - cue.y2 * (imgBounds.neLat - imgBounds.swLat);
+          const lng2 = imgBounds.swLng + cue.x2 * (imgBounds.neLng - imgBounds.swLng);
 
           const dashPat = safeDashPattern(cue.type);
           const line = new google.maps.Polyline({
@@ -756,6 +764,36 @@ export default function RoofMappingWizard({
       setStructureAnalyzing(false);
     }
   }, [segments, coordinates, safeComputeAreaSqFt]);
+
+  // ── DSM analysis ────────────────────────────────────────────────────────────
+
+  const runDsmAnalysis = useCallback(async () => {
+    const dsmUrl = solarDataLayers?.dsmUrl;
+    if (!dsmUrl || segments.length === 0) return;
+    setDsmAnalyzing(true);
+    setDsmError(null);
+    setDsmResult(null);
+    try {
+      const result = await analyzeDsmForSegments(dsmUrl, segments.map(s => s.path), apiKey);
+      if (result) {
+        setDsmResult(result);
+      } else {
+        setDsmError('DSM data unavailable for this location — Solar API may not have coverage here.');
+      }
+    } catch {
+      setDsmError('DSM fetch failed. Check console for details.');
+    } finally {
+      setDsmAnalyzing(false);
+    }
+  }, [solarDataLayers, segments, apiKey]);
+
+  // Auto-run DSM analysis when structure detection completes and DSM URL is available
+  useEffect(() => {
+    if (!structureResult || dsmResult || dsmAnalyzing) return;
+    if (!solarDataLayers?.dsmUrl) return;
+    void runDsmAnalysis();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [structureResult]);
 
   // ── Phase 2: Photo upload ───────────────────────────────────────────────────
 
@@ -1172,7 +1210,9 @@ export default function RoofMappingWizard({
             ? 610
             : 690
     : 450;
-  const areaSquares = Math.max(1, Math.round((structureResult?.totalAreaSqFt ?? mappedAreaSqFt) / 100));
+  // Priority: DSM true 3D area (most accurate) → AI structure estimate → polygon plan area
+  const bestAreaSqFt = dsmResult?.totalSloped3dAreaSqFt ?? structureResult?.totalAreaSqFt ?? mappedAreaSqFt;
+  const areaSquares = Math.max(1, Math.round(bestAreaSqFt / 100));
   const quoteSubtotal = Math.round(areaSquares * quoteBaseRatePerSq);
   const quoteLineItems = [
     { label: 'Roof system replacement', qty: `${areaSquares} sq`, unit: `$${quoteBaseRatePerSq}`, total: `$${quoteSubtotal}` },
@@ -1192,16 +1232,37 @@ export default function RoofMappingWizard({
     : null;
   const diagramWidth = 920;
   const diagramHeight = 560;
-  const diagramPadding = 28;
+  const diagramPadding = 36;
+
+  // Equal-scale projection — preserves real-world shapes (corrects lng for cos-latitude compression).
+  const diagramCenterLat = diagramBounds
+    ? (diagramBounds.minLat + diagramBounds.maxLat) / 2
+    : coordinates.lat;
+  const diagramCosLat = Math.cos((diagramCenterLat * Math.PI) / 180);
+
+  const diagramPhysW = diagramBounds
+    ? (diagramBounds.maxLng - diagramBounds.minLng) * diagramCosLat
+    : 1e-6;
+  const diagramPhysH = diagramBounds
+    ? diagramBounds.maxLat - diagramBounds.minLat
+    : 1e-6;
+
+  const diagramUsableW = diagramWidth - 2 * diagramPadding;
+  const diagramUsableH = diagramHeight - 2 * diagramPadding;
+  const diagramScale = Math.min(
+    diagramUsableW / Math.max(diagramPhysW, 1e-9),
+    diagramUsableH / Math.max(diagramPhysH, 1e-9)
+  );
+
+  // Centre content within the usable area
+  const diagramOriginX = diagramPadding + (diagramUsableW - diagramPhysW * diagramScale) / 2;
+  const diagramOriginY = diagramPadding + (diagramUsableH - diagramPhysH * diagramScale) / 2;
+
   const toDiagramPoint = (point: { lat: number; lng: number }) => {
     if (!diagramBounds) return { x: diagramPadding, y: diagramPadding };
-    const spanLng = Math.max(1e-6, diagramBounds.maxLng - diagramBounds.minLng);
-    const spanLat = Math.max(1e-6, diagramBounds.maxLat - diagramBounds.minLat);
-    const xNorm = (point.lng - diagramBounds.minLng) / spanLng;
-    const yNorm = (diagramBounds.maxLat - point.lat) / spanLat;
     return {
-      x: diagramPadding + xNorm * (diagramWidth - diagramPadding * 2),
-      y: diagramPadding + yNorm * (diagramHeight - diagramPadding * 2),
+      x: diagramOriginX + (point.lng - diagramBounds.minLng) * diagramCosLat * diagramScale,
+      y: diagramOriginY + (diagramBounds.maxLat - point.lat) * diagramScale,
     };
   };
   const reportPolygons = segments.map(segment => {
@@ -1222,16 +1283,27 @@ export default function RoofMappingWizard({
       areaSqFt: canMeasureArea ? Math.round(safeComputeAreaSqFt(segment.polygon)) : 0,
     };
   });
-  const reportEdges = (structureResult?.cues ?? []).map((cue, idx) => ({
-    id: `edge-${idx}`,
-    type: cue.type,
-    color: safeEdgeColor(cue.type),
-    x1: diagramPadding + cue.x1 * (diagramWidth - diagramPadding * 2),
-    y1: diagramPadding + cue.y1 * (diagramHeight - diagramPadding * 2),
-    x2: diagramPadding + cue.x2 * (diagramWidth - diagramPadding * 2),
-    y2: diagramPadding + cue.y2 * (diagramHeight - diagramPadding * 2),
-    dash: safeDashPattern(cue.type),
-  }));
+  // The satellite image used for structure detection was captured at zoom=20, 640×640 centred on coordinates.
+  // StructuralLine x1/y1/x2/y2 are [0,1] image-normalised (y=0 = north/top).
+  // Convert them to lat/lng with the same image bounds so they overlay the polygon diagram correctly.
+  const _structImageBounds = computeStaticMapImageBoundsFromCenterZoom(coordinates, 20, 640);
+  const cueImageLatFromY = (y: number) =>
+    _structImageBounds.neLat - y * (_structImageBounds.neLat - _structImageBounds.swLat);
+  const cueImageLngFromX = (x: number) =>
+    _structImageBounds.swLng + x * (_structImageBounds.neLng - _structImageBounds.swLng);
+
+  const reportEdges = (structureResult?.cues ?? []).map((cue, idx) => {
+    const d1 = toDiagramPoint({ lat: cueImageLatFromY(cue.y1), lng: cueImageLngFromX(cue.x1) });
+    const d2 = toDiagramPoint({ lat: cueImageLatFromY(cue.y2), lng: cueImageLngFromX(cue.x2) });
+    return {
+      id: `edge-${idx}`,
+      type: cue.type,
+      color: safeEdgeColor(cue.type),
+      x1: d1.x, y1: d1.y,
+      x2: d2.x, y2: d2.y,
+      dash: safeDashPattern(cue.type),
+    };
+  });
 
   const buildWorkflowReportPayload = useCallback((): WizardWorkflowReportPayload => {
     return {
@@ -1298,14 +1370,18 @@ export default function RoofMappingWizard({
     (async () => {
       try {
         const payload = buildWorkflowReportPayload();
+        const targetPid = existingProjectId ?? persistedProjectId;
         const { projectId } = await saveWizardWorkflowReport(payload, {
-          projectId: existingProjectId ?? persistedProjectId,
+          projectId: targetPid,
+          forceNewProject: forceNewProject && !targetPid,
         });
         if (!cancelled) {
           setPersistedProjectId(projectId);
           setPersistStatus('saved');
+          onPersisted?.(projectId);
         }
-      } catch {
+      } catch (err) {
+        console.error('[RoofIQ] saveWizardWorkflowReport failed', err);
         if (!cancelled) setPersistStatus('error');
       } finally {
         window.clearTimeout(timer);
@@ -1320,6 +1396,8 @@ export default function RoofMappingWizard({
     buildWorkflowReportPayload,
     existingProjectId,
     persistedProjectId,
+    forceNewProject,
+    onPersisted,
     address,
     coordinates,
     outline,
@@ -1726,6 +1804,108 @@ export default function RoofMappingWizard({
                         <RotateCcw size={12} /> Re-run detection
                       </button>
                     </div>
+                  )}
+
+                  {/* DSM Measurements panel */}
+                  {structureResult && (dsmAnalyzing || dsmResult || dsmError) && (
+                    <div className="bg-cyan-900/20 border border-cyan-700/40 rounded-xl p-3">
+                      <div className="flex items-center gap-2 mb-2">
+                        <Layers size={13} className="text-cyan-400" />
+                        <span className="text-xs font-semibold text-white">DSM Measurements</span>
+                        {dsmResult && (
+                          <span className="ml-auto text-[10px] text-cyan-500 font-medium">{dsmResult.dsmResolutionM}m/px</span>
+                        )}
+                        {!dsmAnalyzing && (
+                          <button
+                            onClick={runDsmAnalysis}
+                            className="ml-auto text-[10px] text-slate-400 hover:text-cyan-300 flex items-center gap-1"
+                            title="Re-run DSM analysis"
+                          >
+                            <RotateCcw size={10} />
+                          </button>
+                        )}
+                      </div>
+
+                      {dsmAnalyzing && (
+                        <div className="flex items-center gap-2 text-cyan-400 text-xs">
+                          <Loader2 size={12} className="animate-spin" />
+                          Fetching Solar DSM elevation data…
+                        </div>
+                      )}
+
+                      {dsmError && !dsmAnalyzing && (
+                        <div className="text-xs text-amber-300 leading-relaxed">{dsmError}</div>
+                      )}
+
+                      {dsmResult && !dsmAnalyzing && (
+                        <div className="flex flex-col gap-2">
+                          <div className="grid grid-cols-1 gap-1 text-xs">
+                            <div className="flex justify-between">
+                              <span className="text-slate-400">True 3D area</span>
+                              <span className="text-cyan-300 font-semibold">{dsmResult.totalSloped3dAreaSqFt.toLocaleString()} sqft</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-slate-400">Ground footprint</span>
+                              <span className="text-white font-medium">{dsmResult.totalGroundAreaSqFt.toLocaleString()} sqft</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-slate-400">Avg pitch</span>
+                              <span className="text-white font-medium">
+                                {dsmResult.overallPitchDeg}° · {pitchDegToRatio(dsmResult.overallPitchDeg)}
+                              </span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-slate-400">Predominant facing</span>
+                              <span className="text-white font-medium">{dsmResult.overallFacingDirection}</span>
+                            </div>
+                          </div>
+
+                          {dsmResult.segments.some(s => s.pixelCount > 0) && (
+                            <div className="border-t border-slate-700 pt-2">
+                              <div className="text-[10px] text-slate-500 mb-1.5 uppercase tracking-wide">Per segment</div>
+                              <div className="flex flex-col gap-1.5">
+                                {dsmResult.segments.map((seg, i) => seg.pixelCount > 0 && (
+                                  <div key={i} className="rounded-lg bg-slate-800/60 px-2 py-1.5">
+                                    <div className="flex items-center justify-between mb-1">
+                                      <div className="flex items-center gap-1.5">
+                                        <div
+                                          className="w-2.5 h-2.5 rounded-full shrink-0"
+                                          style={{ backgroundColor: SEGMENT_COLORS[i % SEGMENT_COLORS.length] }}
+                                        />
+                                        <span className="text-xs font-medium text-white">Segment {i + 1}</span>
+                                      </div>
+                                      <span className="text-[10px] text-cyan-300 font-semibold">{seg.sloped3dAreaSqFt.toLocaleString()} sqft</span>
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-[10px] text-slate-400">
+                                      <div>Pitch: <span className="text-slate-200">{seg.pitchDeg}° ({seg.pitchRatio})</span></div>
+                                      <div>Facing: <span className="text-slate-200">{seg.facingDirection}</span></div>
+                                      <div>Ground: <span className="text-slate-200">{seg.groundAreaSqFt.toLocaleString()} sqft</span></div>
+                                      <div>Rise: <span className="text-slate-200">{seg.heightDiffFt} ft</span></div>
+                                      <div>Ridge ht: <span className="text-slate-200">{seg.ridgeElevationFt} ft</span></div>
+                                      <div>Eave ht: <span className="text-slate-200">{seg.eaveElevationFt} ft</span></div>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
+                          <div className="text-[10px] text-slate-600 italic">
+                            Measured from Google Solar DSM · {dsmResult.dsmResolutionM}m/pixel resolution
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Manual DSM trigger when not yet run */}
+                  {structureResult && !dsmResult && !dsmAnalyzing && !dsmError && solarDataLayers?.dsmUrl && (
+                    <button
+                      onClick={runDsmAnalysis}
+                      className="flex items-center justify-center gap-2 bg-cyan-700 hover:bg-cyan-600 text-white text-xs font-medium py-2 px-4 rounded-lg transition-colors"
+                    >
+                      <Layers size={13} /> Measure with DSM
+                    </button>
                   )}
 
                   {/* Show "Next" whenever detection is done (success or skip) */}
