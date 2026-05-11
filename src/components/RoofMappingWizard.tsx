@@ -181,6 +181,12 @@ interface Props {
   coordinates: Coordinates;
   solarData: SolarBuildingInsights | null;
   solarDataLayers?: SolarDataLayersResponse | null;
+  /** Link this wizard run to an existing project (skips address dedup). */
+  existingProjectId?: string | null;
+  /** True when user chose "Create new folder" — bypasses address-based dedup. */
+  forceNewProject?: boolean;
+  /** Fires after first successful save so parent can sync its projectId state. */
+  onPersisted?: (projectId: string) => void;
   onClose: () => void;
 }
 
@@ -214,7 +220,7 @@ function QualityBadge({ score }: { score: number }) {
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
-export default function RoofMappingWizard({ apiKey, address, coordinates, solarData, solarDataLayers, onClose }: Props) {
+export default function RoofMappingWizard({ apiKey, address, coordinates, solarData, solarDataLayers, existingProjectId = null, forceNewProject = false, onPersisted, onClose }: Props) {
   // Map refs
   const mapRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<google.maps.Map | null>(null);
@@ -1485,8 +1491,14 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
           finalAnalysis,
           updatedAtIso: new Date().toISOString(),
         };
-        await saveWizardWorkflowReport(payload);
-        if (!cancelled) setPersistStatus('saved');
+        const saved = await saveWizardWorkflowReport(payload, {
+          projectId: existingProjectId ?? undefined,
+          forceNewProject: forceNewProject && !existingProjectId,
+        });
+        if (!cancelled) {
+          setPersistStatus('saved');
+          onPersisted?.(saved.projectId);
+        }
       } catch {
         if (!cancelled) setPersistStatus('error');
       } finally {

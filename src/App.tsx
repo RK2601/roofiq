@@ -83,6 +83,13 @@ export default function App() {
     }
   }, [user, view]);
 
+  // Reset wizard mode flag when user navigates away from analysis
+  useEffect(() => {
+    if (view !== 'analysis') {
+      setStartInWizardMode(false);
+    }
+  }, [view]);
+
   const handleAnalysisPropertySelect = useCallback((addr: string, coords: Coordinates) => {
     setAddress(addr);
     setCoordinates(coords);
@@ -222,6 +229,8 @@ export default function App() {
           onPropertySelect={handleAnalysisPropertySelect}
           onComplete={handleAnalysisComplete}
           startInWizardMode={startInWizardMode}
+          fromAnalysisHub={startInWizardMode}
+          onWizardProjectPersisted={setProjectId}
         />
       )}
       {view === 'quote' && (

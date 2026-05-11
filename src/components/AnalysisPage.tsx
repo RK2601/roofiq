@@ -61,7 +61,13 @@ import {
 } from '../utils/roofVision';
 import RoofStructurePanel from './RoofStructurePanel';
 import RoofMappingWizard from './RoofMappingWizard';
+import SaveProjectChoiceModal from './SaveProjectChoiceModal';
 import { ErrorBoundary } from './ErrorBoundary';
+
+interface WizardAttach {
+  mode: 'inherit' | 'new' | 'existing';
+  projectId?: string;
+}
 
 interface AnalysisPageProps {
   apiKey: string;
@@ -72,9 +78,13 @@ interface AnalysisPageProps {
   onComplete: (sections: Omit<RoofSection, 'polygon'>[], projectId: string | null) => void;
   /** When true, the Smart Roof Mapping Wizard opens immediately on mount. */
   startInWizardMode?: boolean;
+  /** After wizard workflow saves; parent keeps projectId in sync. */
+  onWizardProjectPersisted?: (projectId: string) => void;
+  /** True when arriving from the New Analysis hub via the wizard card (hides draw-outline chrome). */
+  fromAnalysisHub?: boolean;
 }
 
-export default function AnalysisPage({ apiKey, address, coordinates, onPropertySelect, onComplete, startInWizardMode = false }: AnalysisPageProps) {
+export default function AnalysisPage({ apiKey, address, coordinates, onPropertySelect, onComplete, startInWizardMode = false, onWizardProjectPersisted, fromAnalysisHub = false }: AnalysisPageProps) {
   const mapRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<google.maps.Map | null>(null);
   const drawingManagerRef = useRef<google.maps.drawing.DrawingManager | null>(null);
@@ -107,6 +117,10 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
   const [roofStructure, setRoofStructure] = useState<RoofStructureAnalysis | null>(null);
   const [showRoofStructure, setShowRoofStructure] = useState(false);
   const [showWizard, setShowWizard] = useState(startInWizardMode);
+  const [showSaveProjectModal, setShowSaveProjectModal] = useState(false);
+  const [wizardAttach, setWizardAttach] = useState<WizardAttach>({ mode: 'inherit' });
+  // When coming from hub with no address yet, defer wizard opening until address is searched
+  const [openWizardAfterPropertySearch, setOpenWizardAfterPropertySearch] = useState(false);
 
   const roofStructurePreview = useMemo(() => {
     const segments = solarData?.roofSegmentStats ?? [];
@@ -155,6 +169,22 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
   const multiTotalCues    = Object.values(multiResults)
     .filter(r => r?.status === 'done' && r.result)
     .reduce((sum, r) => sum + (r!.result!.cues.length), 0);
+
+  // Open wizard when address becomes available (deferred from hub flow)
+  useEffect(() => {
+    if (!openWizardAfterPropertySearch || !address.trim()) return;
+    setOpenWizardAfterPropertySearch(false);
+    setShowSaveProjectModal(true);
+  }, [address, openWizardAfterPropertySearch]);
+
+  // Request to open wizard — shows project choice modal, or prompts address search first
+  const requestOpenWizard = useCallback(() => {
+    if (!address.trim()) {
+      setOpenWizardAfterPropertySearch(true);
+      return;
+    }
+    setShowSaveProjectModal(true);
+  }, [address]);
 
   // Keep ref in sync
   useEffect(() => {
@@ -1017,13 +1047,18 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
           {/* Smart Roof Mapping Wizard launch button */}
           <button
             type="button"
-            onClick={() => setShowWizard(true)}
+            onClick={requestOpenWizard}
             className="mt-2 w-full flex items-center justify-center gap-2 bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-500 hover:to-blue-500 text-white text-xs font-semibold py-2.5 px-4 rounded-xl transition-all shadow-sm"
           >
             <Brain size={13} />
             Smart Roof Mapping Wizard
             <ArrowRight size={13} />
           </button>
+          {openWizardAfterPropertySearch && (
+            <p className="mt-1 text-center text-xs text-amber-600 font-medium animate-pulse">
+              Search an address above — wizard opens after you pick one
+            </p>
+          )}
 
           <div className="mt-2 space-y-2 border-t border-slate-200 pt-2 sm:mt-3 sm:pt-3">
             <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
@@ -1615,6 +1650,26 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
         />
       )}
 
+      <SaveProjectChoiceModal
+        open={showSaveProjectModal}
+        purpose="wizard"
+        currentAddress={address}
+        onCancel={() => {
+          setShowSaveProjectModal(false);
+          setOpenWizardAfterPropertySearch(false);
+        }}
+        onChooseNew={() => {
+          setWizardAttach({ mode: 'new' });
+          setShowSaveProjectModal(false);
+          setShowWizard(true);
+        }}
+        onChooseExisting={(pid) => {
+          setWizardAttach({ mode: 'existing', projectId: pid });
+          setShowSaveProjectModal(false);
+          setShowWizard(true);
+        }}
+      />
+
       {showWizard && (
         <ErrorBoundary>
           <RoofMappingWizard
@@ -1623,7 +1678,15 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
             coordinates={coordinates}
             solarData={solarData}
             solarDataLayers={solarDataLayers}
-            onClose={() => setShowWizard(false)}
+            existingProjectId={wizardAttach.mode === 'existing' ? (wizardAttach.projectId ?? null) : null}
+            forceNewProject={wizardAttach.mode === 'new'}
+            onPersisted={(pid) => {
+              onWizardProjectPersisted?.(pid);
+            }}
+            onClose={() => {
+              setShowWizard(false);
+              setWizardAttach({ mode: 'inherit' });
+            }}
           />
         </ErrorBoundary>
       )}
