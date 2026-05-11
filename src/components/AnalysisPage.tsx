@@ -82,9 +82,11 @@ interface AnalysisPageProps {
   onWizardProjectPersisted?: (projectId: string) => void;
   /** True when arriving from the New Analysis hub via the wizard card (hides draw-outline chrome). */
   fromAnalysisHub?: boolean;
+  /** When true, wizard opens in DSM auto-segmentation mode. */
+  startInAutoSegmentMode?: boolean;
 }
 
-export default function AnalysisPage({ apiKey, address, coordinates, onPropertySelect, onComplete, startInWizardMode = false, onWizardProjectPersisted, fromAnalysisHub = false }: AnalysisPageProps) {
+export default function AnalysisPage({ apiKey, address, coordinates, onPropertySelect, onComplete, startInWizardMode = false, onWizardProjectPersisted, fromAnalysisHub = false, startInAutoSegmentMode = false }: AnalysisPageProps) {
   const mapRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<google.maps.Map | null>(null);
   const drawingManagerRef = useRef<google.maps.drawing.DrawingManager | null>(null);
@@ -1680,6 +1682,7 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
             solarDataLayers={solarDataLayers}
             existingProjectId={wizardAttach.mode === 'existing' ? (wizardAttach.projectId ?? null) : null}
             forceNewProject={wizardAttach.mode === 'new'}
+            autoSegmentMode={startInAutoSegmentMode}
             onPersisted={(pid) => {
               onWizardProjectPersisted?.(pid);
             }}

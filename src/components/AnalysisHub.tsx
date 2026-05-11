@@ -1,13 +1,14 @@
-import { Zap, Map, Camera, Cpu } from 'lucide-react';
+import { Zap, Map, Camera, Cpu, Layers } from 'lucide-react';
 import { AppView } from '../types';
 
 interface AnalysisHubProps {
-  onNavigate: (view: AppView, wizardMode?: boolean) => void;
+  onNavigate: (view: AppView, wizardMode?: boolean, autoSegmentMode?: boolean) => void;
 }
 
 interface RouteCard {
   view: AppView;
   wizardMode?: boolean;
+  autoSegmentMode?: boolean;
   icon: React.ReactNode;
   badge?: string;
   badgeColor?: string;
@@ -95,6 +96,26 @@ const ROUTES: RouteCard[] = [
     borderColor: 'border-emerald-200 hover:border-emerald-400',
     iconBg: 'bg-emerald-100 text-emerald-600',
   },
+  {
+    view: 'analysis',
+    wizardMode: true,
+    autoSegmentMode: true,
+    icon: <Layers size={28} />,
+    badge: 'Auto · DSM',
+    badgeColor: 'bg-cyan-100 text-cyan-700',
+    title: 'DSM Auto-Map',
+    subtitle: 'AI-free roof plane detection from elevation data',
+    features: [
+      'No manual drawing required',
+      'DBSCAN clusters pixels by slope & aspect',
+      'Each roof plane auto-detected as polygon',
+      'Uses Google Solar 0.1 m/pixel DSM raster',
+    ],
+    cta: 'Auto-detect Roof Planes',
+    gradient: 'from-cyan-50 to-sky-50',
+    borderColor: 'border-cyan-200 hover:border-cyan-400',
+    iconBg: 'bg-cyan-100 text-cyan-600',
+  },
 ];
 
 export default function AnalysisHub({ onNavigate }: AnalysisHubProps) {
@@ -112,7 +133,7 @@ export default function AnalysisHub({ onNavigate }: AnalysisHubProps) {
           {ROUTES.map((route, i) => (
             <button
               key={i}
-              onClick={() => onNavigate(route.view, route.wizardMode)}
+              onClick={() => onNavigate(route.view, route.wizardMode, route.autoSegmentMode)}
               className={`text-left bg-gradient-to-br ${route.gradient} border-2 ${route.borderColor} rounded-2xl p-6 transition-all duration-200 hover:shadow-lg hover:-translate-y-0.5 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500`}
             >
               <div className="flex items-start gap-4 mb-4">

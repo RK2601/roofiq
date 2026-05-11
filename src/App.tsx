@@ -48,6 +48,7 @@ export default function App() {
   const [pendingCoords, setPendingCoords] = useState<Coordinates>({ lat: 37.422, lng: -122.084 });
   const [dbBanner, setDbBanner] = useState<string | null>(null);
   const [startInWizardMode, setStartInWizardMode] = useState(false);
+  const [startInAutoSegmentMode, setStartInAutoSegmentMode] = useState(false);
 
   useEffect(() => {
     setApiKey(readMapsApiKey());
@@ -83,10 +84,11 @@ export default function App() {
     }
   }, [user, view]);
 
-  // Reset wizard mode flag when user navigates away from analysis
+  // Reset wizard/auto-segment mode flags when user navigates away from analysis
   useEffect(() => {
     if (view !== 'analysis') {
       setStartInWizardMode(false);
+      setStartInAutoSegmentMode(false);
     }
   }, [view]);
 
@@ -201,8 +203,9 @@ export default function App() {
       {view === 'dashboard' && <DashboardHome onNewAnalysis={handleNewAnalysisFromPanel} />}
       {view === 'analysis-hub' && (
         <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-y-contain [-webkit-overflow-scrolling:touch]">
-          <AnalysisHub onNavigate={(v, wizardMode) => {
+          <AnalysisHub onNavigate={(v, wizardMode, autoSegmentMode) => {
             setStartInWizardMode(!!wizardMode);
+            setStartInAutoSegmentMode(!!autoSegmentMode);
             setView(v);
           }} />
         </div>
@@ -228,8 +231,9 @@ export default function App() {
           coordinates={coordinates}
           onPropertySelect={handleAnalysisPropertySelect}
           onComplete={handleAnalysisComplete}
-          startInWizardMode={startInWizardMode}
-          fromAnalysisHub={startInWizardMode}
+          startInWizardMode={startInWizardMode || startInAutoSegmentMode}
+          fromAnalysisHub={startInWizardMode || startInAutoSegmentMode}
+          startInAutoSegmentMode={startInAutoSegmentMode}
           onWizardProjectPersisted={setProjectId}
         />
       )}

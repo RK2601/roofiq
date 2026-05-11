@@ -45,10 +45,11 @@ import {
   Download,
   Share2,
   FileSpreadsheet,
+  Zap,
 } from 'lucide-react';
 import type { Coordinates } from '../types';
 import type { SolarBuildingInsights, SolarDataLayersResponse } from '../utils/solar';
-import { analyzeDsmForSegments, pitchDegToRatio, type DsmAnalysisResult } from '../utils/roofDsm';
+import { analyzeDsmForSegments, autoSegmentRoofPlanes, pitchDegToRatio, type DsmAnalysisResult } from '../utils/roofDsm';
 import {
   analyzeRoofOutline,
   analyzeRoofSegment,
@@ -187,6 +188,8 @@ interface Props {
   forceNewProject?: boolean;
   /** Fires after first successful save so parent can sync its projectId state. */
   onPersisted?: (projectId: string) => void;
+  /** When true, auto-runs DSM plane detection as soon as solar data is available. */
+  autoSegmentMode?: boolean;
   onClose: () => void;
 }
 
@@ -220,7 +223,7 @@ function QualityBadge({ score }: { score: number }) {
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
-export default function RoofMappingWizard({ apiKey, address, coordinates, solarData, solarDataLayers, existingProjectId = null, forceNewProject = false, onPersisted, onClose }: Props) {
+export default function RoofMappingWizard({ apiKey, address, coordinates, solarData, solarDataLayers, existingProjectId = null, forceNewProject = false, onPersisted, autoSegmentMode = false, onClose }: Props) {
   // Map refs
   const mapRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<google.maps.Map | null>(null);
@@ -244,6 +247,10 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
   const [dsmResult, setDsmResult] = useState<DsmAnalysisResult | null>(null);
   const [dsmAnalyzing, setDsmAnalyzing] = useState(false);
   const [dsmError, setDsmError] = useState<string | null>(null);
+
+  const [autoSegmenting, setAutoSegmenting] = useState(false);
+  const [autoSegmentError, setAutoSegmentError] = useState<string | null>(null);
+  const autoSegmentRanRef = useRef(false);
 
   const [photoSlots, setPhotoSlots] = useState<PhotoSlot[]>(INITIAL_PHOTO_SLOTS);
   const [activeCaptureSlot, setActiveCaptureSlot] = useState<PhotoSlotId>('top');
@@ -793,6 +800,72 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
     void runDsmAnalysis();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [structureResult]);
+
+  // ── DSM Auto-segmentation ────────────────────────────────────────────────────
+
+  const runAutoSegment = useCallback(async () => {
+    const dsmUrl = solarDataLayers?.dsmUrl;
+    if (!dsmUrl || !solarData?.boundingBox) return;
+    if (segments.length > 0) return; // already have segments
+    setAutoSegmenting(true);
+    setAutoSegmentError(null);
+    try {
+      const buildingBounds = {
+        minLat: solarData.boundingBox.sw.latitude,
+        maxLat: solarData.boundingBox.ne.latitude,
+        minLng: solarData.boundingBox.sw.longitude,
+        maxLng: solarData.boundingBox.ne.longitude,
+      };
+      const detected = await autoSegmentRoofPlanes(dsmUrl, buildingBounds, apiKey);
+      if (detected.length === 0) {
+        setAutoSegmentError('No distinct roof planes could be detected — DSM may lack sufficient resolution for this building. Draw segments manually.');
+        return;
+      }
+      // Convert to DrawnSegment[] by creating Google Maps polygons
+      if (!mapInstanceRef.current) {
+        setAutoSegmentError('Map not ready — please try again.');
+        return;
+      }
+      const newSegments = detected.map((seg, i) => {
+        const color = SEGMENT_COLORS[i % SEGMENT_COLORS.length];
+        const polygon = new google.maps.Polygon({
+          paths: seg.path,
+          map: mapInstanceRef.current!,
+          fillColor: color,
+          strokeColor: color,
+          fillOpacity: 0.3,
+          strokeWeight: 2.5,
+          editable: true,
+          zIndex: 2,
+        });
+        return {
+          id: `auto_${i}_${Date.now()}`,
+          index: i,
+          polygon,
+          path: seg.path,
+          color,
+          analysis: null,
+          analyzing: false,
+        };
+      });
+      setSegments(newSegments);
+      // Jump straight to structure detection step
+      setStep1Sub('structure');
+    } catch {
+      setAutoSegmentError('Auto-detection failed. Please draw segments manually.');
+    } finally {
+      setAutoSegmenting(false);
+    }
+  }, [solarDataLayers, solarData, segments.length, apiKey, mapInstanceRef]);
+
+  // When autoSegmentMode is on, trigger once map + solar data are ready
+  useEffect(() => {
+    if (!autoSegmentMode || autoSegmentRanRef.current) return;
+    if (!mapLoaded || !solarDataLayers?.dsmUrl || !solarData?.boundingBox) return;
+    autoSegmentRanRef.current = true;
+    void runAutoSegment();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoSegmentMode, mapLoaded, solarDataLayers, solarData]);
 
   // ── Phase 2: Photo upload ───────────────────────────────────────────────────
 
@@ -1803,20 +1876,47 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
                         )}
                       </div>
                     ))}
-                    {segments.length === 0 && (
+                    {segments.length === 0 && !autoSegmenting && (
                       <div className="text-center py-6 text-slate-500 text-xs">
-                        No segments drawn yet.<br />Draw each distinct roof section.
+                        No segments drawn yet.<br />Draw each distinct roof section<br />or use DSM Auto-Detect below.
+                      </div>
+                    )}
+                    {autoSegmenting && (
+                      <div className="flex flex-col items-center gap-2 py-6 text-cyan-400 text-xs">
+                        <Loader2 size={20} className="animate-spin" />
+                        <span>Analysing elevation map — detecting roof planes…</span>
                       </div>
                     )}
                   </div>
 
-                  {segments.length > 0 && (
+                  {/* DSM Auto-detect */}
+                  {solarDataLayers?.dsmUrl && segments.length === 0 && !autoSegmenting && (
                     <button
-                      onClick={goToStructure}
-                      className="mt-auto flex items-center justify-center gap-2 bg-green-600 hover:bg-green-500 text-white text-sm font-medium py-2.5 px-4 rounded-lg transition-colors shrink-0"
+                      onClick={runAutoSegment}
+                      className="flex items-center justify-center gap-2 bg-cyan-700 hover:bg-cyan-600 text-white text-xs font-semibold py-2.5 px-4 rounded-lg transition-colors"
                     >
-                      All done → Detect Structure <ChevronRight size={15} />
+                      <Zap size={13} /> Auto-detect roof planes from DSM
                     </button>
+                  )}
+                  {autoSegmentError && (
+                    <div className="rounded-lg border border-amber-600/40 bg-amber-900/30 px-3 py-2 text-xs text-amber-200">
+                      {autoSegmentError}
+                    </div>
+                  )}
+                  {segments.length > 0 && !autoSegmenting && (
+                    <>
+                      {autoSegmentRanRef.current && (
+                        <div className="rounded-lg bg-cyan-900/20 border border-cyan-700/40 px-3 py-2 text-xs text-cyan-300">
+                          {segments.length} roof plane{segments.length !== 1 ? 's' : ''} auto-detected · Adjust vertices if needed
+                        </div>
+                      )}
+                      <button
+                        onClick={goToStructure}
+                        className="mt-auto flex items-center justify-center gap-2 bg-green-600 hover:bg-green-500 text-white text-sm font-medium py-2.5 px-4 rounded-lg transition-colors shrink-0"
+                      >
+                        All done → Detect Structure <ChevronRight size={15} />
+                      </button>
+                    </>
                   )}
                 </div>
               )}
