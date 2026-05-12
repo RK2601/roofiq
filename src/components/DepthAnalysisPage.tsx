@@ -25,7 +25,7 @@ async function runDepthPro(imageDataUrl: string): Promise<DepthResult> {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       version: DEPTH_PRO_VERSION,
-      input: { image: imageDataUrl },
+      input: { image_path: imageDataUrl },
     }),
   });
 
