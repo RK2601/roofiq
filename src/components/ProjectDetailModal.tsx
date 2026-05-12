@@ -345,7 +345,7 @@ export default function ProjectDetailModal({
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto overscroll-y-contain [-webkit-overflow-scrolling:touch]">
-          <div className="mx-auto w-full max-w-6xl px-4 pb-8 sm:px-8">
+          <div className="mx-auto w-full max-w-6xl px-4 pb-4 sm:px-8">
           {loading ? (
             <div className="space-y-4 py-6">
               {[1, 2, 3].map(i => (

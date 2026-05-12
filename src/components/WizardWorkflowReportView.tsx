@@ -193,7 +193,7 @@ export default function WizardWorkflowReportView({
   const staticMapHref = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(report.address)}`;
 
   return (
-    <div className="space-y-6 pb-8">
+    <div className="space-y-4 pb-4">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between border-b border-slate-200 pb-4">
         <div className="min-w-0">
           <p className="text-xs font-semibold uppercase tracking-wide text-blue-600">Wizard workflow report</p>
@@ -335,18 +335,18 @@ export default function WizardWorkflowReportView({
       <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
         <h4 className="text-sm font-semibold text-slate-800 mb-2">Captured viewpoints</h4>
         <p className="text-[11px] text-slate-500 mb-3">Includes map captures stored with the workflow (where under size limits).</p>
-        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
-          {report.photos.map(photo => (
-            <div key={photo.id} className="rounded-lg border border-slate-100 overflow-hidden bg-slate-50">
-              <p className="text-[10px] font-semibold text-slate-600 px-2 py-1 truncate">{photo.label}</p>
-              {photo.captureImageDataUrl ? (
-                <img src={photo.captureImageDataUrl} alt={photo.label} className="w-full h-24 object-cover" />
-              ) : (
-                <div className="h-24 flex items-center justify-center text-[10px] text-slate-400 px-1 text-center">No image stored</div>
-              )}
-            </div>
-          ))}
-        </div>
+        {report.photos.filter(p => p.captureImageDataUrl).length === 0 ? (
+          <p className="text-xs text-slate-400 italic">No viewpoint captures stored with this workflow.</p>
+        ) : (
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
+            {report.photos.filter(p => p.captureImageDataUrl).map(photo => (
+              <div key={photo.id} className="rounded-lg border border-slate-100 overflow-hidden bg-slate-50">
+                <p className="text-[10px] font-semibold text-slate-600 px-2 py-1 truncate">{photo.label}</p>
+                <img src={photo.captureImageDataUrl!} alt={photo.label} className="w-full h-24 object-cover" />
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {finalAnalysis && (
@@ -382,28 +382,32 @@ export default function WizardWorkflowReportView({
       <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
         <h4 className="text-sm font-semibold text-slate-800 mb-2">Material quote preview</h4>
         <p className="text-[11px] text-slate-500 mb-3">Approximate line items from wizard totals. For a full quote builder, use the project sections flow.</p>
-        <div className="overflow-x-auto">
-          <div className="min-w-[560px]">
-            <div className="grid grid-cols-12 gap-2 text-[11px] font-semibold text-slate-500 border-b border-slate-200 pb-2">
-              <div className="col-span-5">Item</div>
-              <div className="col-span-2">Qty</div>
-              <div className="col-span-2">Unit</div>
-              <div className="col-span-3 text-right">Total</div>
-            </div>
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="border-b border-slate-200 text-[11px] font-semibold text-slate-500">
+              <th className="text-left pb-2 font-semibold">Item</th>
+              <th className="text-left pb-2 font-semibold">Qty</th>
+              <th className="text-left pb-2 font-semibold">Unit</th>
+              <th className="text-right pb-2 font-semibold">Total</th>
+            </tr>
+          </thead>
+          <tbody>
             {quoteLineItems.map(item => (
-              <div key={item.label} className="grid grid-cols-12 gap-2 text-xs text-slate-700 py-2 border-b border-slate-100">
-                <div className="col-span-5">{item.label}</div>
-                <div className="col-span-2">{item.qty}</div>
-                <div className="col-span-2">{item.unit}</div>
-                <div className="col-span-3 text-right font-semibold text-slate-900">{item.total}</div>
-              </div>
+              <tr key={item.label} className="border-b border-slate-100 text-slate-700">
+                <td className="py-2">{item.label}</td>
+                <td className="py-2">{item.qty}</td>
+                <td className="py-2">{item.unit}</td>
+                <td className="py-2 text-right font-semibold text-slate-900">{item.total}</td>
+              </tr>
             ))}
-            <div className="grid grid-cols-12 gap-2 text-sm font-semibold text-slate-900 pt-2">
-              <div className="col-span-9 text-right">Estimated total</div>
-              <div className="col-span-3 text-right">${quoteTotal.toLocaleString()}</div>
-            </div>
-          </div>
-        </div>
+          </tbody>
+          <tfoot>
+            <tr className="text-sm font-semibold text-slate-900">
+              <td colSpan={3} className="pt-2 text-right">Estimated total</td>
+              <td className="pt-2 text-right">${quoteTotal.toLocaleString()}</td>
+            </tr>
+          </tfoot>
+        </table>
         {onOpenQuoteBuilder &&
           (savedSectionCount > 0 ? (
             <button
