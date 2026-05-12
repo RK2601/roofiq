@@ -120,12 +120,11 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
   const [solarError, setSolarError] = useState<string | null>(null);
   const [roofStructure, setRoofStructure] = useState<RoofStructureAnalysis | null>(null);
   const [showRoofStructure, setShowRoofStructure] = useState(false);
-  // If arriving from the hub with no address yet, defer wizard open until user searches
-  const needsAddressFirst = startInWizardMode && !address.trim();
-  const [showWizard, setShowWizard] = useState(startInWizardMode && !needsAddressFirst);
+  const [showWizard, setShowWizard] = useState(startInWizardMode && !!address.trim());
   const [showSaveProjectModal, setShowSaveProjectModal] = useState(false);
   const [wizardAttach, setWizardAttach] = useState<WizardAttach>({ mode: 'inherit' });
-  const [openWizardAfterPropertySearch, setOpenWizardAfterPropertySearch] = useState(needsAddressFirst);
+  // When coming from hub with no address yet, defer wizard opening until address is searched
+  const [openWizardAfterPropertySearch, setOpenWizardAfterPropertySearch] = useState(startInWizardMode && !address.trim());
 
   const roofStructurePreview = useMemo(() => {
     const segments = solarData?.roofSegmentStats ?? [];

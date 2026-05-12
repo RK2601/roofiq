@@ -211,6 +211,11 @@ export default function App() {
             setStartInWizardMode(!!wizardMode);
             setStartInAutoSegmentMode(!!autoSegmentMode);
             setStartInAiSegmentMode(!!aiSegmentMode);
+            // Always reset address so user must search for a property fresh
+            if (wizardMode || autoSegmentMode || aiSegmentMode) {
+              setAddress('');
+              setCoordinates({ lat: 0, lng: 0 });
+            }
             setView(v);
           }} />
         </div>
