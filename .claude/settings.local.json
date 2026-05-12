@@ -25,7 +25,12 @@
       "Bash(npx vite *)",
       "Bash(cat /Users/rupesh/roofing-app/.claude/worktrees/affectionate-cray-f5bc7b/.env 2>/dev/null || cat /Users/rupesh/roofing-app/.env 2>/dev/null || echo \"No .env found\")",
       "Bash(cp /Users/rupesh/roofing-app/.env /Users/rupesh/roofing-app/.claude/worktrees/affectionate-cray-f5bc7b/.env *)",
-      "Bash(python3 -c \"import json,sys; logs=json.load\\(sys.stdin\\); texts=[l['text'] for l in logs if l.get\\('type'\\)=='text']; text=''.join\\(texts\\); lines=text.split\\('\\\\n'\\); errs=[l for l in lines if '[error]' in l and 'The above' not in l and 'Consider' not in l and 'Visit' not in l]; print\\('\\\\n'.join\\(errs[:20]\\)\\)\")"
+      "Bash(python3 -c \"import json,sys; logs=json.load\\(sys.stdin\\); texts=[l['text'] for l in logs if l.get\\('type'\\)=='text']; text=''.join\\(texts\\); lines=text.split\\('\\\\n'\\); errs=[l for l in lines if '[error]' in l and 'The above' not in l and 'Consider' not in l and 'Visit' not in l]; print\\('\\\\n'.join\\(errs[:20]\\)\\)\")",
+      "Bash(git stash *)",
+      "Bash(node -e \"const pkg = require\\('./package.json'\\); console.log\\('geotiff:', pkg.dependencies.geotiff\\)\")",
+      "Bash(git checkout *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)"
     ]
   }
 }

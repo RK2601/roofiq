@@ -15,6 +15,7 @@ import MarketingPage from './components/MarketingPage';
 import AnalysisHub from './components/AnalysisHub';
 import HoverMeasurePage from './components/HoverMeasurePage';
 import DepthAnalysisPage from './components/DepthAnalysisPage';
+import DepthPipelinePage from './components/DepthPipelinePage';
 import { initDb, isDbConfigured } from './utils/db';
 import { readMapsApiKey } from './utils/googleMapsKey';
 import { readAuthSession, writeAuthSession, clearAuthSession } from './utils/authSession';
@@ -48,6 +49,8 @@ export default function App() {
   const [pendingCoords, setPendingCoords] = useState<Coordinates>({ lat: 37.422, lng: -122.084 });
   const [dbBanner, setDbBanner] = useState<string | null>(null);
   const [startInWizardMode, setStartInWizardMode] = useState(false);
+  const [startInAutoSegmentMode, setStartInAutoSegmentMode] = useState(false);
+  const [startInAiSegmentMode, setStartInAiSegmentMode] = useState(false);
 
   useEffect(() => {
     setApiKey(readMapsApiKey());
@@ -82,6 +85,15 @@ export default function App() {
       }
     }
   }, [user, view]);
+
+  // Reset wizard/auto-segment/ai-segment mode flags when user navigates away from analysis
+  useEffect(() => {
+    if (view !== 'analysis') {
+      setStartInWizardMode(false);
+      setStartInAutoSegmentMode(false);
+      setStartInAiSegmentMode(false);
+    }
+  }, [view]);
 
   const handleAnalysisPropertySelect = useCallback((addr: string, coords: Coordinates) => {
     setAddress(addr);
@@ -179,7 +191,7 @@ export default function App() {
 
   /** Flex column + overflow-hidden on main so children can use flex-1 min-h-0 and scroll (mobile Safari). */
   const fullHeightMain =
-    view === 'analysis' || view === 'analysis-hub' || view === 'hover-measure' || view === 'depth-measure' ||
+    view === 'analysis' || view === 'analysis-hub' || view === 'hover-measure' || view === 'depth-measure' || view === 'depth-pipeline' ||
     view === 'marketing' || view === 'quote' || view === 'projects' || view === 'quotes-list';
 
   return (
@@ -194,8 +206,10 @@ export default function App() {
       {view === 'dashboard' && <DashboardHome onNewAnalysis={handleNewAnalysisFromPanel} />}
       {view === 'analysis-hub' && (
         <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-y-contain [-webkit-overflow-scrolling:touch]">
-          <AnalysisHub onNavigate={(v, wizardMode) => {
+          <AnalysisHub onNavigate={(v, wizardMode, autoSegmentMode, aiSegmentMode) => {
             setStartInWizardMode(!!wizardMode);
+            setStartInAutoSegmentMode(!!autoSegmentMode);
+            setStartInAiSegmentMode(!!aiSegmentMode);
             setView(v);
           }} />
         </div>
@@ -214,6 +228,11 @@ export default function App() {
           <DepthAnalysisPage onBack={() => setView('analysis-hub')} />
         </div>
       )}
+      {view === 'depth-pipeline' && (
+        <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-y-contain [-webkit-overflow-scrolling:touch]">
+          <DepthPipelinePage onBack={() => setView('analysis-hub')} />
+        </div>
+      )}
       {view === 'analysis' && (
         <AnalysisPage
           apiKey={apiKey}
@@ -221,7 +240,11 @@ export default function App() {
           coordinates={coordinates}
           onPropertySelect={handleAnalysisPropertySelect}
           onComplete={handleAnalysisComplete}
-          startInWizardMode={startInWizardMode}
+          startInWizardMode={startInWizardMode || startInAutoSegmentMode || startInAiSegmentMode}
+          fromAnalysisHub={startInWizardMode || startInAutoSegmentMode || startInAiSegmentMode}
+          startInAutoSegmentMode={startInAutoSegmentMode}
+          startInAiSegmentMode={startInAiSegmentMode}
+          onWizardProjectPersisted={setProjectId}
         />
       )}
       {view === 'quote' && (

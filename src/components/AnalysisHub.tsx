@@ -1,13 +1,15 @@
-import { Zap, Map, Camera, Cpu } from 'lucide-react';
+import { Zap, Map, Camera, Cpu, Layers, Sparkles, Box } from 'lucide-react';
 import { AppView } from '../types';
 
 interface AnalysisHubProps {
-  onNavigate: (view: AppView, wizardMode?: boolean) => void;
+  onNavigate: (view: AppView, wizardMode?: boolean, autoSegmentMode?: boolean, aiSegmentMode?: boolean) => void;
 }
 
 interface RouteCard {
   view: AppView;
   wizardMode?: boolean;
+  autoSegmentMode?: boolean;
+  aiSegmentMode?: boolean;
   icon: React.ReactNode;
   badge?: string;
   badgeColor?: string;
@@ -95,6 +97,64 @@ const ROUTES: RouteCard[] = [
     borderColor: 'border-emerald-200 hover:border-emerald-400',
     iconBg: 'bg-emerald-100 text-emerald-600',
   },
+  {
+    view: 'analysis',
+    wizardMode: true,
+    autoSegmentMode: true,
+    icon: <Layers size={28} />,
+    badge: 'Auto · DSM',
+    badgeColor: 'bg-cyan-100 text-cyan-700',
+    title: 'DSM Auto-Map',
+    subtitle: 'AI-free roof plane detection from elevation data',
+    features: [
+      'No manual drawing required',
+      'DBSCAN clusters pixels by slope & aspect',
+      'Each roof plane auto-detected as polygon',
+      'Uses Google Solar 0.1 m/pixel DSM raster',
+    ],
+    cta: 'Auto-detect Roof Planes',
+    gradient: 'from-cyan-50 to-sky-50',
+    borderColor: 'border-cyan-200 hover:border-cyan-400',
+    iconBg: 'bg-cyan-100 text-cyan-600',
+  },
+  {
+    view: 'analysis',
+    wizardMode: true,
+    aiSegmentMode: true,
+    icon: <Sparkles size={28} />,
+    badge: 'AI · Vision',
+    badgeColor: 'bg-rose-100 text-rose-700',
+    title: 'AI Visual Segment',
+    subtitle: 'DeepLabv3+-inspired segmentation from satellite imagery',
+    features: [
+      'Gemini vision reads the satellite image directly',
+      'Detects each roof plane by visual boundaries',
+      'Returns polygon outlines + pitch & facing per plane',
+      'Complements DSM — works on any roof type',
+    ],
+    cta: 'Segment with AI Vision',
+    gradient: 'from-rose-50 to-pink-50',
+    borderColor: 'border-rose-200 hover:border-rose-400',
+    iconBg: 'bg-rose-100 text-rose-600',
+  },
+  {
+    view: 'depth-pipeline',
+    icon: <Box size={28} />,
+    badge: 'Open3D · Railway',
+    badgeColor: 'bg-violet-100 text-violet-700',
+    title: '3D Depth Pipeline',
+    subtitle: 'Full depth map → point cloud → mesh → RANSAC segmentation',
+    features: [
+      'Depth Anything V2 via Replicate',
+      'Open3D Poisson mesh reconstruction',
+      'Iterative RANSAC roof plane detection',
+      'Per-plane pitch, facing & area output',
+    ],
+    cta: 'Run 3D Pipeline',
+    gradient: 'from-violet-50 to-purple-50',
+    borderColor: 'border-violet-200 hover:border-violet-400',
+    iconBg: 'bg-violet-100 text-violet-600',
+  },
 ];
 
 export default function AnalysisHub({ onNavigate }: AnalysisHubProps) {
@@ -112,7 +172,7 @@ export default function AnalysisHub({ onNavigate }: AnalysisHubProps) {
           {ROUTES.map((route, i) => (
             <button
               key={i}
-              onClick={() => onNavigate(route.view, route.wizardMode)}
+              onClick={() => onNavigate(route.view, route.wizardMode, route.autoSegmentMode, route.aiSegmentMode)}
               className={`text-left bg-gradient-to-br ${route.gradient} border-2 ${route.borderColor} rounded-2xl p-6 transition-all duration-200 hover:shadow-lg hover:-translate-y-0.5 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500`}
             >
               <div className="flex items-start gap-4 mb-4">
@@ -152,8 +212,8 @@ export default function AnalysisHub({ onNavigate }: AnalysisHubProps) {
         </div>
 
         <p className="text-center text-xs text-slate-400 mt-8">
-          Quick Analysis and Smart Roof Wizard require a Google Maps API key.
-          HOVER requires a HOVER API key. AI Depth requires a Replicate token.
+          Quick Analysis, Smart Roof Wizard, DSM Auto-Map and AI Visual Segment require Google Maps + Gemini API keys.
+          HOVER requires a HOVER API key. AI Depth &amp; 3D Pipeline require a Replicate token (server-side).
         </p>
       </div>
     </div>

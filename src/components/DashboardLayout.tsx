@@ -31,6 +31,7 @@ const PAGE_TITLES: Partial<Record<AppView, string>> = {
   analysis: 'Analysis',
   'hover-measure': 'HOVER Measurement',
   'depth-measure': 'AI Depth Analysis',
+  'depth-pipeline': '3D Depth Pipeline',
   projects: 'Projects',
   'quotes-list': 'Quotes',
   reports: 'Reports',

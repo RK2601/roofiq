@@ -15,6 +15,10 @@ export type AuthSessionSnapshot = {
 const SHELL_VIEWS: AppView[] = [
   'dashboard',
   'analysis',
+  'analysis-hub',
+  'hover-measure',
+  'depth-measure',
+  'depth-pipeline',
   'quote',
   'projects',
   'quotes-list',
