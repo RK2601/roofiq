@@ -15,7 +15,6 @@ import MarketingPage from './components/MarketingPage';
 import AnalysisHub from './components/AnalysisHub';
 import HoverMeasurePage from './components/HoverMeasurePage';
 import DepthAnalysisPage from './components/DepthAnalysisPage';
-import DepthPipelinePage from './components/DepthPipelinePage';
 import AccuMeasurePage from './components/AccuMeasurePage';
 import { initDb, isDbConfigured } from './utils/db';
 import { readMapsApiKey } from './utils/googleMapsKey';
@@ -190,7 +189,7 @@ export default function App() {
 
   /** Flex column + overflow-hidden on main so children can use flex-1 min-h-0 and scroll (mobile Safari). */
   const fullHeightMain =
-    view === 'analysis' || view === 'analysis-hub' || view === 'hover-measure' || view === 'depth-measure' || view === 'depth-pipeline' ||
+    view === 'analysis' || view === 'analysis-hub' || view === 'hover-measure' || view === 'depth-measure' ||
     view === 'accu-measure' || view === 'marketing' || view === 'quote' || view === 'projects' || view === 'quotes-list';
 
   return (
@@ -229,11 +228,6 @@ export default function App() {
       {view === 'depth-measure' && (
         <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-y-contain [-webkit-overflow-scrolling:touch]">
           <DepthAnalysisPage onBack={() => setView('analysis-hub')} />
-        </div>
-      )}
-      {view === 'depth-pipeline' && (
-        <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-y-contain [-webkit-overflow-scrolling:touch]">
-          <DepthPipelinePage onBack={() => setView('analysis-hub')} />
         </div>
       )}
       {view === 'accu-measure' && (

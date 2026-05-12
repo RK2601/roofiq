@@ -18,7 +18,6 @@ const SHELL_VIEWS: AppView[] = [
   'analysis-hub',
   'hover-measure',
   'depth-measure',
-  'depth-pipeline',
   'quote',
   'projects',
   'quotes-list',

@@ -11,6 +11,7 @@ import {
   Megaphone,
   Menu,
   X,
+  Layers,
 } from 'lucide-react';
 import { AppView, User } from '../types';
 
@@ -31,7 +32,7 @@ const PAGE_TITLES: Partial<Record<AppView, string>> = {
   analysis: 'Analysis',
   'hover-measure': 'HOVER Measurement',
   'depth-measure': 'AI Depth Analysis',
-  'depth-pipeline': '3D Depth Pipeline',
+  'accu-measure': 'AccuMeasure',
   projects: 'Projects',
   'quotes-list': 'Quotes',
   reports: 'Reports',
@@ -41,12 +42,13 @@ const PAGE_TITLES: Partial<Record<AppView, string>> = {
 };
 
 const MAIN_NAV: Array<{ view: AppView; label: string; icon: React.ReactNode }> = [
-  { view: 'dashboard',   label: 'Dashboard',   icon: <LayoutDashboard size={18} /> },
+  { view: 'dashboard',    label: 'Dashboard',    icon: <LayoutDashboard size={18} /> },
+  { view: 'accu-measure', label: 'AccuMeasure',  icon: <Layers size={18} /> },
   { view: 'analysis-hub', label: 'New Analysis', icon: <MapPin size={18} /> },
-  { view: 'projects',    label: 'Projects',     icon: <FolderOpen size={18} /> },
-  { view: 'quotes-list', label: 'Quotes',       icon: <FileText size={18} /> },
-  { view: 'marketing',   label: 'Marketing',    icon: <Megaphone size={18} /> },
-  { view: 'reports',     label: 'Reports',      icon: <BarChart3 size={18} /> },
+  { view: 'projects',     label: 'Projects',     icon: <FolderOpen size={18} /> },
+  { view: 'quotes-list',  label: 'Quotes',       icon: <FileText size={18} /> },
+  { view: 'marketing',    label: 'Marketing',    icon: <Megaphone size={18} /> },
+  { view: 'reports',      label: 'Reports',      icon: <BarChart3 size={18} /> },
 ];
 
 const SYSTEM_NAV: Array<{ view: AppView; label: string; icon: React.ReactNode }> = [
