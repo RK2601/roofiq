@@ -345,7 +345,7 @@ export default function ProjectDetailModal({
           </button>
         </div>
 
-        <div className="overflow-y-auto overscroll-y-contain [-webkit-overflow-scrolling:touch] bg-slate-50">
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-y-contain [-webkit-overflow-scrolling:touch] bg-slate-50">
           <div className="mx-auto w-full max-w-6xl px-4 pb-4 sm:px-8 bg-slate-50">
           {loading ? (
             <div className="space-y-4 py-6">
