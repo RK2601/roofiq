@@ -1,3 +1,26 @@
+import type { GenerateContentResult } from '@google/generative-ai';
+
+/**
+ * Read model text, or throw with reasons when `response.text()` fails (blocked,
+ * non-STOP finish, empty candidates). Keeps errors debuggable vs a bare SDK throw.
+ */
+export function readGeminiResponseText(result: GenerateContentResult): string {
+  const res = result.response;
+  try {
+    return res.text();
+  } catch (first) {
+    const pf = res.promptFeedback;
+    if (pf?.blockReason) {
+      throw new Error(`GEMINI_BLOCKED:${pf.blockReason}`);
+    }
+    const c0 = res.candidates?.[0];
+    if (c0?.finishReason && c0.finishReason !== 'STOP') {
+      throw new Error(`GEMINI_FINISH:${c0.finishReason}`);
+    }
+    throw first instanceof Error ? first : new Error(String(first));
+  }
+}
+
 /** Detect Gemini / Google quota or rate-limit responses. */
 export function isGemini429OrQuotaError(e: unknown): boolean {
   const msg = e instanceof Error ? e.message : String(e);

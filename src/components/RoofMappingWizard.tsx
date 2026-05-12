@@ -72,6 +72,38 @@ import { isDbConfigured, saveWizardWorkflowReport, type WizardWorkflowReportPayl
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 
+function formatAiSegmentUserMessage(msg: string): string {
+  if (msg.includes('NO_GEMINI_KEY')) {
+    return 'No Gemini API key found. Add your key in Settings → API Keys.';
+  }
+  if (msg.includes('NO_IMAGE')) {
+    return 'Satellite image not yet loaded — please wait a moment and try again.';
+  }
+  if (msg.startsWith('GEMINI_BLOCKED')) {
+    return 'Gemini blocked analysis of this image (policy). Try DSM Auto-Map or draw segments manually.';
+  }
+  if (msg.startsWith('GEMINI_FINISH')) {
+    return 'Gemini stopped before returning polygons (safety or max length). Try again or use DSM / manual draw.';
+  }
+  if (/401|403|PERMISSION_DENIED|API key not valid|API_KEY_INVALID/i.test(msg)) {
+    return 'Gemini rejected the API key. Check Settings → API Keys and Google AI Studio billing/access.';
+  }
+  if (/timeout:/i.test(msg)) {
+    return 'Segmentation timed out. Check your connection and try again.';
+  }
+  if (/NO_VALID_PLANES|EMPTY_RESPONSE|Unexpected token|JSON\.parse/i.test(msg)) {
+    return 'The model response could not be parsed into roof planes. Try again, or use DSM Auto-Map / draw manually.';
+  }
+  const stripped = msg.replace(/^AI segmentation failed:\s*/i, '').trim();
+  if (stripped.length > 0 && stripped.length <= 220) {
+    return `AI segmentation failed: ${stripped}`;
+  }
+  if (stripped.length > 220) {
+    return `AI segmentation failed: ${stripped.slice(0, 200)}… Try DSM Auto-Map or draw manually.`;
+  }
+  return 'AI segmentation failed. Please draw segments manually or use DSM Auto-Map.';
+}
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type Phase = 1 | 2 | 3;
@@ -974,13 +1006,7 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
       setStep1Sub('structure');
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      setAiSegmentError(
-        msg.includes('NO_GEMINI_KEY')
-          ? 'No Gemini API key found. Add your key in Settings → API Keys.'
-          : msg.includes('NO_IMAGE')
-          ? 'Satellite image not yet loaded — please wait a moment and try again.'
-          : 'AI segmentation failed. Please draw segments manually or use DSM Auto-Map.'
-      );
+      setAiSegmentError(formatAiSegmentUserMessage(msg));
     } finally {
       setAiSegmenting(false);
     }

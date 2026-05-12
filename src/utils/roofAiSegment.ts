@@ -28,6 +28,7 @@ import {
 } from '@google/generative-ai';
 import type { Part, Schema } from '@google/generative-ai';
 import { readGeminiApiKey } from './googleAiKey';
+import { isGemini429OrQuotaError, readGeminiResponseText, withGemini429Retries } from './gemini429';
 
 // ─── Interfaces ───────────────────────────────────────────────────────────────
 
@@ -65,8 +66,8 @@ interface GeminiSegmentResponse {
 const GEMINI_MODEL_IDS = [
   'gemini-2.5-flash',
   'gemini-flash-latest',
-  'gemini-1.5-flash',
   'gemini-2.0-flash',
+  'gemini-1.5-flash',
 ] as const;
 
 const SAFETY_RELAXED = [
@@ -117,8 +118,9 @@ For each plane, provide its boundary as a polygon using NORMALIZED coordinates:
   - x = 0.0 means left edge, x = 1.0 means right edge
   - y = 0.0 means top edge, y = 1.0 means bottom edge
   - Clockwise vertex order
+  - All x and y values MUST stay within 0.0 and 1.0 inclusive (clip if needed).
 
-Return 3–8 planes maximum. If only one plane is visible (flat roof), return one plane.
+Return 3–8 planes maximum. If only one plane is visible (flat roof), return exactly one plane.
 
 Rules:
   - Only the MAIN building's roof. Ignore neighboring buildings, driveways, trees, ground.
@@ -128,7 +130,9 @@ Rules:
   - "facing" must be one of: N, NE, E, SE, S, SW, W, NW, or FLAT
   - "pitchEstimate" must be in X/12 format e.g. "6/12", "4/12", "0/12"
   - "confidence" is 0.0–1.0: how confident you are this is a real distinct roof plane
-  - "label" should be descriptive: "main south slope", "north back slope", "left dormer", "garage flat", etc.`;
+  - "label" should be descriptive: "main south slope", "north back slope", "left dormer", "garage flat", etc.
+
+Return a single JSON object with key "planes" (array) only. No markdown.`;
 
 // ─── Coordinate Conversion ─────────────────────────────────────────────────────
 
@@ -165,6 +169,76 @@ function normToLatLng(
   };
 }
 
+function clamp01(n: number): number {
+  if (!Number.isFinite(n)) return NaN;
+  return Math.max(0, Math.min(1, n));
+}
+
+function num(v: unknown): number {
+  if (typeof v === 'number' && Number.isFinite(v)) return v;
+  if (typeof v === 'string') {
+    const p = parseFloat(v);
+    return Number.isFinite(p) ? p : NaN;
+  }
+  return NaN;
+}
+
+function structuredOutputUnsupported(msg: string): boolean {
+  return /responseSchema|responseMimeType|JSON schema|invalid argument|\b400\b|Unsupported|JSON mode|schema/i.test(msg);
+}
+
+function isModelOrEndpointUnavailable(msg: string): boolean {
+  return /\[404\b|\b404\b|not found|NOT_FOUND|UNIMPLEMENTED|invalid model|Model .* not found|does not exist|is not supported for generateContent/i.test(
+    msg,
+  );
+}
+
+function isGeminiAuthError(msg: string): boolean {
+  return /API[_ ]?key|API_KEY|403|401|permission|PERMISSION_DENIED|API key not valid/i.test(msg);
+}
+
+function planesFromParsed(
+  parsed: GeminiSegmentResponse,
+  centerLat: number,
+  centerLng: number,
+  zoom: number,
+  imageSize: number,
+): AiSegmentedPlane[] {
+  const planes: AiSegmentedPlane[] = [];
+  if (!parsed.planes || !Array.isArray(parsed.planes)) return planes;
+
+  for (const plane of parsed.planes) {
+    if (!plane.vertices || plane.vertices.length < 3) continue;
+    const clamped = plane.vertices
+      .map(v => {
+        const vx = typeof (v as { x?: unknown }).x !== 'undefined' ? num((v as { x: unknown }).x) : NaN;
+        const vy = typeof (v as { y?: unknown }).y !== 'undefined' ? num((v as { y: unknown }).y) : NaN;
+        return { x: clamp01(vx), y: clamp01(vy) };
+      })
+      .filter(v => Number.isFinite(v.x) && Number.isFinite(v.y));
+
+    if (clamped.length < 3) continue;
+
+    const path = clamped.map(v =>
+      normToLatLng(v.x, v.y, centerLat, centerLng, zoom, imageSize),
+    );
+
+    const confRaw = num(plane.confidence);
+    const confidence = Number.isFinite(confRaw)
+      ? Math.max(0, Math.min(1, confRaw))
+      : 0.5;
+
+    planes.push({
+      path,
+      label: plane.label || `Plane ${planes.length + 1}`,
+      facingDirection: String(plane.facing || 'FLAT').toUpperCase(),
+      pitchEstimate: plane.pitchEstimate || '0/12',
+      confidence,
+    });
+  }
+  return planes;
+}
+
 // ─── Main Export ──────────────────────────────────────────────────────────────
 
 /**
@@ -199,67 +273,64 @@ export async function segmentRoofFromSatellite(
 
   let lastError = 'ALL_MODELS_FAILED';
 
-  for (const modelId of GEMINI_MODEL_IDS) {
-    try {
-      const model = genAI.getGenerativeModel({
-        model: modelId,
-        generationConfig: {
-          responseMimeType: 'application/json',
-          responseSchema: AI_SEGMENT_SCHEMA,
-          temperature: 0.15,
-          maxOutputTokens: 3000,
-        },
-        safetySettings: SAFETY_RELAXED,
-      });
+  modelLoop: for (const modelId of GEMINI_MODEL_IDS) {
+    for (const mode of ['structured', 'plain'] as const) {
+      try {
+        const generationConfig =
+          mode === 'structured'
+            ? {
+                responseMimeType: 'application/json' as const,
+                responseSchema: AI_SEGMENT_SCHEMA,
+                temperature: 0.15,
+                maxOutputTokens: 8192,
+              }
+            : {
+                responseMimeType: 'application/json' as const,
+                temperature: 0.15,
+                maxOutputTokens: 8192,
+              };
 
-      const result = await Promise.race([
-        model.generateContent(parts),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error(`timeout:${modelId}`)), 35_000)
-        ),
-      ]);
-
-      const text = result.response.text();
-      const cleaned = text.replace(/```json\n?/gi, '').replace(/```\n?/g, '').trim();
-      const parsed: GeminiSegmentResponse = JSON.parse(cleaned);
-
-      if (!parsed.planes || !Array.isArray(parsed.planes) || parsed.planes.length === 0) {
-        lastError = 'EMPTY_RESPONSE';
-        continue;
-      }
-
-      // Convert normalized vertices → lat/lng paths
-      const planes: AiSegmentedPlane[] = [];
-      for (const plane of parsed.planes) {
-        if (!plane.vertices || plane.vertices.length < 3) continue;
-        // Filter to valid coords
-        const validVerts = plane.vertices.filter(
-          v => typeof v.x === 'number' && typeof v.y === 'number' &&
-               v.x >= 0 && v.x <= 1 && v.y >= 0 && v.y <= 1
-        );
-        if (validVerts.length < 3) continue;
-
-        const path = validVerts.map(v =>
-          normToLatLng(v.x, v.y, centerLat, centerLng, zoom, imageSize)
-        );
-
-        planes.push({
-          path,
-          label: plane.label || `Plane ${planes.length + 1}`,
-          facingDirection: (plane.facing || 'FLAT').toUpperCase(),
-          pitchEstimate: plane.pitchEstimate || '0/12',
-          confidence: Math.max(0, Math.min(1, plane.confidence ?? 0.5)),
+        const model = genAI.getGenerativeModel({
+          model: modelId,
+          generationConfig,
+          safetySettings: SAFETY_RELAXED,
         });
-      }
 
-      if (planes.length === 0) {
+        const result = await Promise.race([
+          withGemini429Retries(() => model.generateContent(parts)),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error(`timeout:${modelId}`)), 60_000),
+          ),
+        ]);
+
+        const text = readGeminiResponseText(result);
+        const cleaned = text.replace(/```json\n?/gi, '').replace(/```\n?/g, '').trim();
+        const parsed: GeminiSegmentResponse = JSON.parse(cleaned);
+
+        const planes = planesFromParsed(parsed, centerLat, centerLng, zoom, imageSize);
+        if (planes.length > 0) return planes;
+
         lastError = 'NO_VALID_PLANES';
-        continue;
-      }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        lastError = msg.slice(0, 320);
 
-      return planes;
-    } catch (err) {
-      lastError = err instanceof Error ? err.message.slice(0, 200) : String(err);
+        if (msg.startsWith('GEMINI_BLOCKED') || msg.startsWith('GEMINI_FINISH')) {
+          throw err;
+        }
+        if (isGeminiAuthError(msg)) {
+          throw new Error('NO_GEMINI_KEY');
+        }
+        if (mode === 'structured' && structuredOutputUnsupported(msg)) {
+          continue;
+        }
+        if (isModelOrEndpointUnavailable(msg)) {
+          continue modelLoop;
+        }
+        if (isGemini429OrQuotaError(err)) {
+          continue;
+        }
+      }
     }
   }
 
