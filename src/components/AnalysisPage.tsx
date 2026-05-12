@@ -72,9 +72,17 @@ interface AnalysisPageProps {
   onComplete: (sections: Omit<RoofSection, 'polygon'>[], projectId: string | null) => void;
   /** When true, the Smart Roof Mapping Wizard opens immediately on mount. */
   startInWizardMode?: boolean;
+  /** After wizard workflow saves; parent keeps projectId in sync. */
+  onWizardProjectPersisted?: (projectId: string) => void;
+  /** True when arriving from the New Analysis hub via the wizard card. */
+  fromAnalysisHub?: boolean;
+  /** When true, wizard opens in DSM auto-segmentation mode. */
+  startInAutoSegmentMode?: boolean;
+  /** When true, wizard opens in AI visual segmentation mode (Gemini vision). */
+  startInAiSegmentMode?: boolean;
 }
 
-export default function AnalysisPage({ apiKey, address, coordinates, onPropertySelect, onComplete, startInWizardMode = false }: AnalysisPageProps) {
+export default function AnalysisPage({ apiKey, address, coordinates, onPropertySelect, onComplete, startInWizardMode = false, onWizardProjectPersisted: _onWizardProjectPersisted, fromAnalysisHub: _fromAnalysisHub, startInAutoSegmentMode: _startInAutoSegmentMode, startInAiSegmentMode: _startInAiSegmentMode }: AnalysisPageProps) {
   const mapRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<google.maps.Map | null>(null);
   const drawingManagerRef = useRef<google.maps.drawing.DrawingManager | null>(null);
