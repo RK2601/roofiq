@@ -51,6 +51,7 @@ import {
 import type { Coordinates } from '../types';
 import type { SolarBuildingInsights, SolarDataLayersResponse } from '../utils/solar';
 import { analyzeDsmForSegments, autoSegmentRoofPlanes, pitchDegToRatio, type DsmAnalysisResult } from '../utils/roofDsm';
+import { analyzeSolarSegments, type RoofStructureAnalysis } from '../utils/roofStructure';
 import { segmentRoofFromSatellite } from '../utils/roofAiSegment';
 import { runPhotoDepthAnalysis, consensusDepthPitch, type PhotoDepthResult } from '../utils/roofPhotoDepth';
 import {
@@ -1688,6 +1689,17 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
               : null,
           })),
           finalAnalysis,
+          solarStructure: (() => {
+            if (!solarData?.roofSegmentStats?.length) return null;
+            try {
+              return analyzeSolarSegments(solarData.roofSegmentStats, solarData.center, {
+                imageryQuality: solarData.imageryQuality,
+                hasDsm: !!solarDataLayers?.dsmUrl,
+              });
+            } catch {
+              return null;
+            }
+          })(),
           satelliteSnapshot: (() => {
             const sat = satelliteImageRef.current;
             if (!sat?.data) return null;

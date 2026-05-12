@@ -107,6 +107,39 @@ function parseFinal(s: unknown): CombinedRoofAnalysis | null {
   return o;
 }
 
+interface SolarFacet {
+  index: number;
+  pitchLabel: string;
+  facingLabel: string;
+  actualAreaSqFt: number;
+  groundAreaSqFt: number;
+  placement?: { x: number; y: number; w: number; h: number };
+}
+interface SolarMeasurements {
+  facetCount: number;
+  predominantPitch: string;
+  totalRoofAreaSqFt: number;
+  totalGroundAreaSqFt: number;
+  totalRidgeFt: number;
+  totalHipFt: number;
+  totalValleyFt: number;
+  totalEaveFt: number;
+  totalRakeFt: number;
+}
+interface SolarStructure {
+  facets: SolarFacet[];
+  measurements: SolarMeasurements;
+  confidenceBand?: string;
+  svg?: { viewBox: string; width: number; height: number };
+}
+
+function parseSolarStructure(s: unknown): SolarStructure | null {
+  if (!s || typeof s !== 'object') return null;
+  const o = s as SolarStructure;
+  if (!Array.isArray(o.facets) || !o.measurements) return null;
+  return o;
+}
+
 interface Props {
   report: WizardWorkflowReportPayload;
   /** Saved `roof_sections` count for this project (quote builder needs at least one). */
@@ -467,6 +500,129 @@ export default function WizardWorkflowReportView({
           </div>
         </div>
       )}
+
+      {/* ── Google Solar API Structure Analysis ── */}
+      {(() => {
+        const solar = parseSolarStructure(report.solarStructure);
+        if (!solar) return null;
+        const m = solar.measurements;
+        const FACET_COLORS = ['#ef4444','#f97316','#eab308','#22c55e','#3b82f6','#8b5cf6','#ec4899','#14b8a6','#f59e0b','#6366f1','#10b981','#f43f5e'];
+        // Compute inline SVG diagram bounds from placement data
+        const placedFacets = solar.facets.filter(f => f.placement);
+        const svgW = 800, svgH = 320, pad = 16;
+        let maxW = 1, maxH = 1;
+        if (placedFacets.length > 0) {
+          maxW = Math.max(...placedFacets.map(f => (f.placement!.x + f.placement!.w)));
+          maxH = Math.max(...placedFacets.map(f => (f.placement!.y + f.placement!.h)));
+        }
+        const scaleX = maxW > 0 ? (svgW - pad * 2) / maxW : 1;
+        const scaleY = maxH > 0 ? (svgH - pad * 2) / maxH : 1;
+        const scale = Math.min(scaleX, scaleY);
+        return (
+          <div className="rounded-xl border border-sky-200 bg-white p-4 shadow-sm">
+            <div className="flex items-start justify-between mb-1">
+              <div>
+                <h4 className="text-sm font-semibold text-slate-800 flex items-center gap-1.5">
+                  Google Solar API — Roof Structure Analysis
+                  {solar.confidenceBand && (
+                    <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${
+                      solar.confidenceBand === 'high' ? 'bg-green-100 text-green-700'
+                      : solar.confidenceBand === 'medium' ? 'bg-amber-100 text-amber-700'
+                      : 'bg-red-100 text-red-700'
+                    }`}>{solar.confidenceBand} confidence</span>
+                  )}
+                </h4>
+                <p className="text-[11px] text-slate-500 mt-0.5">
+                  Automatically detected from 0.1 m/pixel Solar imagery — {m.facetCount} roof planes identified
+                </p>
+              </div>
+            </div>
+
+            {/* Measurements summary */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-4 mt-3">
+              {[
+                { label: 'Total roof area', value: `${Math.round(m.totalRoofAreaSqFt).toLocaleString()} sq ft` },
+                { label: 'Ground area', value: `${Math.round(m.totalGroundAreaSqFt).toLocaleString()} sq ft` },
+                { label: 'Predominant pitch', value: m.predominantPitch },
+                { label: 'Roof planes', value: String(m.facetCount) },
+              ].map(s => (
+                <div key={s.label} className="rounded-lg bg-sky-50 border border-sky-100 px-3 py-2">
+                  <p className="text-[10px] text-slate-500 uppercase tracking-wide">{s.label}</p>
+                  <p className="text-sm font-bold text-slate-800 mt-0.5">{s.value}</p>
+                </div>
+              ))}
+            </div>
+
+            {/* Edge totals */}
+            <div className="flex flex-wrap gap-3 text-xs text-slate-600 mb-4">
+              {m.totalRidgeFt > 0 && <span className="flex items-center gap-1"><span className="w-4 border-t-2 border-red-500 inline-block" />Ridge {Math.round(m.totalRidgeFt)} ft</span>}
+              {m.totalHipFt > 0 && <span className="flex items-center gap-1"><span className="w-4 border-t-2 border-orange-500 inline-block" />Hip {Math.round(m.totalHipFt)} ft</span>}
+              {m.totalValleyFt > 0 && <span className="flex items-center gap-1"><span className="w-4 border-t-2 border-blue-500 inline-block" />Valley {Math.round(m.totalValleyFt)} ft</span>}
+              {m.totalEaveFt > 0 && <span className="flex items-center gap-1"><span className="w-4 border-t-2 border-green-500 inline-block" />Eave {Math.round(m.totalEaveFt)} ft</span>}
+              {m.totalRakeFt > 0 && <span className="flex items-center gap-1"><span className="w-4 border-t-2 border-purple-500 inline-block" />Rake {Math.round(m.totalRakeFt)} ft</span>}
+            </div>
+
+            {/* Inline unfolded diagram */}
+            {placedFacets.length > 0 && (
+              <div className="overflow-x-auto mb-4">
+                <svg viewBox={`0 0 ${svgW} ${svgH}`} className="w-full h-auto rounded-lg border border-slate-200 bg-slate-50 max-h-[360px]">
+                  {placedFacets.map((f, i) => {
+                    const p = f.placement!;
+                    const x = pad + p.x * scale;
+                    const y = pad + p.y * scale;
+                    const w = Math.max(4, p.w * scale);
+                    const h = Math.max(4, p.h * scale);
+                    const cx = x + w / 2;
+                    const cy = y + h / 2;
+                    const color = FACET_COLORS[i % FACET_COLORS.length];
+                    return (
+                      <g key={f.index}>
+                        <rect x={x} y={y} width={w} height={h} fill={`${color}22`} stroke={color} strokeWidth={1.5} rx={3} />
+                        <text x={cx} y={cy - 6} textAnchor="middle" fontSize="11" fontWeight="700" fill="#0f172a">{f.pitchLabel} · {f.facingLabel}</text>
+                        <text x={cx} y={cy + 8} textAnchor="middle" fontSize="10" fill="#475569">{Math.round(f.actualAreaSqFt).toLocaleString()} sq ft</text>
+                      </g>
+                    );
+                  })}
+                </svg>
+              </div>
+            )}
+
+            {/* Facets table */}
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="bg-sky-50 border-b border-sky-100">
+                  <th className="text-left px-3 py-2 font-semibold text-slate-600">#</th>
+                  <th className="text-left px-3 py-2 font-semibold text-slate-600">Pitch</th>
+                  <th className="text-left px-3 py-2 font-semibold text-slate-600">Facing</th>
+                  <th className="text-right px-3 py-2 font-semibold text-slate-600">Roof Area</th>
+                  <th className="text-right px-3 py-2 font-semibold text-slate-600">Ground Area</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {solar.facets.map((f, i) => (
+                  <tr key={f.index} className="hover:bg-sky-50/50">
+                    <td className="px-3 py-2">
+                      <span className="inline-block w-2.5 h-2.5 rounded-full mr-1.5" style={{ backgroundColor: FACET_COLORS[i % FACET_COLORS.length] }} />
+                      {i + 1}
+                    </td>
+                    <td className="px-3 py-2 font-medium text-slate-700">{f.pitchLabel}</td>
+                    <td className="px-3 py-2 text-slate-600">{f.facingLabel}</td>
+                    <td className="px-3 py-2 text-right text-slate-700">{Math.round(f.actualAreaSqFt).toLocaleString()} sq ft</td>
+                    <td className="px-3 py-2 text-right text-slate-500">{Math.round(f.groundAreaSqFt).toLocaleString()} sq ft</td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr className="bg-sky-50 border-t border-sky-200 font-semibold">
+                  <td colSpan={3} className="px-3 py-2 text-slate-700">Total</td>
+                  <td className="px-3 py-2 text-right text-slate-800">{Math.round(m.totalRoofAreaSqFt).toLocaleString()} sq ft</td>
+                  <td className="px-3 py-2 text-right text-slate-600">{Math.round(m.totalGroundAreaSqFt).toLocaleString()} sq ft</td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        );
+      })()}
 
       {/* ── Multi-Angle Photo Analysis ── */}
       {report.photos.some(p => p.status === 'done') && (

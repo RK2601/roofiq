@@ -187,6 +187,8 @@ export interface WizardWorkflowReportPayload {
     notes?: string | null;
   }>;
   finalAnalysis: unknown | null;
+  /** Google Solar API-derived roof structure analysis (facets, measurements, edge topology) */
+  solarStructure?: unknown | null;
   /** Base64 data-URL of the satellite map view — saved as project snapshot_url */
   satelliteSnapshot?: string | null;
   updatedAtIso: string;
