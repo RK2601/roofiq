@@ -289,10 +289,13 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
       if (cancelled || !mapRef.current) return;
       try {
 
+      // If no address has been selected yet, coordinates are (0,0) — show a
+      // roadmap world-view so the user sees a normal map, not broken satellite tiles.
+      const hasAddress = !!(address.trim()) && (coordinates.lat !== 0 || coordinates.lng !== 0);
       const map = new google.maps.Map(mapRef.current, {
-        center: coordinates,
-        zoom: 20,
-        mapTypeId: 'satellite',
+        center: hasAddress ? coordinates : { lat: 39.5, lng: -98.35 }, // US center
+        zoom: hasAddress ? 20 : 4,
+        mapTypeId: hasAddress ? 'satellite' : 'roadmap',
         tilt: 0,
         mapTypeControl: false,
         streetViewControl: false,
@@ -305,20 +308,22 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
 
       mapInstanceRef.current = map;
 
-      // Marker at address
-      new google.maps.Marker({
-        position: coordinates,
-        map,
-        icon: {
-          path: google.maps.SymbolPath.CIRCLE,
-          scale: 8,
-          fillColor: '#f97316',
-          fillOpacity: 1,
-          strokeColor: '#fff',
-          strokeWeight: 2,
-        },
-        title: address,
-      });
+      // Only place the marker when we actually have a real address
+      if (hasAddress) {
+        new google.maps.Marker({
+          position: coordinates,
+          map,
+          icon: {
+            path: google.maps.SymbolPath.CIRCLE,
+            scale: 8,
+            fillColor: '#f97316',
+            fillOpacity: 1,
+            strokeColor: '#fff',
+            strokeWeight: 2,
+          },
+          title: address,
+        });
+      }
 
       const drawingManager = new google.maps.drawing.DrawingManager({
         drawingMode: null,
@@ -393,6 +398,7 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
   // Auto-fetch Solar building insights whenever coordinates change
   useEffect(() => {
     if (!apiKey) return;
+    if (coordinates.lat === 0 && coordinates.lng === 0) return; // no real address yet
     setSolarStatus('loading');
     setSolarData(null);
     setSolarDataLayers(null);
