@@ -98,9 +98,10 @@ function snapAiFromRows(rows: Snapshot[]): Record<string, SnapAI> {
 
 const SHELL_LAYER =
   'absolute inset-0 z-10 flex min-h-0 flex-col overflow-hidden bg-white shadow-xl ring-1 ring-slate-200/60 motion-safe:animate-fade-in';
-/** Fixed below dashboard header, to the right of the lg sidebar (w-64). */
+/** Fixed below dashboard header, to the right of the lg sidebar (w-64).
+ *  Uses max-h instead of bottom-0 so short content doesn't leave blank space. */
 const SHELL_COLUMN =
-  'fixed bottom-0 right-0 left-0 top-[max(3.25rem,env(safe-area-inset-top,0px))] z-[60] flex min-h-0 flex-col overflow-hidden bg-white shadow-xl ring-1 ring-slate-200/60 motion-safe:animate-fade-in sm:top-16 lg:left-64';
+  'fixed right-0 left-0 top-[max(3.25rem,env(safe-area-inset-top,0px))] z-[60] flex flex-col overflow-hidden bg-white shadow-xl ring-1 ring-slate-200/60 motion-safe:animate-fade-in sm:top-16 lg:left-64 max-h-[calc(100vh-max(3.25rem,env(safe-area-inset-top,0px)))] sm:max-h-[calc(100vh-4rem)]';
 
 export default function ProjectDetailModal({
   projectId,
@@ -344,7 +345,7 @@ export default function ProjectDetailModal({
           </button>
         </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto overscroll-y-contain [-webkit-overflow-scrolling:touch] bg-slate-50">
+        <div className="overflow-y-auto overscroll-y-contain [-webkit-overflow-scrolling:touch] bg-slate-50">
           <div className="mx-auto w-full max-w-6xl px-4 pb-4 sm:px-8 bg-slate-50">
           {loading ? (
             <div className="space-y-4 py-6">
