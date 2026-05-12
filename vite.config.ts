@@ -156,6 +156,68 @@ function solarProxyDevPlugin(): Plugin {
   }
 }
 
+/** Dev: same-origin proxy for Replicate API so AI Depth Analysis works with `npm run dev` + `.env`. */
+function replicateProxyDevPlugin(): Plugin {
+  return {
+    name: 'roofiq-proxy-replicate',
+    configureServer(server) {
+      server.middlewares.use('/api/proxy-replicate', async (req, res, next) => {
+        res.setHeader('Access-Control-Allow-Origin', '*')
+        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+        if (req.method === 'OPTIONS') {
+          res.statusCode = 204
+          return res.end()
+        }
+        if (req.method !== 'GET' && req.method !== 'POST') return next()
+
+        const file = loadDotEnvFiles()
+        const apiKey = (
+          (process.env.REPLICATE_API_TOKEN || '').trim() ||
+          (file.REPLICATE_API_TOKEN || '').trim()
+        )
+        if (!apiKey) {
+          res.statusCode = 503
+          return res.end('REPLICATE_API_TOKEN not configured in environment')
+        }
+
+        try {
+          const host = req.headers.host || 'localhost'
+          const pathParam = new URL(req.url || '', `http://${host}`).searchParams.get('path') || ''
+          const upstreamUrl = `https://api.replicate.com/v1/${pathParam.replace(/^\//, '')}`
+
+          const chunks: Buffer[] = []
+          req.on('data', (c: Buffer) => chunks.push(c))
+          req.on('error', () => { res.statusCode = 400; res.end('bad request') })
+          req.on('end', async () => {
+            try {
+              const body = chunks.length > 0 ? Buffer.concat(chunks) : undefined
+              const upstream = await fetch(upstreamUrl, {
+                method: req.method,
+                headers: {
+                  'Authorization': `Token ${apiKey}`,
+                  'Content-Type': 'application/json',
+                },
+                body: body && body.length > 0 ? body : undefined,
+              })
+              res.statusCode = upstream.status
+              res.setHeader('Content-Type', upstream.headers.get('content-type') || 'application/json')
+              const buf = Buffer.from(await upstream.arrayBuffer())
+              return res.end(buf)
+            } catch {
+              res.statusCode = 502
+              return res.end('upstream fetch failed')
+            }
+          })
+        } catch {
+          res.statusCode = 502
+          return res.end('proxy error')
+        }
+      })
+    },
+  }
+}
+
 /** Dev: same-origin POST `/api/proxy-openai` so Gemini fallback works with `npm run dev` + `.env`. */
 function openaiProxyDevPlugin(mode: string): Plugin {
   return {
@@ -227,7 +289,7 @@ export default defineConfig(({ mode }) => {
   }
 
   return {
-    plugins: [react(), staticMapProxyDevPlugin(), solarProxyDevPlugin(), openaiProxyDevPlugin(mode)],
+    plugins: [react(), staticMapProxyDevPlugin(), solarProxyDevPlugin(), openaiProxyDevPlugin(mode), replicateProxyDevPlugin()],
     envDir: projectRoot,
     define: {
       __ROOFIQ_DATABASE_URL__: JSON.stringify(resolvedDbUrl),
