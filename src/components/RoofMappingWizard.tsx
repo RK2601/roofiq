@@ -52,6 +52,7 @@ import type { Coordinates } from '../types';
 import type { SolarBuildingInsights, SolarDataLayersResponse } from '../utils/solar';
 import { analyzeDsmForSegments, autoSegmentRoofPlanes, pitchDegToRatio, type DsmAnalysisResult } from '../utils/roofDsm';
 import { segmentRoofFromSatellite } from '../utils/roofAiSegment';
+import { runPhotoDepthAnalysis, consensusDepthPitch, type PhotoDepthResult } from '../utils/roofPhotoDepth';
 import {
   analyzeRoofOutline,
   analyzeRoofSegment,
@@ -103,6 +104,16 @@ interface PhotoSlot {
   analysis: RoofPhotoCueAnalysis | null;
   captureImageDataUrl?: string | null;
   capturedAtIso?: string | null;
+  /** Depth Pro depth map colour image URL */
+  depthMapUrl?: string | null;
+  /** Depth-estimated pitch in degrees */
+  depthPitchDeg?: number | null;
+  /** Pitch as X/12 string */
+  depthPitchRatio?: string | null;
+  /** Depth analysis state */
+  depthStatus?: 'idle' | 'analyzing' | 'done' | 'error';
+  /** Full depth result for consensus computation */
+  depthResult?: PhotoDepthResult | null;
 }
 
 interface CapturePreset {
@@ -1010,31 +1021,42 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
         capturedAtIso: new Date().toISOString(),
         status: 'analyzing',
         analysis: null,
+        depthStatus: 'analyzing',
+        depthMapUrl: null,
+        depthPitchDeg: null,
+        depthPitchRatio: null,
+        depthResult: null,
       };
     }));
 
-    try {
-      let analysis = await deriveVisionRoofCuesFromFile(file, slotId);
-      if (!analysis) analysis = buildFallbackPhotoAnalysis(slotId);
-      setPhotoSlots(prev => prev.map(s => s.id === slotId
-        ? { ...s, status: analysis ? 'done' : 'error', analysis }
-        : s
-      ));
-      setFinalAnalysis(null);
-      setFinalSource(null);
-      setFinalError(null);
-      if (analysis) setPhotoStepError(null);
-    } catch {
-      const fallback = buildFallbackPhotoAnalysis(slotId);
-      setPhotoSlots(prev => prev.map(s => s.id === slotId
-        ? { ...s, status: fallback ? 'done' : 'error', analysis: fallback }
-        : s
-      ));
-      setFinalAnalysis(null);
-      setFinalSource(null);
-      setFinalError(null);
-      if (fallback) setPhotoStepError(null);
-    }
+    // Run Gemini cue analysis + Depth Pro in parallel
+    const [geminiResult, depthResult] = await Promise.allSettled([
+      (async () => {
+        let analysis = await deriveVisionRoofCuesFromFile(file, slotId);
+        if (!analysis) analysis = buildFallbackPhotoAnalysis(slotId);
+        return analysis;
+      })(),
+      imageDataUrl ? runPhotoDepthAnalysis(imageDataUrl, slotId) : Promise.reject('no-image'),
+    ]);
+
+    const analysis = geminiResult.status === 'fulfilled' ? geminiResult.value : buildFallbackPhotoAnalysis(slotId);
+    const depth = depthResult.status === 'fulfilled' ? depthResult.value : null;
+
+    setPhotoSlots(prev => prev.map(s => s.id === slotId ? {
+      ...s,
+      status: analysis ? 'done' : 'error',
+      analysis,
+      depthStatus: depth?.depthMapUrl ? 'done' : 'error',
+      depthMapUrl: depth?.depthMapUrl ?? null,
+      depthPitchDeg: depth?.pitchEstimateDeg ?? null,
+      depthPitchRatio: depth?.pitchRatio ?? null,
+      depthResult: depth,
+    } : s));
+
+    setFinalAnalysis(null);
+    setFinalSource(null);
+    setFinalError(null);
+    if (analysis) setPhotoStepError(null);
   }, [buildFallbackPhotoAnalysis, fileToDataUrl]);
 
   const removePhoto = useCallback((slotId: PhotoSlotId) => {
@@ -2264,12 +2286,24 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
                 {photoSlots.map(slot => (
                   <div key={slot.id} className="rounded-xl border border-slate-700 overflow-hidden bg-slate-800/50">
                     <div className="flex items-center gap-3 p-2.5">
-                      <div className="w-12 h-12 rounded-lg overflow-hidden bg-slate-700 shrink-0">
-                        {slot.previewUrl ? (
-                          <img src={slot.previewUrl} alt={slot.label} className="w-full h-full object-cover" />
-                        ) : (
-                          <div className="w-full h-full flex items-center justify-center text-slate-500">
-                            <Camera size={16} />
+                      <div className="flex gap-1 shrink-0">
+                        <div className="w-12 h-12 rounded-lg overflow-hidden bg-slate-700">
+                          {slot.previewUrl ? (
+                            <img src={slot.previewUrl} alt={slot.label} className="w-full h-full object-cover" />
+                          ) : (
+                            <div className="w-full h-full flex items-center justify-center text-slate-500">
+                              <Camera size={16} />
+                            </div>
+                          )}
+                        </div>
+                        {slot.depthMapUrl && (
+                          <div className="w-12 h-12 rounded-lg overflow-hidden bg-slate-700 ring-1 ring-violet-500/40" title="Depth map from Depth Pro">
+                            <img src={slot.depthMapUrl} alt="depth map" className="w-full h-full object-cover" />
+                          </div>
+                        )}
+                        {slot.depthStatus === 'analyzing' && !slot.depthMapUrl && (
+                          <div className="w-12 h-12 rounded-lg bg-slate-700 ring-1 ring-violet-500/30 flex items-center justify-center">
+                            <Loader2 size={14} className="animate-spin text-violet-400" />
                           </div>
                         )}
                       </div>
@@ -2279,11 +2313,21 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
                           {slot.status === 'analyzing' && <Loader2 size={11} className="animate-spin text-blue-400" />}
                           {slot.status === 'done' && <CheckCircle2 size={11} className="text-green-400" />}
                           {slot.status === 'error' && <AlertCircle size={11} className="text-red-400" />}
+                          {slot.depthStatus === 'analyzing' && (
+                            <span className="flex items-center gap-0.5 text-[10px] text-violet-400">
+                              <Loader2 size={9} className="animate-spin" /> depth
+                            </span>
+                          )}
                         </div>
                         <div className="text-xs text-slate-500 truncate">{slot.description}</div>
                         {slot.analysis && (
                           <div className="text-xs text-slate-400 mt-0.5">
                             Quality: <QualityBadge score={slot.analysis.qualityScore} /> · {slot.analysis.cues.length} cues
+                            {slot.depthPitchDeg !== null && slot.depthPitchDeg !== undefined && (
+                              <span className="ml-2 text-violet-300 font-medium">
+                                · Depth pitch ~{slot.depthPitchDeg}° ({slot.depthPitchRatio})
+                              </span>
+                            )}
                           </div>
                         )}
                         {slot.status === 'done' && slot.analysis && slot.analysis.qualityScore < 0.45 && (
@@ -2388,6 +2432,21 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
                   <p className="mt-1 text-[11px] text-slate-300">
                     Captured {photoCaptured} frame{photoCaptured !== 1 ? 's' : ''} · {totalCues} total cues extracted
                   </p>
+                  {/* Depth consensus row */}
+                  {(() => {
+                    const consensus = consensusDepthPitch(photoSlots.map(s => s.depthResult ?? null));
+                    if (!consensus) return null;
+                    return (
+                      <div className="mt-2 pt-2 border-t border-blue-700/30 flex items-center justify-between">
+                        <span className="text-[11px] text-violet-300 flex items-center gap-1">
+                          <Sparkles size={10} /> Depth Pro consensus pitch
+                        </span>
+                        <span className="text-[11px] font-semibold text-violet-200">
+                          ~{consensus.deg}° ({consensus.ratio}) · {consensus.sourceCount} readings
+                        </span>
+                      </div>
+                    );
+                  })()}
                 </div>
               </div>
 
