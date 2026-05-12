@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { MoreVertical, Trash2 } from 'lucide-react';
 import {
   PROJECT_TAG_OPTIONS,
@@ -46,7 +47,9 @@ export default function ProjectTagMenu({
   compact = false,
 }: ProjectTagMenuProps) {
   const [open, setOpen] = useState(false);
+  const [menuPos, setMenuPos] = useState<{ top: number; right: number } | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
+  const btnRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -55,8 +58,13 @@ export default function ProjectTagMenu({
         setOpen(false);
       }
     };
+    const onScroll = () => setOpen(false);
     document.addEventListener('mousedown', onDoc);
-    return () => document.removeEventListener('mousedown', onDoc);
+    document.addEventListener('scroll', onScroll, true);
+    return () => {
+      document.removeEventListener('mousedown', onDoc);
+      document.removeEventListener('scroll', onScroll, true);
+    };
   }, [open]);
 
   const applyTag = async (tag: string | null) => {
@@ -86,28 +94,12 @@ export default function ProjectTagMenu({
 
   const label = projectTagLabel(currentTag);
 
-  return (
-    <div className="relative" ref={rootRef}>
-      <button
-        type="button"
-        onClick={e => {
-          e.stopPropagation();
-          setOpen(v => !v);
-        }}
-        className={`touch-manipulation flex items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 shadow-sm transition-colors hover:bg-slate-50 hover:text-slate-900 ${
-          compact ? 'h-8 w-8' : 'h-9 w-9'
-        }`}
-        aria-expanded={open}
-        aria-haspopup="menu"
-        aria-label="Project status and actions"
-      >
-        <MoreVertical size={compact ? 16 : 18} aria-hidden />
-      </button>
-
-      {open && (
+  const menu = open && menuPos
+    ? createPortal(
         <div
           role="menu"
-          className="absolute right-0 z-[80] mt-1 w-52 rounded-xl border border-slate-200 bg-white py-1 shadow-xl ring-1 ring-black/5"
+          style={{ position: 'fixed', top: menuPos.top, right: menuPos.right }}
+          className="z-[9999] w-52 rounded-xl border border-slate-200 bg-white py-1 shadow-xl ring-1 ring-black/5"
         >
           {label && (
             <div className="border-b border-slate-100 px-3 py-2">
@@ -164,8 +156,39 @@ export default function ProjectTagMenu({
               </button>
             </>
           )}
-        </div>
-      )}
+        </div>,
+        document.body
+      )
+    : null;
+
+  return (
+    <div className="relative" ref={rootRef}>
+      <button
+        ref={btnRef}
+        type="button"
+        onClick={e => {
+          e.stopPropagation();
+          if (open) {
+            setOpen(false);
+          } else {
+            const rect = btnRef.current!.getBoundingClientRect();
+            setMenuPos({
+              top: rect.bottom + 4,
+              right: window.innerWidth - rect.right,
+            });
+            setOpen(true);
+          }
+        }}
+        className={`touch-manipulation flex items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 shadow-sm transition-colors hover:bg-slate-50 hover:text-slate-900 ${
+          compact ? 'h-8 w-8' : 'h-9 w-9'
+        }`}
+        aria-expanded={open}
+        aria-haspopup="menu"
+        aria-label="Project status and actions"
+      >
+        <MoreVertical size={compact ? 16 : 18} aria-hidden />
+      </button>
+      {menu}
     </div>
   );
 }
