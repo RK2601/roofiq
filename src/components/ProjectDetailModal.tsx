@@ -344,8 +344,8 @@ export default function ProjectDetailModal({
           </button>
         </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto overscroll-y-contain [-webkit-overflow-scrolling:touch]">
-          <div className="mx-auto w-full max-w-6xl px-4 pb-4 sm:px-8">
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-y-contain [-webkit-overflow-scrolling:touch] bg-slate-50">
+          <div className="mx-auto w-full max-w-6xl px-4 pb-4 sm:px-8 bg-slate-50">
           {loading ? (
             <div className="space-y-4 py-6">
               {[1, 2, 3].map(i => (
@@ -393,15 +393,15 @@ export default function ProjectDetailModal({
               )}
             </div>
           ) : (
-            <>
+            <div className="rounded-xl overflow-hidden border border-slate-200 bg-white shadow-sm mt-4 mb-4">
               {/* Stats row */}
-              <div className="grid grid-cols-3 gap-px bg-slate-200 border-b border-slate-200">
+              <div className="grid grid-cols-3 divide-x divide-slate-200 border-b border-slate-200">
                 {[
                   { icon: <Layers size={14} />, label: 'Sections', value: project?.section_count ?? 0 },
                   { icon: <Ruler size={14} />, label: 'Total Roof Area', value: `${totalActual.toLocaleString('en-US', { maximumFractionDigits: 0 })} sq ft` },
                   { icon: <Calendar size={14} />, label: 'Created', value: new Date(project?.created_at ?? '').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) },
                 ].map(stat => (
-                  <div key={stat.label} className="bg-white px-6 py-4">
+                  <div key={stat.label} className="bg-white px-4 py-3">
                     <div className="flex items-center gap-1.5 text-slate-400 text-xs mb-1">
                       {stat.icon}
                       {stat.label}
@@ -412,9 +412,9 @@ export default function ProjectDetailModal({
               </div>
 
               {/* Snapshots gallery */}
-              <div className="py-6">
-                <h3 className="text-sm font-semibold text-slate-700 uppercase tracking-wider mb-4 flex items-center gap-2">
-                  <Image size={14} />
+              <div className="py-4 px-6">
+                <h3 className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3 flex items-center gap-1.5">
+                  <Image size={13} />
                   Saved Images ({snapshots.length})
                 </h3>
 
@@ -511,9 +511,9 @@ export default function ProjectDetailModal({
               </div>
 
               {/* Sections table */}
-              <div className="pb-6">
-                <h3 className="text-sm font-semibold text-slate-700 uppercase tracking-wider mb-4 flex items-center gap-2">
-                  <Layers size={14} />
+              <div className="px-6 pb-4">
+                <h3 className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3 flex items-center gap-1.5">
+                  <Layers size={13} />
                   Roof Sections ({sections.length})
                 </h3>
 
@@ -566,7 +566,7 @@ export default function ProjectDetailModal({
                   </div>
                 )}
               </div>
-            </>
+            </div>
           )}
           </div>
         </div>
