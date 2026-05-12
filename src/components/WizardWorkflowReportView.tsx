@@ -26,6 +26,73 @@ const EDGE_DASH: Record<StructuralLine['type'], number[]> = {
   step: [4, 8],
 };
 
+// ─── Roof Topology Engine ─────────────────────────────────────────────────────
+// Snaps near-coincident vertices and deduplicates shared edges so every
+// boundary is drawn exactly once — boundary edges in the segment colour,
+// internal (shared) edges as a single neutral line.
+
+const SNAP_TOL = 10; // diagram-pixel tolerance for vertex merging
+
+interface Pt { x: number; y: number }
+
+/** Round a coordinate to the snap grid */
+function snapKey(x: number, y: number): string {
+  return `${Math.round(x / SNAP_TOL)},${Math.round(y / SNAP_TOL)}`;
+}
+
+/** Return the canonical representative for a vertex (nearest grid centre) */
+function snapPt(p: Pt): Pt {
+  return {
+    x: Math.round(p.x / SNAP_TOL) * SNAP_TOL,
+    y: Math.round(p.y / SNAP_TOL) * SNAP_TOL,
+  };
+}
+
+interface TopoEdge {
+  x1: number; y1: number;
+  x2: number; y2: number;
+  /** Indices of polygons that share this edge */
+  polyIndices: number[];
+}
+
+interface TopologyResult {
+  /** Polygons with snapped vertices (use for fills) */
+  snappedPolys: Pt[][];
+  /** Deduplicated edges with ownership info */
+  edges: TopoEdge[];
+}
+
+function buildRoofTopology(polygons: Pt[][]): TopologyResult {
+  // 1. Snap all vertices to grid
+  const snappedPolys = polygons.map(pts => pts.map(snapPt));
+
+  // 2. Collect edges with a canonical direction-independent key
+  const edgeMap = new Map<string, TopoEdge>();
+
+  for (let pi = 0; pi < snappedPolys.length; pi++) {
+    const pts = snappedPolys[pi];
+    for (let i = 0; i < pts.length; i++) {
+      const a = pts[i];
+      const b = pts[(i + 1) % pts.length];
+      // Skip zero-length edges
+      if (a.x === b.x && a.y === b.y) continue;
+      // Canonical: sort so the "smaller" point comes first
+      const [p1, p2] =
+        a.x < b.x || (a.x === b.x && a.y <= b.y) ? [a, b] : [b, a];
+      const key = `${snapKey(p1.x, p1.y)}|${snapKey(p2.x, p2.y)}`;
+      if (edgeMap.has(key)) {
+        const e = edgeMap.get(key)!;
+        if (!e.polyIndices.includes(pi)) e.polyIndices.push(pi);
+      } else {
+        edgeMap.set(key, { x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y, polyIndices: [pi] });
+      }
+    }
+  }
+
+  return { snappedPolys, edges: Array.from(edgeMap.values()) };
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 function parseStructure(s: unknown): StructuralDetection | null {
   if (!s || typeof s !== 'object') return null;
   const o = s as StructuralDetection;
@@ -97,7 +164,7 @@ export default function WizardWorkflowReportView({
   const diagramHeight = 560;
   const diagramPadding = 28;
 
-  const { reportPolygons, reportEdges, diagramBounds } = useMemo(() => {
+  const { reportPolygons, topoEdges, reportEdges, diagramBounds } = useMemo(() => {
     const allLatLng = report.segments.flatMap(s => s.path);
     const bounds =
       allLatLng.length > 0
@@ -109,24 +176,43 @@ export default function WizardWorkflowReportView({
           }
         : null;
 
-    const toDiagramPoint = (point: { lat: number; lng: number }) => {
+    const toDiagramPoint = (point: { lat: number; lng: number }): Pt => {
       if (!bounds) return { x: diagramPadding, y: diagramPadding };
       const spanLng = Math.max(1e-6, bounds.maxLng - bounds.minLng);
       const spanLat = Math.max(1e-6, bounds.maxLat - bounds.minLat);
-      const xNorm = (point.lng - bounds.minLng) / spanLng;
-      const yNorm = (bounds.maxLat - point.lat) / spanLat;
+      // Equal-scale: correct for longitude compression at this latitude
+      const midLat = (bounds.minLat + bounds.maxLat) / 2;
+      const cosLat = Math.cos((midLat * Math.PI) / 180);
+      const rawX = (point.lng - bounds.minLng) / spanLng;
+      const rawY = (bounds.maxLat - point.lat) / spanLat;
+      // Scale so both axes use the same physical unit
+      const scaleX = spanLng * cosLat;
+      const scaleY = spanLat;
+      const aspect = scaleX / Math.max(scaleY, 1e-9);
+      const drawW = diagramWidth - diagramPadding * 2;
+      const drawH = diagramHeight - diagramPadding * 2;
+      // Fit inside the canvas while preserving equal scale
+      const scale = aspect > drawW / drawH ? drawW : drawH * aspect;
+      const offsetX = (drawW - scale) / 2;
+      const offsetY = (drawH - scale / aspect) / 2;
       return {
-        x: diagramPadding + xNorm * (diagramWidth - diagramPadding * 2),
-        y: diagramPadding + yNorm * (diagramHeight - diagramPadding * 2),
+        x: diagramPadding + offsetX + rawX * scale,
+        y: diagramPadding + offsetY + rawY * (scale / aspect),
       };
     };
 
-    const polys = report.segments.map(segment => {
-      const pts = segment.path.map(toDiagramPoint);
+    const rawPolys: Pt[][] = report.segments.map(s => s.path.map(toDiagramPoint));
+
+    // Run the topology engine — snaps vertices + deduplicates edges
+    const { snappedPolys, edges: tEdges } = buildRoofTopology(rawPolys);
+
+    const polys = report.segments.map((segment, i) => {
+      const snapped = snappedPolys[i];
       const analysis = segment.analysis as {
         pitchEstimate?: string;
         facingDirection?: string;
       } | null;
+      const dsm = segment as { dsmPitchRatio?: string; dsmFacingDirection?: string };
       let areaSqFt = 0;
       if (typeof google !== 'undefined' && google.maps?.geometry?.spherical && segment.path.length >= 3) {
         try {
@@ -141,14 +227,15 @@ export default function WizardWorkflowReportView({
       return {
         id: segment.id,
         color: segment.color,
-        pitch: analysis?.pitchEstimate ?? 'n/a',
-        facing: analysis?.facingDirection ?? 'n/a',
-        points: pts,
+        pitch: dsm.dsmPitchRatio ?? analysis?.pitchEstimate ?? 'n/a',
+        facing: dsm.dsmFacingDirection ?? analysis?.facingDirection ?? 'n/a',
+        isDsm: !!dsm.dsmPitchRatio,
+        points: snapped,
         center:
-          pts.length > 0
+          snapped.length > 0
             ? {
-                x: pts.reduce((sum, p) => sum + p.x, 0) / pts.length,
-                y: pts.reduce((sum, p) => sum + p.y, 0) / pts.length,
+                x: snapped.reduce((s, p) => s + p.x, 0) / snapped.length,
+                y: snapped.reduce((s, p) => s + p.y, 0) / snapped.length,
               }
             : { x: 0, y: 0 },
         areaSqFt,
@@ -166,7 +253,7 @@ export default function WizardWorkflowReportView({
       dash: EDGE_DASH[cue.type] ?? [],
     }));
 
-    return { reportPolygons: polys, reportEdges: edges, diagramBounds: bounds };
+    return { reportPolygons: polys, topoEdges: tEdges, reportEdges: edges, diagramBounds: bounds };
   }, [report.segments, structure?.cues]);
 
   const quoteBaseRatePerSq = finalAnalysis
@@ -295,39 +382,88 @@ export default function WizardWorkflowReportView({
       {diagramBounds && reportPolygons.length > 0 && (
         <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
           <h4 className="text-sm font-semibold text-slate-800 mb-1">Pitch and direction (schematic)</h4>
-          <p className="text-[11px] text-slate-500 mb-3">Diagram from wizard geometry — illustrative, not a survey drawing.</p>
+          <p className="text-[11px] text-slate-500 mb-3">
+            Topology-corrected diagram — shared edges drawn once, vertices snapped.
+            {reportPolygons.some(p => p.isDsm) && <span className="ml-1 text-cyan-600 font-medium">⚡ DSM pitch values</span>}
+          </p>
           <div className="overflow-x-auto">
-            <svg viewBox={`0 0 ${diagramWidth} ${diagramHeight}`} className="w-full h-auto rounded-lg border border-slate-200 bg-slate-50 max-h-[480px]">
+            <svg viewBox={`0 0 ${diagramWidth} ${diagramHeight}`} className="w-full h-auto rounded-lg border border-slate-200 bg-white max-h-[520px]">
+              {/* ── Layer 1: fills (no stroke — edges drawn separately below) ── */}
+              {reportPolygons.map(poly => (
+                <polygon
+                  key={`fill-${poly.id}`}
+                  points={poly.points.map(p => `${p.x},${p.y}`).join(' ')}
+                  fill={`${poly.color}28`}
+                  stroke="none"
+                />
+              ))}
+
+              {/* ── Layer 2: topology edges — one line per boundary ── */}
+              {topoEdges.map((edge, i) => {
+                const isShared = edge.polyIndices.length > 1;
+                // For boundary edges use the owning segment's colour; shared = neutral dark
+                const segColor = isShared
+                  ? '#1e293b'
+                  : (reportPolygons[edge.polyIndices[0]]?.color ?? '#64748b');
+                return (
+                  <line
+                    key={`topo-${i}`}
+                    x1={edge.x1} y1={edge.y1}
+                    x2={edge.x2} y2={edge.y2}
+                    stroke={segColor}
+                    strokeWidth={isShared ? 1.5 : 2.5}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    opacity={isShared ? 0.55 : 1}
+                  />
+                );
+              })}
+
+              {/* ── Layer 3: structural cues (ridge / valley / hip etc.) ── */}
               {reportEdges.map(edge => (
                 <line
                   key={edge.id}
-                  x1={edge.x1}
-                  y1={edge.y1}
-                  x2={edge.x2}
-                  y2={edge.y2}
+                  x1={edge.x1} y1={edge.y1}
+                  x2={edge.x2} y2={edge.y2}
                   stroke={edge.color}
-                  strokeWidth={2.4}
+                  strokeWidth={2.2}
                   strokeDasharray={edge.dash.length > 0 ? edge.dash.join(' ') : undefined}
                   strokeLinecap="round"
+                  opacity={0.85}
                 />
               ))}
+
+              {/* ── Layer 4: labels ── */}
               {reportPolygons.map(poly => (
-                <g key={poly.id}>
-                  <polygon
-                    points={poly.points.map(p => `${p.x},${p.y}`).join(' ')}
-                    fill={`${poly.color}2A`}
-                    stroke={poly.color}
-                    strokeWidth={2}
+                <g key={`label-${poly.id}`}>
+                  {/* Drop shadow rect for readability */}
+                  <rect
+                    x={poly.center.x - 52}
+                    y={poly.center.y - 22}
+                    width={104}
+                    height={40}
+                    rx={6}
+                    fill="white"
+                    opacity={0.72}
                   />
-                  <text x={poly.center.x} y={poly.center.y - 8} textAnchor="middle" fontSize="16" fontWeight="700" fill="#0f172a">
+                  <text x={poly.center.x} y={poly.center.y - 6} textAnchor="middle" fontSize="13" fontWeight="700" fill="#0f172a">
                     {poly.pitch} · {poly.facing}
                   </text>
-                  <text x={poly.center.x} y={poly.center.y + 14} textAnchor="middle" fontSize="14" fill="#334155">
-                    {poly.areaSqFt} sq ft
+                  <text x={poly.center.x} y={poly.center.y + 12} textAnchor="middle" fontSize="12" fill="#475569">
+                    {poly.areaSqFt > 0 ? `${poly.areaSqFt.toLocaleString()} sq ft` : ''}
                   </text>
                 </g>
               ))}
             </svg>
+          </div>
+
+          {/* Edge legend */}
+          <div className="mt-3 flex flex-wrap gap-3 text-[11px] text-slate-500">
+            <span className="flex items-center gap-1.5"><span className="inline-block w-6 border-t-2 border-slate-800 opacity-100" /> Boundary edge</span>
+            <span className="flex items-center gap-1.5"><span className="inline-block w-6 border-t border-slate-500 opacity-55" /> Shared edge (plane division)</span>
+            {reportEdges.some(e => e.type === 'ridge') && <span className="flex items-center gap-1.5"><span className="inline-block w-6 border-t-2 border-red-500" /> Ridge</span>}
+            {reportEdges.some(e => e.type === 'valley') && <span className="flex items-center gap-1.5"><span className="inline-block w-6 border-t-2 border-blue-500 border-dashed" style={{borderStyle:'dashed'}} /> Valley</span>}
+            {reportEdges.some(e => e.type === 'hip') && <span className="flex items-center gap-1.5"><span className="inline-block w-6 border-t-2 border-orange-500 border-dashed" style={{borderStyle:'dashed'}} /> Hip</span>}
           </div>
         </div>
       )}
