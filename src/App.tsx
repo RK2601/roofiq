@@ -16,6 +16,7 @@ import AnalysisHub from './components/AnalysisHub';
 import HoverMeasurePage from './components/HoverMeasurePage';
 import DepthAnalysisPage from './components/DepthAnalysisPage';
 import DepthPipelinePage from './components/DepthPipelinePage';
+import AccuMeasurePage from './components/AccuMeasurePage';
 import { initDb, isDbConfigured } from './utils/db';
 import { readMapsApiKey } from './utils/googleMapsKey';
 import { readAuthSession, writeAuthSession, clearAuthSession } from './utils/authSession';
@@ -192,7 +193,7 @@ export default function App() {
   /** Flex column + overflow-hidden on main so children can use flex-1 min-h-0 and scroll (mobile Safari). */
   const fullHeightMain =
     view === 'analysis' || view === 'analysis-hub' || view === 'hover-measure' || view === 'depth-measure' || view === 'depth-pipeline' ||
-    view === 'marketing' || view === 'quote' || view === 'projects' || view === 'quotes-list';
+    view === 'accu-measure' || view === 'marketing' || view === 'quote' || view === 'projects' || view === 'quotes-list';
 
   return (
     <DashboardLayout
@@ -233,6 +234,24 @@ export default function App() {
           <DepthPipelinePage onBack={() => setView('analysis-hub')} />
         </div>
       )}
+      {view === 'accu-measure' && (
+        <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-y-contain [-webkit-overflow-scrolling:touch]">
+          <AccuMeasurePage
+            address={address}
+            coordinates={coordinates}
+            apiKey={apiKey}
+            onBack={() => setView('analysis-hub')}
+            onAddressChange={(addr, coords) => {
+              setAddress(addr);
+              setCoordinates(coords);
+            }}
+            onComplete={(sections) => {
+              setRoofSections(sections);
+              setView('quote');
+            }}
+          />
+        </div>
+      )}
       {view === 'analysis' && (
         <AnalysisPage
           apiKey={apiKey}
@@ -261,7 +280,7 @@ export default function App() {
         </div>
       )}
       {view === 'projects' && (
-        <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-y-contain [-webkit-overflow-scrolling:touch]">
+        <div className="min-h-0 min-w-0 flex-1 flex flex-col">
           <ProjectsPage onNewAnalysis={handleNewAnalysisFromPanel} />
         </div>
       )}
