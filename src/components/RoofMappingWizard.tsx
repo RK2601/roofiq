@@ -253,7 +253,10 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
 
   // State
   const [phase, setPhase] = useState<Phase>(1);
-  const [step1Sub, setStep1Sub] = useState<'outline' | 'segments' | 'structure'>('outline');
+  // AI/DSM modes skip the manual outline step — start at segments directly
+  const [step1Sub, setStep1Sub] = useState<'outline' | 'segments' | 'structure'>(
+    aiSegmentMode || autoSegmentMode ? 'segments' : 'outline'
+  );
   const [mapLoaded, setMapLoaded] = useState(false);
   const [mapError, setMapError] = useState('');
   const [isDrawing, setIsDrawing] = useState(false);
@@ -940,13 +943,30 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
           editable: true,
           zIndex: 2,
         });
+        // Pre-populate analysis from Gemini's own AI response — no extra API call needed
+        const inferredType = ((): SegmentAnalysis['type'] => {
+          const lbl = seg.label.toLowerCase();
+          if (lbl.includes('dormer')) return 'dormer';
+          if (lbl.includes('flat') || seg.pitchEstimate === '0/12') return 'flat';
+          if (lbl.includes('hip')) return 'hip';
+          if (lbl.includes('valley')) return 'valley';
+          if (lbl.includes('shed')) return 'shed';
+          return 'gable';
+        })();
+        const preAnalysis: SegmentAnalysis = {
+          type: inferredType,
+          facingDirection: seg.facingDirection,
+          pitchEstimate: seg.pitchEstimate,
+          confidence: seg.confidence,
+          notes: seg.label,
+        };
         return {
           id: `ai_${i}_${Date.now()}`,
           index: i,
           polygon,
           path: seg.path,
           color,
-          analysis: null,
+          analysis: preAnalysis,
           analyzing: false,
         };
       });
@@ -969,7 +989,12 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
   // When aiSegmentMode is on, trigger once the satellite image is ready
   useEffect(() => {
     if (!aiSegmentMode || aiSegmentRanRef.current) return;
-    if (!imageReady || !satelliteImageRef.current?.data) return;
+    if (!imageReady) return;
+    // If image failed to load, show a clear error rather than silently hanging
+    if (!satelliteImageRef.current?.data) {
+      setAiSegmentError('Could not load satellite imagery. Draw segments manually or use DSM Auto-Map instead.');
+      return;
+    }
     aiSegmentRanRef.current = true;
     void runAiSegment();
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1965,20 +1990,36 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
               {step1Sub === 'segments' && (
                 <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-4">
                   <div>
-                    <h3 className="text-white font-semibold text-sm mb-1">Step 2 — Trace Each Segment</h3>
-                    <p className="text-slate-400 text-xs leading-relaxed">
-                      Draw each <strong className="text-slate-200">distinct roof section</strong> one at a time — main slopes, dormers, flat sections, additions. AI will classify each as you go.
-                    </p>
+                    {aiSegmentMode && segments.length === 0 ? (
+                      <>
+                        <h3 className="text-white font-semibold text-sm mb-1 flex items-center gap-1.5">
+                          <Sparkles size={13} className="text-rose-400" /> AI Visual Segmentation
+                        </h3>
+                        <p className="text-slate-400 text-xs leading-relaxed">
+                          Gemini Vision is reading the satellite image and detecting each roof plane automatically — no drawing needed.
+                        </p>
+                      </>
+                    ) : (
+                      <>
+                        <h3 className="text-white font-semibold text-sm mb-1">Step 2 — Trace Each Segment</h3>
+                        <p className="text-slate-400 text-xs leading-relaxed">
+                          Draw each <strong className="text-slate-200">distinct roof section</strong> one at a time — main slopes, dormers, flat sections, additions. AI will classify each as you go.
+                        </p>
+                      </>
+                    )}
                   </div>
 
-                  <button
-                    onClick={() => startDrawing(SEGMENT_COLORS[segments.length % SEGMENT_COLORS.length])}
-                    disabled={!mapLoaded || isDrawing}
-                    className="flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-sm font-medium py-2.5 px-4 rounded-lg transition-colors shrink-0"
-                  >
-                    <Pencil size={14} />
-                    {isDrawing ? 'Drawing segment...' : `Draw Segment ${segments.length + 1}`}
-                  </button>
+                  {/* Only show manual draw button when not in pure AI segment mode, or AI has failed */}
+                  {(!aiSegmentMode || aiSegmentError || (aiSegmentRanRef.current && segments.length === 0)) && (
+                    <button
+                      onClick={() => startDrawing(SEGMENT_COLORS[segments.length % SEGMENT_COLORS.length])}
+                      disabled={!mapLoaded || isDrawing}
+                      className="flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-sm font-medium py-2.5 px-4 rounded-lg transition-colors shrink-0"
+                    >
+                      <Pencil size={14} />
+                      {isDrawing ? 'Drawing segment...' : `Draw Segment ${segments.length + 1}`}
+                    </button>
+                  )}
 
                   <div className="flex flex-col gap-2">
                     {segments.map(seg => (
@@ -2030,10 +2071,26 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
                         )}
                       </div>
                     ))}
-                    {segments.length === 0 && !autoSegmenting && (
-                      <div className="text-center py-6 text-slate-500 text-xs">
-                        No segments drawn yet.<br />Draw each distinct roof section<br />or use DSM Auto-Detect below.
-                      </div>
+                    {segments.length === 0 && !autoSegmenting && !aiSegmenting && (
+                      aiSegmentMode && !aiSegmentError ? (
+                        <div className="flex flex-col items-center gap-3 py-8">
+                          {!imageReady ? (
+                            <>
+                              <Loader2 size={22} className="animate-spin text-rose-400" />
+                              <span className="text-rose-300 text-xs text-center">Loading satellite image for AI analysis…</span>
+                            </>
+                          ) : (
+                            <>
+                              <Loader2 size={22} className="animate-spin text-rose-400" />
+                              <span className="text-rose-300 text-xs text-center">Gemini Vision is detecting roof planes…</span>
+                            </>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="text-center py-6 text-slate-500 text-xs">
+                          No segments drawn yet.<br />Draw each distinct roof section<br />or use auto-detect below.
+                        </div>
+                      )
                     )}
                     {autoSegmenting && (
                       <div className="flex flex-col items-center gap-2 py-6 text-cyan-400 text-xs">
@@ -2069,8 +2126,11 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
                     </div>
                   )}
                   {aiSegmentError && (
-                    <div className="rounded-lg border border-rose-600/40 bg-rose-900/30 px-3 py-2 text-xs text-rose-200">
-                      {aiSegmentError}
+                    <div className="flex flex-col gap-2">
+                      <div className="rounded-lg border border-rose-600/40 bg-rose-900/30 px-3 py-2 text-xs text-rose-200">
+                        <Sparkles size={11} className="inline mr-1" />{aiSegmentError}
+                      </div>
+                      <p className="text-slate-500 text-xs text-center">You can draw segments manually below, or use DSM Auto-Detect.</p>
                     </div>
                   )}
 
