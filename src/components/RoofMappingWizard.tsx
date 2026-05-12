@@ -1623,10 +1623,7 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
     dash: safeDashPattern(cue.type),
   }));
 
-  useEffect(() => {
-    if (phase !== 3 || finalAnalyzing || finalAnalysis) return;
-    void runFinalAnalysis();
-  }, [phase, finalAnalyzing, finalAnalysis, runFinalAnalysis]);
+  // Phase 3: AI analysis is triggered MANUALLY by the user, not auto-run.
 
   useEffect(() => {
     const hasMeaningfulData =
@@ -1679,12 +1676,24 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
             cueCount: slot.analysis?.cues.length ?? 0,
             byType: slot.analysis?.byType,
             captureImageDataUrl:
-              slot.captureImageDataUrl && slot.captureImageDataUrl.length < 350_000
+              slot.captureImageDataUrl && slot.captureImageDataUrl.length < 600_000
                 ? slot.captureImageDataUrl
                 : null,
             capturedAtIso: slot.capturedAtIso ?? null,
+            depthPitchDeg: slot.depthPitchDeg ?? null,
+            depthPitchRatio: slot.depthPitchRatio ?? null,
+            depthMapUrl: slot.depthMapUrl ?? null,
+            notes: slot.analysis?.cues.length
+              ? `${slot.analysis.cues.length} cues · quality ${Math.round((slot.analysis.qualityScore ?? 0) * 100)}%`
+              : null,
           })),
           finalAnalysis,
+          satelliteSnapshot: (() => {
+            const sat = satelliteImageRef.current;
+            if (!sat?.data) return null;
+            const dataUrl = `data:${sat.mimeType};base64,${sat.data}`;
+            return dataUrl.length < 800_000 ? dataUrl : null;
+          })(),
           updatedAtIso: new Date().toISOString(),
         };
         const saved = await saveWizardWorkflowReport(payload, {
@@ -2426,18 +2435,10 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
           {phase === 3 && (
             <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-4">
               <div>
-                <h3 className="text-white font-semibold text-sm mb-1">Final Combined Report</h3>
+                <h3 className="text-white font-semibold text-sm mb-1">Step 3 · AI Fusion Analysis</h3>
                 <p className="text-slate-400 text-xs leading-relaxed">
-                  Step 1 + Step 2 data are fused into one final AI decision. Analysis starts automatically in this step.
+                  All structural and photo data is ready. Click below to run the AI fusion — then open your full report.
                 </p>
-                {finalSource && (
-                  <p className={`mt-1 text-[11px] ${finalSource === 'ai' ? 'text-emerald-300' : 'text-amber-300'}`}>
-                    Source: {finalSource === 'ai' ? 'AI fusion result' : 'Fallback fused result'}
-                  </p>
-                )}
-                {finalError && (
-                  <p className="mt-1 text-[11px] text-amber-300">{finalError}</p>
-                )}
               </div>
 
               <div className="grid grid-cols-1 gap-3">
@@ -2497,144 +2498,100 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
                 </div>
               </div>
 
-              <div className="rounded-xl border border-slate-700 bg-slate-800/60 p-3">
-                <div className="text-xs font-semibold text-white flex items-center gap-1.5">
-                  <Brain size={12} className={finalAnalyzing ? 'animate-pulse text-purple-300' : 'text-purple-300'} />
-                  Step 3 · Fusion Pipeline
+              {/* Data summary cards */}
+              <div className="grid grid-cols-1 gap-2">
+                <div className="rounded-xl border border-purple-700/40 bg-purple-900/20 p-3 flex items-center justify-between">
+                  <div className="flex items-center gap-2 text-xs text-purple-200"><Layers size={12} /> Structural Map</div>
+                  <span className="text-[11px] text-slate-300">{segments.length} segments · {structureResult?.cues.length ?? 0} cues</span>
                 </div>
-                <div className="mt-2 space-y-2">
-                  {[
-                    `Ingest structural map (${segments.length} segments)`,
-                    `Ingest photo cues (${totalCues} cues from ${photosAnalyzed} photo${photosAnalyzed !== 1 ? 's' : ''})`,
-                    'Run deep AI synthesis and consistency checks',
-                    'Generate final report + recommendations',
-                  ].map((item, idx) => (
-                    <div key={item} className="flex items-center gap-2 text-[11px] text-slate-300">
-                      <span className={`inline-block w-2 h-2 rounded-full ${finalAnalyzing ? 'bg-blue-400 animate-pulse' : 'bg-emerald-400'}`} />
-                      <span>{item}</span>
-                      {finalAnalyzing && <span className="ml-auto text-slate-500">running…</span>}
-                      {!finalAnalyzing && finalAnalysis && <CheckCircle2 size={11} className="ml-auto text-emerald-400" />}
-                    </div>
-                  ))}
+                <div className="rounded-xl border border-blue-700/40 bg-blue-900/20 p-3 flex items-center justify-between">
+                  <div className="flex items-center gap-2 text-xs text-blue-200"><Camera size={12} /> Multi-Angle Photos</div>
+                  <span className="text-[11px] text-slate-300">{photosAnalyzed}/{photoSlots.length} analyzed · {totalCues} cues</span>
                 </div>
               </div>
 
-              {finalAnalyzing && (
-                <div className="flex flex-col items-center gap-3 py-6">
-                  <Loader2 size={28} className="animate-spin text-purple-400" />
-                  <div className="text-sm text-purple-300">AI synthesizing all data…</div>
-                  <div className="text-xs text-slate-500">Combining structural map, photos, and satellite imagery</div>
+              {/* ── Not yet run ── */}
+              {!finalAnalysis && !finalAnalyzing && (
+                <div className="flex flex-col gap-3">
+                  {!hasGeminiKey && (
+                    <div className="rounded-lg border border-amber-600/40 bg-amber-900/30 px-3 py-2 text-xs text-amber-200">
+                      Gemini API key required for AI fusion. Add it in Settings.
+                    </div>
+                  )}
+                  {finalError && (
+                    <div className="rounded-lg border border-red-700/40 bg-red-900/30 px-3 py-2 text-xs text-red-200">
+                      {finalError}
+                    </div>
+                  )}
+                  <button
+                    onClick={runFinalAnalysis}
+                    disabled={!hasGeminiKey}
+                    className="flex items-center justify-center gap-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-semibold py-3 px-4 rounded-xl transition-colors"
+                  >
+                    <Brain size={16} /> Run AI Analysis
+                  </button>
                 </div>
               )}
 
-              {finalAnalysis && (
+              {/* ── Running ── */}
+              {finalAnalyzing && (
+                <div className="flex flex-col items-center gap-3 py-8 rounded-xl border border-purple-700/40 bg-purple-900/20">
+                  <Loader2 size={32} className="animate-spin text-purple-400" />
+                  <div className="text-sm font-medium text-purple-200">AI synthesizing all data…</div>
+                  <div className="text-xs text-slate-400">Combining structural map, {photosAnalyzed} photos, and satellite imagery</div>
+                </div>
+              )}
+
+              {/* ── Done ── */}
+              {finalAnalysis && !finalAnalyzing && (
                 <div className="flex flex-col gap-3">
-                  {/* Condition badge */}
-                  <div className={`rounded-xl p-4 border ${
+                  {/* Result badge */}
+                  <div className={`rounded-xl p-4 border flex items-center justify-between ${
                     finalAnalysis.condition === 'Excellent' || finalAnalysis.condition === 'Good'
                       ? 'bg-green-900/40 border-green-700/50'
                       : finalAnalysis.condition === 'Fair'
                       ? 'bg-amber-900/40 border-amber-700/50'
                       : 'bg-red-900/40 border-red-700/50'
                   }`}>
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="text-xs text-slate-400 font-medium">Roof Condition</span>
-                      <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${
-                        finalAnalysis.condition === 'Excellent' || finalAnalysis.condition === 'Good'
-                          ? 'bg-green-500/20 text-green-300'
-                          : finalAnalysis.condition === 'Fair'
-                          ? 'bg-amber-500/20 text-amber-300'
-                          : 'bg-red-500/20 text-red-300'
-                      }`}>{finalAnalysis.urgency} urgency</span>
-                    </div>
-                    <div className="flex items-baseline gap-2">
-                      <span className="text-2xl font-bold text-white">{finalAnalysis.condition}</span>
-                      <span className="text-slate-400 text-sm">{finalAnalysis.condition_score}/100</span>
-                    </div>
-                    <div className="text-xs text-slate-400 mt-1">{finalAnalysis.estimated_remaining_life} remaining life</div>
-                  </div>
-
-                  {/* Issues */}
-                  {finalAnalysis.issues.length > 0 && (
-                    <div className="bg-slate-800 border border-slate-700 rounded-xl p-3">
-                      <div className="text-xs font-semibold text-white mb-2 flex items-center gap-1.5">
-                        <AlertCircle size={12} className="text-amber-400" /> Issues Found
-                      </div>
-                      <ul className="flex flex-col gap-1">
-                        {finalAnalysis.issues.map((issue, i) => (
-                          <li key={i} className="text-xs text-slate-300 flex items-start gap-1.5">
-                            <span className="text-amber-400 mt-0.5 shrink-0">•</span>
-                            {issue}
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-
-                  {/* Structural + Photo summaries */}
-                  <div className="bg-slate-800 border border-slate-700 rounded-xl p-3 space-y-2">
                     <div>
-                      <div className="text-xs font-semibold text-purple-300 mb-1 flex items-center gap-1.5">
-                        <Layers size={11} /> Structural
-                      </div>
-                      <p className="text-xs text-slate-300 leading-relaxed">{finalAnalysis.structuralSummary}</p>
+                      <div className="text-xs text-slate-400 mb-0.5">Roof Condition</div>
+                      <div className="text-xl font-bold text-white">{finalAnalysis.condition} <span className="text-slate-400 text-sm font-normal">{finalAnalysis.condition_score}/100</span></div>
+                      <div className="text-xs text-slate-400 mt-0.5">{finalAnalysis.estimated_remaining_life} remaining</div>
                     </div>
-                    <div className="border-t border-slate-700 pt-2">
-                      <div className="text-xs font-semibold text-blue-300 mb-1 flex items-center gap-1.5">
-                        <Camera size={11} /> Photo Analysis
-                      </div>
-                      <p className="text-xs text-slate-300 leading-relaxed">{finalAnalysis.photoSummary}</p>
-                    </div>
+                    <span className={`text-xs font-bold px-2.5 py-1 rounded-full ${
+                      finalAnalysis.urgency === 'Low' ? 'bg-green-500/20 text-green-300'
+                      : finalAnalysis.urgency === 'Medium' ? 'bg-amber-500/20 text-amber-300'
+                      : 'bg-red-500/20 text-red-300'
+                    }`}>{finalAnalysis.urgency} urgency</span>
                   </div>
 
-                  {/* Recommendation */}
-                  <div className="bg-blue-900/30 border border-blue-700/40 rounded-xl p-3">
-                    <div className="text-xs font-semibold text-blue-300 mb-1.5">Recommendation</div>
-                    <p className="text-xs text-slate-200 leading-relaxed">{finalAnalysis.recommendation}</p>
-                  </div>
-
-                  {/* Marketing message */}
-                  <div className="bg-gradient-to-br from-slate-800 to-slate-900 border border-slate-700 rounded-xl p-3">
-                    <div className="flex items-center gap-1.5 mb-1.5">
-                      <Star size={11} className="text-amber-400" />
-                      <span className="text-xs font-semibold text-amber-300">Client Message</span>
-                    </div>
-                    <p className="text-xs text-slate-300 italic leading-relaxed">"{finalAnalysis.marketing_message}"</p>
-                  </div>
+                  {/* Open Full Report — primary CTA */}
+                  <button
+                    onClick={() => setShowFullReport(true)}
+                    className="flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold py-3 px-4 rounded-xl transition-colors"
+                  >
+                    <FileSpreadsheet size={16} /> Open Full Report
+                  </button>
 
                   <div className="grid grid-cols-2 gap-2">
-                    <button
-                      onClick={downloadFinalReport}
-                      className="text-xs text-slate-200 bg-slate-800 hover:bg-slate-700 border border-slate-600 px-2.5 py-2 rounded-lg inline-flex items-center justify-center gap-1.5"
-                    >
+                    <button onClick={downloadFinalReport} className="text-xs text-slate-200 bg-slate-800 hover:bg-slate-700 border border-slate-600 px-2.5 py-2 rounded-lg inline-flex items-center justify-center gap-1.5">
                       <Download size={12} /> Download
                     </button>
-                    <button
-                      onClick={() => void shareFinalReport()}
-                      className="text-xs text-slate-200 bg-slate-800 hover:bg-slate-700 border border-slate-600 px-2.5 py-2 rounded-lg inline-flex items-center justify-center gap-1.5"
-                    >
+                    <button onClick={() => void shareFinalReport()} className="text-xs text-slate-200 bg-slate-800 hover:bg-slate-700 border border-slate-600 px-2.5 py-2 rounded-lg inline-flex items-center justify-center gap-1.5">
                       <Share2 size={12} /> Share
                     </button>
-                    <button
-                      onClick={downloadQuoteDraft}
-                      className="col-span-2 text-xs text-white bg-blue-600 hover:bg-blue-500 px-2.5 py-2 rounded-lg inline-flex items-center justify-center gap-1.5"
-                    >
-                      <FileSpreadsheet size={12} /> Generate Quote Draft
+                    <button onClick={downloadQuoteDraft} className="col-span-2 text-xs text-white bg-emerald-700 hover:bg-emerald-600 px-2.5 py-2 rounded-lg inline-flex items-center justify-center gap-1.5">
+                      <FileSpreadsheet size={12} /> Save Quote Draft
                     </button>
                   </div>
-                  <button
-                    onClick={runFinalAnalysis}
-                    className="text-xs text-slate-400 hover:text-white flex items-center gap-1.5 transition-colors"
-                  >
-                    <RotateCcw size={12} /> Re-run analysis
+                  <button onClick={runFinalAnalysis} className="text-xs text-slate-500 hover:text-white flex items-center gap-1.5 transition-colors">
+                    <RotateCcw size={11} /> Re-run analysis
                   </button>
                 </div>
               )}
 
-              {!hasGeminiKey && (
-                <div className="rounded-lg border border-amber-600/40 bg-amber-900/30 px-3 py-2 text-xs text-amber-200">
-                  Gemini key is required to complete final AI fusion.
-                </div>
+              {!hasGeminiKey && !finalAnalysis && !finalAnalyzing && (
+                <p className="text-[11px] text-slate-500">Add your Gemini key in Settings to enable AI fusion.</p>
               )}
 
               <button

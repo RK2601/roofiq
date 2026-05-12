@@ -181,8 +181,14 @@ export interface WizardWorkflowReportPayload {
     byType?: Record<string, number>;
     captureImageDataUrl?: string | null;
     capturedAtIso?: string | null;
+    depthPitchDeg?: number | null;
+    depthPitchRatio?: string | null;
+    depthMapUrl?: string | null;
+    notes?: string | null;
   }>;
   finalAnalysis: unknown | null;
+  /** Base64 data-URL of the satellite map view — saved as project snapshot_url */
+  satelliteSnapshot?: string | null;
   updatedAtIso: string;
 }
 
@@ -394,13 +400,14 @@ export async function saveWizardWorkflowReport(
     if (!projectId) {
       const wfName = report.projectFolderName?.trim() ? report.projectFolderName.trim() : null;
       const displayName = buildProjectDisplayName(wfName, report.address);
+      const bannerUrl = report.satelliteSnapshot ?? null;
       const [inserted] = await sql`
         INSERT INTO projects (address, lat, lng, snapshot_url, project_name, display_name, analysis_entry)
         VALUES (
           ${report.address},
           ${report.coordinates.lat},
           ${report.coordinates.lng},
-          NULL,
+          ${bannerUrl},
           ${wfName},
           ${displayName},
           'wizard'
@@ -409,6 +416,15 @@ export async function saveWizardWorkflowReport(
       `;
       projectId = inserted.id as string;
     }
+  }
+
+  // Update banner on existing project if we now have a satellite snapshot and they don't have one yet
+  if (report.satelliteSnapshot) {
+    await sql`
+      UPDATE projects
+      SET snapshot_url = COALESCE(snapshot_url, ${report.satelliteSnapshot})
+      WHERE id = ${projectId}::uuid
+    `;
   }
 
   const [entryRow] = await sql`

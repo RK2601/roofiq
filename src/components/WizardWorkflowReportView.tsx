@@ -468,22 +468,88 @@ export default function WizardWorkflowReportView({
         </div>
       )}
 
-      <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-        <h4 className="text-sm font-semibold text-slate-800 mb-2">Captured viewpoints</h4>
-        <p className="text-[11px] text-slate-500 mb-3">Includes map captures stored with the workflow (where under size limits).</p>
-        {report.photos.filter(p => p.captureImageDataUrl).length === 0 ? (
-          <p className="text-xs text-slate-400 italic">No viewpoint captures stored with this workflow.</p>
-        ) : (
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
-            {report.photos.filter(p => p.captureImageDataUrl).map(photo => (
-              <div key={photo.id} className="rounded-lg border border-slate-100 overflow-hidden bg-slate-50">
-                <p className="text-[10px] font-semibold text-slate-600 px-2 py-1 truncate">{photo.label}</p>
-                <img src={photo.captureImageDataUrl!} alt={photo.label} className="w-full h-24 object-cover" />
+      {/* ── Multi-Angle Photo Analysis ── */}
+      {report.photos.some(p => p.status === 'done') && (
+        <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+          <h4 className="text-sm font-semibold text-slate-800 mb-1">Multi-Angle Photo Analysis</h4>
+          <p className="text-[11px] text-slate-500 mb-3">
+            {report.photos.filter(p => p.status === 'done').length} of {report.photos.length} angles analyzed · AI + Depth Pro heat analysis per viewpoint
+          </p>
+          <div className="flex flex-col gap-3">
+            {report.photos.filter(p => p.status === 'done' || p.captureImageDataUrl).map(photo => (
+              <div key={photo.id} className="rounded-lg border border-slate-100 bg-slate-50 overflow-hidden">
+                <div className="flex gap-3 p-3">
+                  {/* Photo thumbnail */}
+                  {photo.captureImageDataUrl ? (
+                    <div className="shrink-0 flex gap-1.5">
+                      <img
+                        src={photo.captureImageDataUrl}
+                        alt={photo.label}
+                        className="w-20 h-20 object-cover rounded-lg border border-slate-200 shadow-sm"
+                      />
+                      {photo.depthMapUrl && (
+                        <img
+                          src={photo.depthMapUrl}
+                          alt="Depth map"
+                          className="w-20 h-20 object-cover rounded-lg border border-violet-200 shadow-sm"
+                          title="Depth Pro heat map"
+                        />
+                      )}
+                    </div>
+                  ) : (
+                    <div className="shrink-0 w-20 h-20 rounded-lg bg-slate-200 flex items-center justify-center border border-slate-200">
+                      <span className="text-[10px] text-slate-400 text-center px-1">{photo.label}</span>
+                    </div>
+                  )}
+                  {/* Analysis data */}
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="text-xs font-semibold text-slate-800">{photo.label}</span>
+                      {photo.status === 'done' && (
+                        <span className="text-[10px] bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded-full font-medium">Analyzed</span>
+                      )}
+                    </div>
+                    <p className="text-[10px] text-slate-500 mb-1.5">{photo.description}</p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {photo.qualityScore != null && (
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${
+                          photo.qualityScore >= 0.7 ? 'bg-green-100 text-green-700'
+                          : photo.qualityScore >= 0.4 ? 'bg-amber-100 text-amber-700'
+                          : 'bg-red-100 text-red-700'
+                        }`}>
+                          Quality {Math.round(photo.qualityScore * 100)}%
+                        </span>
+                      )}
+                      {(photo.cueCount ?? 0) > 0 && (
+                        <span className="text-[10px] bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded-full font-medium">
+                          {photo.cueCount} cues
+                        </span>
+                      )}
+                      {photo.depthPitchRatio && (
+                        <span className="text-[10px] bg-violet-100 text-violet-700 px-1.5 py-0.5 rounded-full font-medium">
+                          Depth pitch ~{photo.depthPitchRatio} ({photo.depthPitchDeg?.toFixed(1)}°)
+                        </span>
+                      )}
+                    </div>
+                    {photo.byType && Object.keys(photo.byType).length > 0 && (
+                      <div className="mt-1.5 flex flex-wrap gap-1">
+                        {Object.entries(photo.byType).filter(([, v]) => v > 0).map(([type, count]) => (
+                          <span key={type} className="text-[9px] bg-slate-200 text-slate-600 px-1 py-0.5 rounded capitalize">
+                            {type}: {count}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    {photo.notes && (
+                      <p className="mt-1 text-[10px] text-slate-500 italic">{photo.notes}</p>
+                    )}
+                  </div>
+                </div>
               </div>
             ))}
           </div>
-        )}
-      </div>
+        </div>
+      )}
 
       {finalAnalysis && (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
