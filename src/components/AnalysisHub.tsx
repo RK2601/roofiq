@@ -1,4 +1,4 @@
-import { Zap, Map, Camera, Cpu, Layers, Shield } from 'lucide-react';
+import { Zap, Map, Layers, Shield } from 'lucide-react';
 import { AppView } from '../types';
 
 interface AnalysisHubProps {
@@ -79,42 +79,6 @@ const ROUTES: RouteCard[] = [
     iconBg: 'bg-blue-100 text-blue-600',
   },
   {
-    view: 'hover-measure',
-    icon: <Camera size={28} />,
-    badge: 'Pro · Paid',
-    badgeColor: 'bg-purple-100 text-purple-700',
-    title: 'HOVER Measurement',
-    subtitle: 'Contractor-grade photogrammetry from 8 photos',
-    features: [
-      'Upload 8 directional photos',
-      'Professional 3D model generated',
-      'Exact area, pitch, length measurements',
-      'Industry-standard accuracy',
-    ],
-    cta: 'Use HOVER API',
-    gradient: 'from-purple-50 to-fuchsia-50',
-    borderColor: 'border-purple-200 hover:border-purple-400',
-    iconBg: 'bg-purple-100 text-purple-600',
-  },
-  {
-    view: 'depth-measure',
-    icon: <Cpu size={28} />,
-    badge: 'AI · Beta',
-    badgeColor: 'bg-emerald-100 text-emerald-700',
-    title: 'AI Depth Analysis',
-    subtitle: 'Zero-shot 3D depth from a single photo',
-    features: [
-      'Upload one aerial or street photo',
-      'Apple Depth Pro / MoGe-2 AI model',
-      'Instant depth map & pitch estimate',
-      'No API key needed beyond Replicate',
-    ],
-    cta: 'Analyse with AI Depth',
-    gradient: 'from-emerald-50 to-teal-50',
-    borderColor: 'border-emerald-200 hover:border-emerald-400',
-    iconBg: 'bg-emerald-100 text-emerald-600',
-  },
-  {
     view: 'analysis',
     wizardMode: true,
     autoSegmentMode: true,
@@ -191,8 +155,11 @@ export default function AnalysisHub({ onNavigate }: AnalysisHubProps) {
         </div>
 
         <p className="text-center text-xs text-slate-400 mt-8">
-          Quick Analysis, Smart Roof Wizard, and DSM Auto-Map require Google Maps + Gemini API keys.
-          HOVER requires a HOVER API key. AI Depth Analysis may require a Replicate token (server-side).
+          Quick Analysis, Smart Roof Wizard, DSM Auto-Map, and AccuMeasure require Google Maps + Gemini API keys.
+          {' '}
+          <span className="text-slate-500">
+            HOVER Measurement and AI Depth Analysis are in the sidebar under Measurement tools.
+          </span>
         </p>
       </div>
     </div>
