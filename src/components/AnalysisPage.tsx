@@ -120,11 +120,12 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
   const [solarError, setSolarError] = useState<string | null>(null);
   const [roofStructure, setRoofStructure] = useState<RoofStructureAnalysis | null>(null);
   const [showRoofStructure, setShowRoofStructure] = useState(false);
-  const [showWizard, setShowWizard] = useState(startInWizardMode);
+  // If arriving from the hub with no address yet, defer wizard open until user searches
+  const needsAddressFirst = startInWizardMode && !address.trim();
+  const [showWizard, setShowWizard] = useState(startInWizardMode && !needsAddressFirst);
   const [showSaveProjectModal, setShowSaveProjectModal] = useState(false);
   const [wizardAttach, setWizardAttach] = useState<WizardAttach>({ mode: 'inherit' });
-  // When coming from hub with no address yet, defer wizard opening until address is searched
-  const [openWizardAfterPropertySearch, setOpenWizardAfterPropertySearch] = useState(false);
+  const [openWizardAfterPropertySearch, setOpenWizardAfterPropertySearch] = useState(needsAddressFirst);
 
   const roofStructurePreview = useMemo(() => {
     const segments = solarData?.roofSegmentStats ?? [];
@@ -1060,7 +1061,11 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
           </button>
           {openWizardAfterPropertySearch && (
             <p className="mt-1 text-center text-xs text-amber-600 font-medium animate-pulse">
-              Search an address above — wizard opens after you pick one
+              {startInAutoSegmentMode
+                ? '⚡ DSM Auto-Map ready — search an address above to begin'
+                : startInAiSegmentMode
+                  ? '✦ AI Visual Segment ready — search an address above to begin'
+                  : 'Search an address above — wizard opens after you pick one'}
             </p>
           )}
 
