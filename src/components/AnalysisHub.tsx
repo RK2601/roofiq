@@ -1,15 +1,14 @@
-import { Zap, Map, Camera, Cpu, Layers, Sparkles, Box } from 'lucide-react';
+import { Zap, Map, Camera, Cpu, Layers, Box, Shield } from 'lucide-react';
 import { AppView } from '../types';
 
 interface AnalysisHubProps {
-  onNavigate: (view: AppView, wizardMode?: boolean, autoSegmentMode?: boolean, aiSegmentMode?: boolean) => void;
+  onNavigate: (view: AppView, wizardMode?: boolean, autoSegmentMode?: boolean) => void;
 }
 
 interface RouteCard {
   view: AppView;
   wizardMode?: boolean;
   autoSegmentMode?: boolean;
-  aiSegmentMode?: boolean;
   icon: React.ReactNode;
   badge?: string;
   badgeColor?: string;
@@ -23,6 +22,24 @@ interface RouteCard {
 }
 
 const ROUTES: RouteCard[] = [
+  {
+    view: 'accu-measure',
+    icon: <Shield size={28} />,
+    badge: 'Recommended',
+    badgeColor: 'bg-indigo-100 text-indigo-700',
+    title: 'AccuMeasure',
+    subtitle: 'Multi-source roof intelligence — Solar + DSM + Gemini labels',
+    features: [
+      'Google Solar API for actual sq ft per section',
+      'DSM elevation cross-validation',
+      'Gemini satellite labels on DSM planes',
+      'One-click quote generation',
+    ],
+    cta: 'Run AccuMeasure',
+    gradient: 'from-indigo-50 to-violet-50',
+    borderColor: 'border-indigo-200 hover:border-indigo-500',
+    iconBg: 'bg-indigo-100 text-indigo-600',
+  },
   {
     view: 'analysis',
     wizardMode: false,
@@ -105,37 +122,17 @@ const ROUTES: RouteCard[] = [
     badge: 'Auto · DSM',
     badgeColor: 'bg-cyan-100 text-cyan-700',
     title: 'DSM Auto-Map',
-    subtitle: 'AI-free roof plane detection from elevation data',
+    subtitle: 'Elevation-based planes + Gemini satellite labels',
     features: [
-      'No manual drawing required',
-      'DBSCAN clusters pixels by slope & aspect',
-      'Each roof plane auto-detected as polygon',
-      'Uses Google Solar 0.1 m/pixel DSM raster',
+      'No manual drawing required — DBSCAN on Solar DSM raster',
+      'Authoritative pitch & facing from elevation per plane',
+      'Gemini labels each DSM plane using the same satellite image',
+      'Disagreements flagged; measurements stay DSM-first',
     ],
     cta: 'Auto-detect Roof Planes',
     gradient: 'from-cyan-50 to-sky-50',
     borderColor: 'border-cyan-200 hover:border-cyan-400',
     iconBg: 'bg-cyan-100 text-cyan-600',
-  },
-  {
-    view: 'analysis',
-    wizardMode: true,
-    aiSegmentMode: true,
-    icon: <Sparkles size={28} />,
-    badge: 'AI · Vision',
-    badgeColor: 'bg-rose-100 text-rose-700',
-    title: 'AI Visual Segment',
-    subtitle: 'DeepLabv3+-inspired segmentation from satellite imagery',
-    features: [
-      'Gemini vision reads the satellite image directly',
-      'Detects each roof plane by visual boundaries',
-      'Returns polygon outlines + pitch & facing per plane',
-      'Complements DSM — works on any roof type',
-    ],
-    cta: 'Segment with AI Vision',
-    gradient: 'from-rose-50 to-pink-50',
-    borderColor: 'border-rose-200 hover:border-rose-400',
-    iconBg: 'bg-rose-100 text-rose-600',
   },
   {
     view: 'depth-pipeline',
@@ -172,7 +169,7 @@ export default function AnalysisHub({ onNavigate }: AnalysisHubProps) {
           {ROUTES.map((route, i) => (
             <button
               key={i}
-              onClick={() => onNavigate(route.view, route.wizardMode, route.autoSegmentMode, route.aiSegmentMode)}
+              onClick={() => onNavigate(route.view, route.wizardMode, route.autoSegmentMode)}
               className={`text-left bg-gradient-to-br ${route.gradient} border-2 ${route.borderColor} rounded-2xl p-6 transition-all duration-200 hover:shadow-lg hover:-translate-y-0.5 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500`}
             >
               <div className="flex items-start gap-4 mb-4">
@@ -212,7 +209,7 @@ export default function AnalysisHub({ onNavigate }: AnalysisHubProps) {
         </div>
 
         <p className="text-center text-xs text-slate-400 mt-8">
-          Quick Analysis, Smart Roof Wizard, DSM Auto-Map and AI Visual Segment require Google Maps + Gemini API keys.
+          Quick Analysis, Smart Roof Wizard, and DSM Auto-Map require Google Maps + Gemini API keys.
           HOVER requires a HOVER API key. AI Depth &amp; 3D Pipeline require a Replicate token (server-side).
         </p>
       </div>

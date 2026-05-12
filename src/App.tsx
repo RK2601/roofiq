@@ -51,7 +51,6 @@ export default function App() {
   const [dbBanner, setDbBanner] = useState<string | null>(null);
   const [startInWizardMode, setStartInWizardMode] = useState(false);
   const [startInAutoSegmentMode, setStartInAutoSegmentMode] = useState(false);
-  const [startInAiSegmentMode, setStartInAiSegmentMode] = useState(false);
 
   useEffect(() => {
     setApiKey(readMapsApiKey());
@@ -92,7 +91,6 @@ export default function App() {
     if (view !== 'analysis') {
       setStartInWizardMode(false);
       setStartInAutoSegmentMode(false);
-      setStartInAiSegmentMode(false);
     }
   }, [view]);
 
@@ -207,12 +205,11 @@ export default function App() {
       {view === 'dashboard' && <DashboardHome onNewAnalysis={handleNewAnalysisFromPanel} />}
       {view === 'analysis-hub' && (
         <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-y-contain [-webkit-overflow-scrolling:touch]">
-          <AnalysisHub onNavigate={(v, wizardMode, autoSegmentMode, aiSegmentMode) => {
+          <AnalysisHub onNavigate={(v, wizardMode, autoSegmentMode) => {
             setStartInWizardMode(!!wizardMode);
             setStartInAutoSegmentMode(!!autoSegmentMode);
-            setStartInAiSegmentMode(!!aiSegmentMode);
             // Always reset address so user must search for a property fresh
-            if (wizardMode || autoSegmentMode || aiSegmentMode) {
+            if (wizardMode || autoSegmentMode) {
               setAddress('');
               setCoordinates({ lat: 0, lng: 0 });
             }
@@ -264,10 +261,9 @@ export default function App() {
           coordinates={coordinates}
           onPropertySelect={handleAnalysisPropertySelect}
           onComplete={handleAnalysisComplete}
-          startInWizardMode={startInWizardMode || startInAutoSegmentMode || startInAiSegmentMode}
-          fromAnalysisHub={startInWizardMode || startInAutoSegmentMode || startInAiSegmentMode}
+          startInWizardMode={startInWizardMode || startInAutoSegmentMode}
+          fromAnalysisHub={startInWizardMode || startInAutoSegmentMode}
           startInAutoSegmentMode={startInAutoSegmentMode}
-          startInAiSegmentMode={startInAiSegmentMode}
           onWizardProjectPersisted={setProjectId}
         />
       )}
