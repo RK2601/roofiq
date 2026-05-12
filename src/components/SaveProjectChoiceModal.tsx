@@ -18,8 +18,8 @@ interface SaveProjectChoiceModalProps {
   /** Current map address — used to highlight likely matches in the list */
   currentAddress?: string;
   onCancel: () => void;
-  /** Save as a new project row (new folder). */
-  onChooseNew: () => void;
+  /** Save as a new project row (new folder). `folderName` is stored as `project_name` / `display_name`. */
+  onChooseNew: (folderName: string) => void;
   /** Merge into this project id (same folder). */
   onChooseExisting: (projectId: string) => void;
 }
@@ -59,12 +59,14 @@ export default function SaveProjectChoiceModal({
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [choice, setChoice] = useState<'new' | 'existing' | null>(null);
   const [projectSearchQuery, setProjectSearchQuery] = useState('');
+  const [newProjectName, setNewProjectName] = useState('');
 
   useEffect(() => {
     if (!open || !purpose) return;
     setChoice(null);
     setSelectedId(null);
     setProjectSearchQuery('');
+    setNewProjectName('');
     setLoadError(null);
     setLoading(true);
     getRecentProjects(40)
@@ -102,7 +104,9 @@ export default function SaveProjectChoiceModal({
 
   const handleConfirm = () => {
     if (choice === 'new') {
-      onChooseNew();
+      const name = newProjectName.trim();
+      if (!name) return;
+      onChooseNew(name);
       return;
     }
     if (choice === 'existing' && selectedId) {
@@ -110,7 +114,9 @@ export default function SaveProjectChoiceModal({
     }
   };
 
-  const canConfirm = choice === 'new' || (choice === 'existing' && !!selectedId);
+  const canConfirm =
+    (choice === 'new' && newProjectName.trim().length > 0) ||
+    (choice === 'existing' && !!selectedId);
 
   return (
     <div className="fixed inset-0 z-[60] flex items-end justify-center sm:items-center p-0 sm:p-4">
@@ -168,7 +174,10 @@ export default function SaveProjectChoiceModal({
 
           <button
             type="button"
-            onClick={() => setChoice('existing')}
+            onClick={() => {
+              setChoice('existing');
+              setNewProjectName('');
+            }}
             className={`w-full flex items-start gap-3 rounded-xl border p-3 text-left transition-colors ${
               choice === 'existing'
                 ? 'border-blue-500 bg-blue-50 ring-1 ring-blue-500'
@@ -185,6 +194,27 @@ export default function SaveProjectChoiceModal({
               </div>
             </div>
           </button>
+
+          {choice === 'new' && (
+            <div className="rounded-xl border border-slate-200 bg-slate-50/80 p-3 space-y-2">
+              <label htmlFor="new-project-name" className="block text-xs font-semibold text-slate-700">
+                Project name
+              </label>
+              <input
+                id="new-project-name"
+                type="text"
+                value={newProjectName}
+                onChange={e => setNewProjectName(e.target.value)}
+                placeholder="e.g. Smith residence, Job #1042"
+                className="w-full rounded-lg border border-slate-200 bg-white py-2.5 px-3 text-sm text-slate-900 shadow-sm outline-none placeholder:text-slate-400 focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+                autoComplete="off"
+                maxLength={120}
+              />
+              <p className="text-[11px] text-slate-500 leading-snug">
+                Saved with this address so you can find the job in Projects. Required before continuing.
+              </p>
+            </div>
+          )}
 
           {choice === 'existing' && (
             <div className="rounded-xl border border-slate-200 bg-slate-50/80 p-2">

@@ -67,6 +67,8 @@ import { ErrorBoundary } from './ErrorBoundary';
 interface WizardAttach {
   mode: 'inherit' | 'new' | 'existing';
   projectId?: string;
+  /** Set when mode is `new` — becomes wizard `project_name` / report `projectFolderName`. */
+  newProjectName?: string;
 }
 
 interface AnalysisPageProps {
@@ -1668,8 +1670,8 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
           setShowSaveProjectModal(false);
           setOpenWizardAfterPropertySearch(false);
         }}
-        onChooseNew={() => {
-          setWizardAttach({ mode: 'new' });
+        onChooseNew={(folderName) => {
+          setWizardAttach({ mode: 'new', newProjectName: folderName });
           setShowSaveProjectModal(false);
           setShowWizard(true);
         }}
@@ -1690,6 +1692,7 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
             solarDataLayers={solarDataLayers}
             existingProjectId={wizardAttach.mode === 'existing' ? (wizardAttach.projectId ?? null) : null}
             forceNewProject={wizardAttach.mode === 'new'}
+            initialProjectFolderName={wizardAttach.mode === 'new' ? (wizardAttach.newProjectName ?? null) : null}
             autoSegmentMode={startInAutoSegmentMode}
             onPersisted={(pid) => {
               onWizardProjectPersisted?.(pid);

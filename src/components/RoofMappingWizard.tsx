@@ -209,6 +209,8 @@ interface Props {
   onPersisted?: (projectId: string) => void;
   /** When true, auto-runs DSM plane detection as soon as solar data is available. */
   autoSegmentMode?: boolean;
+  /** User label for a new project (from Save dialog). Stored as `project_name` on first save. */
+  initialProjectFolderName?: string | null;
   onClose: () => void;
 }
 
@@ -242,7 +244,7 @@ function QualityBadge({ score }: { score: number }) {
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
-export default function RoofMappingWizard({ apiKey, address, coordinates, solarData, solarDataLayers, existingProjectId = null, forceNewProject = false, onPersisted, autoSegmentMode = false, onClose }: Props) {
+export default function RoofMappingWizard({ apiKey, address, coordinates, solarData, solarDataLayers, existingProjectId = null, forceNewProject = false, initialProjectFolderName = null, onPersisted, autoSegmentMode = false, onClose }: Props) {
   // Map refs
   const mapRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<google.maps.Map | null>(null);
@@ -1619,6 +1621,7 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
         const payload: WizardWorkflowReportPayload = {
           version: 'v1',
           source: 'roof-mapping-wizard',
+          projectFolderName: initialProjectFolderName?.trim() ? initialProjectFolderName.trim() : null,
           address,
           coordinates,
           outline: outline
@@ -1698,7 +1701,7 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [address, coordinates, outline, segments, structureResult, photoSlots, finalAnalysis]);
+  }, [address, coordinates, outline, segments, structureResult, photoSlots, finalAnalysis, initialProjectFolderName, solarData, solarDataLayers, existingProjectId, forceNewProject]);
 
   // Capture snapshot of previewUrls for cleanup on unmount only (not on every photoSlots change,
   // which would revoke URLs that are still being displayed).
@@ -1735,6 +1738,11 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
         </button>
         <div className="flex-1 min-w-0">
           <div className="text-xs text-slate-400 truncate">{address}</div>
+          {initialProjectFolderName?.trim() && (
+            <div className="text-[11px] text-cyan-300/90 font-medium truncate mt-0.5">
+              {initialProjectFolderName.trim()}
+            </div>
+          )}
           <div className="text-sm font-semibold text-white">Smart Roof Mapping Wizard</div>
         </div>
         <div className="flex items-center gap-2">
