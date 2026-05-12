@@ -12,6 +12,8 @@ import {
   Menu,
   X,
   Layers,
+  Camera,
+  Cpu,
 } from 'lucide-react';
 import { AppView, User } from '../types';
 
@@ -49,6 +51,12 @@ const MAIN_NAV: Array<{ view: AppView; label: string; icon: React.ReactNode }> =
   { view: 'quotes-list',  label: 'Quotes',       icon: <FileText size={18} /> },
   { view: 'marketing',    label: 'Marketing',    icon: <Megaphone size={18} /> },
   { view: 'reports',      label: 'Reports',      icon: <BarChart3 size={18} /> },
+];
+
+/** Full-page measurement tools (also in New Analysis hub). */
+const MEASUREMENT_TOOLS_NAV: Array<{ view: AppView; label: string; icon: React.ReactNode }> = [
+  { view: 'depth-measure',  label: 'AI Depth Analysis', icon: <Cpu size={18} /> },
+  { view: 'hover-measure', label: 'HOVER Measurement', icon: <Camera size={18} /> },
 ];
 
 const SYSTEM_NAV: Array<{ view: AppView; label: string; icon: React.ReactNode }> = [
@@ -121,6 +129,26 @@ export default function DashboardLayout({
           <p className="text-slate-500 text-[10px] sm:text-xs font-semibold tracking-wider uppercase px-2 mb-2">Main</p>
           <ul className="space-y-1 mb-6">
             {MAIN_NAV.map(item => (
+              <li key={item.view}>
+                <button
+                  type="button"
+                  onClick={() => go(item.view)}
+                  className={`w-full flex items-center gap-3 px-3 py-3.5 min-h-[52px] rounded-xl text-sm font-medium transition-colors touch-manipulation active:opacity-90 ${
+                    view === item.view
+                      ? 'bg-blue-600 text-white'
+                      : 'text-slate-400 hover:text-white hover:bg-slate-800 active:bg-slate-800'
+                  }`}
+                >
+                  {item.icon}
+                  <span className="text-left">{item.label}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+
+          <p className="text-slate-500 text-[10px] sm:text-xs font-semibold tracking-wider uppercase px-2 mb-2">Measurement tools</p>
+          <ul className="space-y-1 mb-6">
+            {MEASUREMENT_TOOLS_NAV.map(item => (
               <li key={item.view}>
                 <button
                   type="button"
