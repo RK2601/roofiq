@@ -1,8 +1,9 @@
 import { useState, useRef } from 'react';
 import { Upload, Cpu, Loader2, AlertTriangle, RotateCcw, Info, CheckCircle2 } from 'lucide-react';
 
-// Replicate model version (Apple Depth Pro, ICLR 2025)
-const DEPTH_PRO_VERSION = '6c8627e01893e63dc03a3a2272ec3b0f8c6d024a6bab5cc4a7c99fc4a7a8b25e';
+// Replicate model: chenxwh/ml-depth-pro (Apple Depth Pro, ICLR 2025)
+// Faster (~4s) and cheaper than alternatives. Outputs: color_map, npz.
+const DEPTH_PRO_VERSION = 'a6645b33f4e36eda0d8d52ab3da6ef37b82d198e2b70c72e680cc75f0baf1623';
 
 interface DepthResult {
   depth_map_url: string;
@@ -52,12 +53,16 @@ async function runDepthPro(imageDataUrl: string): Promise<DepthResult> {
   if (pred.status !== 'succeeded' || !pred.output) throw new Error('REPLICATE_TIMEOUT');
 
   const out = pred.output;
+  // chenxwh/ml-depth-pro returns { color_map, npz }
+  if (typeof out === 'object' && !Array.isArray(out)) {
+    const o = out as Record<string, string>;
+    return {
+      depth_map_url: o.color_map ?? o.depth ?? o.output ?? '',
+      metric_depth_url: o.npz ?? o.metric_depth,
+    };
+  }
   if (typeof out === 'string') return { depth_map_url: out };
   if (Array.isArray(out)) return { depth_map_url: out[0], metric_depth_url: out[1] };
-  if (typeof out === 'object') {
-    const o = out as Record<string, string>;
-    return { depth_map_url: o.depth ?? o.output ?? '', metric_depth_url: o.metric_depth };
-  }
   return { depth_map_url: '' };
 }
 
