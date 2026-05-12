@@ -208,9 +208,20 @@ export default function DepthAnalysisPage({ onBack }: DepthAnalysisPageProps) {
               )}
 
               {result.metric_depth_url && (
-                <div className="mb-4">
-                  <p className="text-xs text-slate-500 mb-1">Metric depth (absolute scale)</p>
-                  <img src={result.metric_depth_url} alt="Metric depth" className="w-full rounded-xl border border-slate-100" />
+                <div className="mb-4 p-3 bg-slate-50 rounded-xl border border-slate-200 flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-medium text-slate-700">Metric depth data (absolute scale)</p>
+                    <p className="text-xs text-slate-500 mt-0.5">NumPy .npz file — load in Python for per-pixel depth values in metres</p>
+                  </div>
+                  <a
+                    href={result.metric_depth_url}
+                    download="depth_metric.npz"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="shrink-0 px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white text-xs font-medium rounded-lg transition-colors"
+                  >
+                    Download .npz
+                  </a>
                 </div>
               )}
 
