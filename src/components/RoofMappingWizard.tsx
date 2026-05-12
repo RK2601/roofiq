@@ -90,6 +90,11 @@ interface DrawnSegment {
   color: string;
   analysis: SegmentAnalysis | null;
   analyzing: boolean;
+  /** Authoritative pitch/facing from DSM raster — set when segment comes from DSM Auto-Map */
+  dsmPitchDeg?: number;
+  dsmPitchRatio?: string;
+  dsmFacingDirection?: string;
+  dsmConfidence?: number;
 }
 
 type PhotoSlotId = 'top' | 'front' | 'back' | 'left' | 'right' | 'street' | '3d';
@@ -863,8 +868,19 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
           polygon,
           path: seg.path,
           color,
-          analysis: null,
+          // Pre-seed with authoritative DSM measurements
+          analysis: {
+            type: 'gable' as const,
+            facingDirection: seg.facingDirection,
+            pitchEstimate: seg.pitchRatio,
+            confidence: seg.confidence,
+            notes: `DSM Auto-Map: pitch ${seg.pitchDeg}° (${seg.pitchRatio}), facing ${seg.facingDirection}`,
+          },
           analyzing: false,
+          dsmPitchDeg: seg.pitchDeg,
+          dsmPitchRatio: seg.pitchRatio,
+          dsmFacingDirection: seg.facingDirection,
+          dsmConfidence: seg.confidence,
         };
       });
       setSegments(newSegments);
@@ -1528,7 +1544,8 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
     { ridge: 0, hip: 0, valley: 0, eave: 0, rake: 0, step: 0 }
   );
   const pitchMix = segments.reduce<Record<string, number>>((acc, segment) => {
-    const pitch = segment.analysis?.pitchEstimate ?? 'unknown';
+    // DSM pitch is authoritative; fall back to AI estimate
+    const pitch = segment.dsmPitchRatio ?? segment.analysis?.pitchEstimate ?? 'unknown';
     acc[pitch] = (acc[pitch] ?? 0) + 1;
     return acc;
   }, {});
@@ -1582,8 +1599,8 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
     return {
       id: segment.id,
       color: segment.color,
-      pitch: segment.analysis?.pitchEstimate ?? 'n/a',
-      facing: segment.analysis?.facingDirection ?? 'n/a',
+      pitch: segment.dsmPitchRatio ?? segment.analysis?.pitchEstimate ?? 'n/a',
+      facing: segment.dsmFacingDirection ?? segment.analysis?.facingDirection ?? 'n/a',
       points: pts,
       center:
         pts.length > 0
@@ -1647,6 +1664,10 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
             color: segment.color,
             path: segment.path,
             analysis: segment.analysis,
+            dsmPitchDeg: segment.dsmPitchDeg,
+            dsmPitchRatio: segment.dsmPitchRatio,
+            dsmFacingDirection: segment.dsmFacingDirection,
+            dsmConfidence: segment.dsmConfidence,
           })),
           structure: structureResult,
           photos: photoSlots.map(slot => ({
@@ -1962,7 +1983,17 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
                             <Loader2 size={11} className="animate-spin" /> AI classifying…
                           </div>
                         )}
-                        {seg.analysis && (
+                        {seg.dsmPitchDeg !== undefined && (
+                          <div className="flex flex-wrap gap-1.5 mt-1">
+                            <span className="bg-cyan-800 text-cyan-200 text-xs px-2 py-0.5 rounded-full font-semibold flex items-center gap-1">
+                              <Zap size={9} /> DSM
+                            </span>
+                            <span className="bg-cyan-900/70 text-cyan-300 text-xs px-2 py-0.5 rounded-full">{seg.dsmPitchRatio} ({seg.dsmPitchDeg}°)</span>
+                            <span className="bg-cyan-900/70 text-cyan-300 text-xs px-2 py-0.5 rounded-full">{seg.dsmFacingDirection}</span>
+                            <span className="text-xs text-cyan-500">{Math.round((seg.dsmConfidence ?? 0) * 100)}% conf</span>
+                          </div>
+                        )}
+                        {!seg.dsmPitchDeg && seg.analysis && (
                           <div className="flex flex-wrap gap-1.5 mt-1">
                             <span className="bg-slate-700 text-slate-200 text-xs px-2 py-0.5 rounded-full capitalize">{seg.analysis.type}</span>
                             <span className="bg-slate-700 text-slate-200 text-xs px-2 py-0.5 rounded-full">{seg.analysis.facingDirection}</span>
@@ -1970,7 +2001,7 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
                             <span className="text-xs text-slate-400">{Math.round(seg.analysis.confidence * 100)}% conf</span>
                           </div>
                         )}
-                        {seg.analysis?.notes && (
+                        {!seg.dsmPitchDeg && seg.analysis?.notes && (
                           <div className="text-xs text-slate-400 mt-1 italic">{seg.analysis.notes}</div>
                         )}
                         {!seg.analyzing && !seg.analysis && !hasGeminiKey && (
@@ -2421,6 +2452,22 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
                     Roof type {structureResult?.roofType ?? 'unknown'} · pitch {structureResult?.predominantPitch ?? 'n/a'} ·
                     {` cues ${structureResult?.cues.length ?? 0}`}
                   </p>
+                  {/* DSM pitch summary when auto-segmented */}
+                  {segments.some(s => s.dsmPitchDeg !== undefined) && (
+                    <div className="mt-2 pt-2 border-t border-purple-700/30">
+                      <div className="flex items-center gap-1 mb-1">
+                        <Zap size={10} className="text-cyan-400" />
+                        <span className="text-[10px] font-semibold text-cyan-300 uppercase tracking-wide">DSM measurements (authoritative)</span>
+                      </div>
+                      <div className="flex flex-wrap gap-1">
+                        {segments.filter(s => s.dsmPitchDeg !== undefined).map((s, i) => (
+                          <span key={s.id} className="bg-cyan-900/50 text-cyan-200 text-[10px] px-1.5 py-0.5 rounded-full">
+                            Seg {i + 1}: {s.dsmPitchRatio} · {s.dsmFacingDirection}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
                 <div className="rounded-xl border border-blue-700/40 bg-blue-900/20 p-3">
                   <div className="flex items-center justify-between">
