@@ -12,7 +12,7 @@ import {
 } from '@google/generative-ai';
 import type { Part, Schema } from '@google/generative-ai';
 import { readGeminiApiKey } from './googleAiKey';
-import { isGemini429OrQuotaError, readGeminiResponseText, withGemini429Retries } from './gemini429';
+import { enqueueGeminiRequest, isGemini429OrQuotaError, readGeminiResponseText, withGemini429Retries } from './gemini429';
 import { latLngToImageNorm } from './roofVision';
 import type { SegmentAnalysis } from './roofVision';
 
@@ -41,9 +41,7 @@ export interface DsmVisionEnrichment {
 
 const GEMINI_MODEL_IDS = [
   'gemini-2.5-flash',
-  'gemini-flash-latest',
   'gemini-2.0-flash',
-  'gemini-1.5-flash',
 ] as const;
 
 const SAFETY_RELAXED = [
@@ -198,6 +196,7 @@ export async function enrichDsmSegmentsWithSatelliteVision(
     { text: textPrompt } as Part,
   ];
 
+  return enqueueGeminiRequest(async () => {
   let lastError = 'ALL_MODELS_FAILED';
 
   modelLoop: for (const modelId of GEMINI_MODEL_IDS) {
@@ -261,4 +260,5 @@ export async function enrichDsmSegmentsWithSatelliteVision(
   }
 
   throw new Error(`DSM vision enrichment failed: ${lastError}`);
+  }); // enqueueGeminiRequest
 }

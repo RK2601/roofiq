@@ -6,7 +6,7 @@ import {
 } from '@google/generative-ai';
 import type { GenerateContentResult, Schema, Part } from '@google/generative-ai';
 import { readGeminiApiKey } from './googleAiKey';
-import { isGemini429OrQuotaError, withGemini429Retries } from './gemini429';
+import { enqueueGeminiRequest, isGemini429OrQuotaError, withGemini429Retries } from './gemini429';
 import { callOpenAiFallbackJson } from './openaiFallback';
 import type { SolarBuildingInsights } from './solar';
 import { azimuthLabel, formatImageryDate } from './solar';
@@ -65,19 +65,16 @@ const ROOF_RESPONSE_SCHEMA: Schema = {
   properties: {
     condition: {
       type: SchemaType.STRING,
-      format: 'enum',
-      enum: ['Excellent', 'Good', 'Fair', 'Poor', 'Critical'],
+      description: 'One of: Excellent, Good, Fair, Poor, Critical',
     },
     condition_score: { type: SchemaType.INTEGER },
     issues: {
       type: SchemaType.ARRAY,
       items: { type: SchemaType.STRING },
-      maxItems: 8,
     },
     urgency: {
       type: SchemaType.STRING,
-      format: 'enum',
-      enum: ['Low', 'Medium', 'High', 'Urgent'],
+      description: 'One of: Low, Medium, High, Urgent',
     },
     estimated_remaining_life: { type: SchemaType.STRING },
     recommendation: { type: SchemaType.STRING },
@@ -97,8 +94,6 @@ const ROOF_RESPONSE_SCHEMA: Schema = {
 /** Prefer current models; `gemini-2.0-flash` is deprecated but kept last as a fallback. */
 const GEMINI_MODEL_IDS = [
   'gemini-2.5-flash',
-  'gemini-flash-latest',
-  'gemini-1.5-flash',
   'gemini-2.0-flash',
 ] as const;
 
@@ -109,7 +104,6 @@ const SAFETY_RELAXED = [
   { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
   { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
   { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
-  { category: HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
 ];
 
 function staticMapProxyUrl(original: string): string {
@@ -259,7 +253,7 @@ export async function analyzeRoofImage(
     { text: prompt } as Part,
   ];
   try {
-    return await runGeminiLoop(parts);
+    return await enqueueGeminiRequest(() => runGeminiLoop(parts));
   } catch (e) {
     if (!isGemini429OrQuotaError(e)) throw e;
     const fallbackPrompt =
@@ -286,7 +280,7 @@ export async function analyzeRoofImageFromFile(
     { text: prompt } as Part,
   ];
   try {
-    return await runGeminiLoop(parts);
+    return await enqueueGeminiRequest(() => runGeminiLoop(parts));
   } catch (e) {
     if (!isGemini429OrQuotaError(e)) throw e;
     const fallbackPrompt =

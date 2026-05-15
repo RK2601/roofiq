@@ -6,6 +6,8 @@ import {
 } from '@google/generative-ai';
 import type { GenerateContentResult, Part, Schema } from '@google/generative-ai';
 import { readGeminiApiKey } from './googleAiKey';
+import { enqueueGeminiRequest } from './gemini429';
+import { callOpenAiFallbackJson } from './openaiFallback';
 import type { AiRoofCue, Vec2 } from './roofStructure';
 import type { SolarBuildingInsights, SolarLatLng, SolarRoofSegment } from './solar';
 
@@ -13,8 +15,6 @@ const METERS_PER_DEG_LAT = 111_320;
 const STATIC_MAP_URL_RE = /^https:\/\/maps\.googleapis\.com\/maps\/api\/staticmap\?/;
 const GEMINI_MODEL_IDS = [
   'gemini-2.5-flash',
-  'gemini-flash-latest',
-  'gemini-1.5-flash',
   'gemini-2.0-flash',
 ] as const;
 
@@ -36,8 +36,7 @@ const ROOF_CUE_SCHEMA: Schema = {
         properties: {
           type: {
             type: SchemaType.STRING,
-            format: 'enum',
-            enum: ['ridge', 'hip', 'valley', 'eave', 'rake'],
+            description: 'One of: ridge, hip, valley, eave, rake',
           },
           x1: { type: SchemaType.NUMBER },
           y1: { type: SchemaType.NUMBER },
@@ -334,6 +333,8 @@ export interface OutlineAnalysis {
 }
 
 export interface SegmentAnalysis {
+  /** 0-based index matching input order (set by batch analysis) */
+  index?: number;
   type: 'flat' | 'gable' | 'hip' | 'shed' | 'valley' | 'dormer' | 'mansard';
   facingDirection: string; // N|NE|E|SE|S|SW|W|NW|flat
   pitchEstimate: string;   // flat|2/12|3/12|4/12|6/12|8/12|10/12|12/12|steep
@@ -385,26 +386,76 @@ const OUTLINE_ANALYSIS_SCHEMA: Schema = {
 const SEGMENT_ANALYSIS_SCHEMA: Schema = {
   type: SchemaType.OBJECT,
   properties: {
-    type: {
-      type: SchemaType.STRING,
-      format: 'enum',
-      enum: ['flat', 'gable', 'hip', 'shed', 'valley', 'dormer', 'mansard'],
-    },
-    facingDirection: {
-      type: SchemaType.STRING,
-      format: 'enum',
-      enum: ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW', 'flat'],
-    },
-    pitchEstimate: {
-      type: SchemaType.STRING,
-      format: 'enum',
-      enum: ['flat', '2/12', '3/12', '4/12', '5/12', '6/12', '8/12', '10/12', '12/12', 'steep'],
-    },
+    type: { type: SchemaType.STRING, description: 'Structural type: flat, gable, hip, shed, valley, dormer, or mansard' },
+    facingDirection: { type: SchemaType.STRING, description: 'Cardinal direction this slope faces: N, NE, E, SE, S, SW, W, NW, or flat' },
+    pitchEstimate: { type: SchemaType.STRING, description: 'Slope ratio: flat, 2/12, 3/12, 4/12, 5/12, 6/12, 8/12, 10/12, 12/12, or steep' },
     confidence: { type: SchemaType.NUMBER },
     notes: { type: SchemaType.STRING },
   },
   required: ['type', 'facingDirection', 'pitchEstimate', 'confidence', 'notes'],
 };
+
+/** Batch: classify ALL segments in one Gemini call (saves quota). */
+const BATCH_SEGMENT_ANALYSIS_SCHEMA: Schema = {
+  type: SchemaType.OBJECT,
+  properties: {
+    segments: {
+      type: SchemaType.ARRAY,
+      items: {
+        type: SchemaType.OBJECT,
+        properties: {
+          index: { type: SchemaType.NUMBER, description: '0-based segment index matching the input order' },
+          type: { type: SchemaType.STRING, description: 'Structural type: flat, gable, hip, shed, valley, dormer, or mansard' },
+          facingDirection: { type: SchemaType.STRING, description: 'Cardinal direction this slope faces: N, NE, E, SE, S, SW, W, NW, or flat' },
+          pitchEstimate: { type: SchemaType.STRING, description: 'Slope ratio: flat, 2/12, 3/12, 4/12, 5/12, 6/12, 8/12, 10/12, 12/12, or steep' },
+          confidence: { type: SchemaType.NUMBER },
+          notes: { type: SchemaType.STRING },
+        },
+        required: ['index', 'type', 'facingDirection', 'pitchEstimate', 'confidence', 'notes'],
+      },
+    },
+  },
+  required: ['segments'],
+};
+
+/** Classify ALL drawn segments in a single API call (1 call instead of N). */
+export async function analyzeAllRoofSegments(
+  imageData: { data: string; mimeType: string } | null,
+  allSegmentsNormalized: { x: number; y: number }[][],
+  options?: { refinement?: boolean },
+): Promise<SegmentAnalysis[] | null> {
+  const segDesc = allSegmentsNormalized
+    .map((seg, i) => {
+      const pts = seg.map(p => `(${p.x.toFixed(3)},${p.y.toFixed(3)})`).join(' → ');
+      return `Segment ${i + 1}: ${pts}`;
+    })
+    .join('\n');
+  const refinementStr = options?.refinement
+    ? '\nPrioritize accurate pitch (ratio), slope-facing cardinal direction, and roof type for each segment; be specific to what the satellite image shows.'
+    : '';
+  const imgPart = buildImagePart(imageData);
+  const textPart: Part = {
+    text: `You are analyzing a north-up satellite image of a building rooftop.${imgPart ? '' : ' (No image provided — use coordinates only.)'}
+The user has drawn ${allSegmentsNormalized.length} roof segments:
+${segDesc}${refinementStr}
+
+For EACH segment, classify:
+- index: 0-based index matching input order
+- type: the structural type (flat/gable/hip/shed/valley/dormer/mansard)
+- facingDirection: which cardinal direction this slope faces (N/NE/E/SE/S/SW/W/NW/flat)
+- pitchEstimate: slope ratio (flat/2/12/3/12/4/12/5/12/6/12/8/12/10/12/12/12/steep)
+- confidence: 0-1 how confident you are
+- notes: 1 sentence describing what you see
+
+Return a JSON object with a "segments" array containing one entry per segment.
+Return JSON only.`,
+  } as Part;
+  const parts: Part[] = [imgPart, textPart].filter(Boolean) as Part[];
+  const { result, error } = await runGeminiWithSchema<{ segments: SegmentAnalysis[] }>(parts, BATCH_SEGMENT_ANALYSIS_SCHEMA, 0.25, 'segment_analysis');
+  if (error) console.warn('[RoofVision] analyzeAllRoofSegments failed:', error);
+  else if (!result) console.warn('[RoofVision] analyzeAllRoofSegments returned null');
+  return result?.segments ?? null;
+}
 
 const STRUCTURAL_DETECTION_SCHEMA: Schema = {
   type: SchemaType.OBJECT,
@@ -416,8 +467,7 @@ const STRUCTURAL_DETECTION_SCHEMA: Schema = {
         properties: {
           type: {
             type: SchemaType.STRING,
-            format: 'enum',
-            enum: ['ridge', 'hip', 'valley', 'eave', 'rake', 'step'],
+            description: 'One of: ridge, hip, valley, eave, rake, step',
           },
           x1: { type: SchemaType.NUMBER },
           y1: { type: SchemaType.NUMBER },
@@ -442,15 +492,13 @@ const COMBINED_ANALYSIS_SCHEMA: Schema = {
   properties: {
     condition: {
       type: SchemaType.STRING,
-      format: 'enum',
-      enum: ['Excellent', 'Good', 'Fair', 'Poor', 'Critical'],
+      description: 'One of: Excellent, Good, Fair, Poor, Critical',
     },
     condition_score: { type: SchemaType.NUMBER },
     issues: { type: SchemaType.ARRAY, items: { type: SchemaType.STRING } },
     urgency: {
       type: SchemaType.STRING,
-      format: 'enum',
-      enum: ['Low', 'Medium', 'High', 'Urgent'],
+      description: 'One of: Low, Medium, High, Urgent',
     },
     estimated_remaining_life: { type: SchemaType.STRING },
     recommendation: { type: SchemaType.STRING },
@@ -476,10 +524,12 @@ export function latLngToImageNorm(
   imageLogicalSize: number
 ): { x: number; y: number } {
   const worldPx = 256 * Math.pow(2, zoom);
-  const pixelsPerDeg = worldPx / 360;
   const half = imageLogicalSize / 2;
-  const dx = (point.lng - center.lng) * pixelsPerDeg;
-  const dy = -(point.lat - center.lat) * pixelsPerDeg; // y flips (north = top)
+  // Longitude is linear in Mercator
+  const dx = (point.lng - center.lng) * (worldPx / 360);
+  // Latitude uses Web Mercator (matches Google Static Maps tile projection)
+  const mercY = (lat: number) => Math.log(Math.tan(Math.PI / 4 + (lat * Math.PI) / 360));
+  const dy = (mercY(center.lat) - mercY(point.lat)) * (worldPx / (2 * Math.PI));
   return {
     x: Math.max(0, Math.min(1, (dx + half) / imageLogicalSize)),
     y: Math.max(0, Math.min(1, (dy + half) / imageLogicalSize)),
@@ -506,18 +556,106 @@ function buildImagePart(imageData: { data: string; mimeType: string } | null | u
 
 type GeminiResult<T> = { result: T; error: null } | { result: null; error: string };
 
-async function runGeminiWithSchema<T>(
+/** Extract text and image from Gemini Parts array for OpenAI fallback. */
+function extractPartsForOpenAi(parts: Part[]): { prompt: string; image: { data: string; mimeType: string } | null } {
+  let prompt = '';
+  let image: { data: string; mimeType: string } | null = null;
+  for (const part of parts) {
+    if (!part) continue;
+    if ('text' in part && typeof part.text === 'string') prompt += part.text + '\n';
+    if ('inlineData' in part && part.inlineData) {
+      image = { data: part.inlineData.data, mimeType: part.inlineData.mimeType || 'image/png' };
+    }
+  }
+  return { prompt: prompt.trim(), image };
+}
+
+function is429orQuota(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED') || msg.includes('QuotaFailure');
+}
+
+function shouldTryOpenAiAfterGeminiFail(lastError: string, allQuotaErrors: boolean): boolean {
+  if (allQuotaErrors) return true;
+  const u = lastError.toUpperCase();
+  return (
+    u.includes('429') ||
+    u.includes('RESOURCE_EXHAUSTED') ||
+    u.includes('503') ||
+    u.includes('UNAVAILABLE') ||
+    u.includes('OVERLOADED')
+  );
+}
+
+/** After repeated Gemini 429s on every model, pause client-side Gemini calls to stop quota spam in DevTools. */
+const GEMINI_COOLDOWN_MS = 15 * 60 * 1000;
+let geminiQuotaCooldownUntil = 0;
+
+
+function preferOpenAiVisionFirst(): boolean {
+  try {
+    const v = import.meta.env.VITE_PREFER_OPENAI_VISION;
+    return v === '1' || v === 'true';
+  } catch {
+    return false;
+  }
+}
+
+async function routeOpenAiFallback<T>(
+  validParts: Part[],
+  task: 'segment_analysis' | 'roof_cues'
+): Promise<GeminiResult<T>> {
+  const { prompt, image } = extractPartsForOpenAi(validParts);
+  if (!image || !prompt) return { result: null, error: 'OPENAI_MISSING_PARTS' };
+  try {
+    const result = await callOpenAiFallbackJson<T>({
+      task,
+      prompt: prompt + '\n\nReturn JSON only.',
+      image,
+    });
+    return { result, error: null };
+  } catch (e) {
+    return {
+      result: null,
+      error: `OpenAI-fallback: ${e instanceof Error ? e.message.slice(0, 200) : String(e)}`,
+    };
+  }
+}
+
+async function runGeminiWithSchemaImpl<T>(
   parts: Part[],
   schema: Schema,
-  temperature = 0.25
+  temperature = 0.25,
+  openAiTask?: 'segment_analysis' | 'roof_cues'
 ): Promise<GeminiResult<T>> {
-  const apiKey = readGeminiApiKey();
-  if (!apiKey) return { result: null, error: 'NO_API_KEY' };
   const validParts = parts.filter(Boolean) as Part[];
   if (validParts.length === 0) return { result: null, error: 'NO_VALID_PARTS' };
+
+  const apiKey = readGeminiApiKey();
+  if (!apiKey) {
+    if (openAiTask && (preferOpenAiVisionFirst() || Date.now() < geminiQuotaCooldownUntil)) {
+      return routeOpenAiFallback<T>(validParts, openAiTask);
+    }
+    return { result: null, error: 'NO_API_KEY' };
+  }
+
+  // Skip Gemini during cooldown so DevTools is not flooded with 429s after quota exhaustion.
+  if (openAiTask && Date.now() < geminiQuotaCooldownUntil) {
+    console.warn('[RoofVision] Gemini cooldown active — using OpenAI only');
+    return routeOpenAiFallback<T>(validParts, openAiTask);
+  }
+
+  if (openAiTask && preferOpenAiVisionFirst()) {
+    const first = await routeOpenAiFallback<T>(validParts, openAiTask);
+    if (first.result !== null && first.error === null) return first;
+  }
+
   const genAI = new GoogleGenerativeAI(apiKey);
   let lastError = 'ALL_MODELS_FAILED';
+  let allQuotaErrors = true;
+
   for (const modelId of GEMINI_MODEL_IDS) {
+    // Try with responseSchema first
     try {
       const model = genAI.getGenerativeModel({
         model: modelId,
@@ -529,15 +667,75 @@ async function runGeminiWithSchema<T>(
         },
         safetySettings: SAFETY_RELAXED,
       });
-      const raw = await withTimeout(model.generateContent(validParts), 25_000, modelId);
+      const raw = await withTimeout(model.generateContent(validParts), 45_000, modelId);
       const text = raw.response.text();
-      const cleaned = text.replace(/```json\n?/gi, '').replace(/```\n?/g, '').trim();
-      return { result: JSON.parse(cleaned) as T, error: null };
+      if (text && text.trim().length > 0) {
+        const cleaned = text.replace(/```json\n?/gi, '').replace(/```\n?/g, '').trim();
+        geminiQuotaCooldownUntil = 0;
+        return { result: JSON.parse(cleaned) as T, error: null };
+      }
     } catch (err) {
-      lastError = err instanceof Error ? err.message.slice(0, 200) : String(err);
+      const msg = err instanceof Error ? err.message : String(err);
+      lastError = `${modelId}(schema): ${msg.slice(0, 200)}`;
+      if (!is429orQuota(err)) allQuotaErrors = false;
+
+      // On 400 (schema rejected) retry same model with JSON-only mode (no schema)
+      if (msg.includes('400') || msg.includes('INVALID_ARGUMENT')) {
+        try {
+          const model = genAI.getGenerativeModel({
+            model: modelId,
+            generationConfig: {
+              responseMimeType: 'application/json',
+              temperature,
+              maxOutputTokens: 2000,
+            },
+            safetySettings: SAFETY_RELAXED,
+          });
+          const raw = await withTimeout(model.generateContent(validParts), 45_000, `${modelId}-json`);
+          const text = raw.response.text();
+          if (text && text.trim().length > 0) {
+            const cleaned = text.replace(/```json\n?/gi, '').replace(/```\n?/g, '').trim();
+            geminiQuotaCooldownUntil = 0;
+            return { result: JSON.parse(cleaned) as T, error: null };
+          }
+        } catch (fallbackErr) {
+          lastError = `${modelId}(json): ${fallbackErr instanceof Error ? fallbackErr.message.slice(0, 200) : String(fallbackErr)}`;
+          if (!is429orQuota(fallbackErr)) allQuotaErrors = false;
+        }
+      }
+
+      // On 429 (rate limit), wait before trying next model
+      if (is429orQuota(err)) {
+        const delay = 30_000 + Math.random() * 15_000;
+        console.warn(`[RoofVision] 429 rate limit on ${modelId} — waiting ${Math.round(delay)}ms before next model`);
+        await new Promise<void>(r => setTimeout(r, delay));
+      }
     }
   }
+
+  if (allQuotaErrors) {
+    geminiQuotaCooldownUntil = Date.now() + GEMINI_COOLDOWN_MS;
+    console.warn('[RoofVision] Gemini models rate-limited — pausing Gemini calls for 15 minutes.');
+  }
+
+  // ── OpenAI fallback: quota/capacity failures (or every attempt was rate-limited) ──
+  if (openAiTask && shouldTryOpenAiAfterGeminiFail(lastError, allQuotaErrors)) {
+    console.warn('[RoofVision] Gemini unavailable or rate-limited — falling back to OpenAI');
+    const oai = await routeOpenAiFallback<T>(validParts, openAiTask);
+    if (oai.result !== null && oai.error === null) return oai;
+    if (oai.error) lastError = oai.error;
+  }
+
   return { result: null, error: lastError };
+}
+
+async function runGeminiWithSchema<T>(
+  parts: Part[],
+  schema: Schema,
+  temperature = 0.25,
+  openAiTask?: 'segment_analysis' | 'roof_cues'
+): Promise<GeminiResult<T>> {
+  return enqueueGeminiRequest(() => runGeminiWithSchemaImpl<T>(parts, schema, temperature, openAiTask));
 }
 
 // ─── Wizard Gemini Calls ──────────────────────────────────────────────────────
@@ -574,16 +772,20 @@ export async function analyzeRoofSegment(
   segmentNormalized: { x: number; y: number }[],
   segmentIndex: number,
   existingSegmentsNormalized?: { x: number; y: number }[][],
+  options?: { refinement?: boolean },
 ): Promise<SegmentAnalysis | null> {
   const segStr = segmentNormalized.map(p => `(${p.x.toFixed(3)},${p.y.toFixed(3)})`).join(' → ');
   const contextStr = existingSegmentsNormalized && existingSegmentsNormalized.length > 0
     ? `\nPreviously mapped segments for context: ${existingSegmentsNormalized.length} segment(s) already identified.`
     : '';
+  const refinementStr = options?.refinement
+    ? '\nThe user re-ran this analysis after refining the polygon — prioritize accurate pitch (ratio), slope-facing cardinal direction, and roof type; be specific to what the satellite image shows.'
+    : '';
   const imgPart = buildImagePart(imageData);
   const textPart: Part = {
     text: `You are analyzing a north-up satellite image of a building rooftop.${imgPart ? '' : ' (No image provided — use coordinates only.)'}
 Segment ${segmentIndex + 1} has been drawn with these normalized image coordinates:
-${segStr}${contextStr}
+${segStr}${contextStr}${refinementStr}
 
 Classify this roof segment:
 - type: the structural type (flat/gable/hip/shed/valley/dormer/mansard)
@@ -595,8 +797,9 @@ Classify this roof segment:
 Return JSON only.`,
   } as Part;
   const parts: Part[] = [imgPart, textPart].filter(Boolean) as Part[];
-  const { result, error } = await runGeminiWithSchema<SegmentAnalysis>(parts, SEGMENT_ANALYSIS_SCHEMA);
+  const { result, error } = await runGeminiWithSchema<SegmentAnalysis>(parts, SEGMENT_ANALYSIS_SCHEMA, 0.25, 'segment_analysis');
   if (error) console.warn('[RoofVision] analyzeRoofSegment failed:', error);
+  else if (!result) console.warn('[RoofVision] analyzeRoofSegment returned null (all models failed)');
   return result;
 }
 
@@ -630,7 +833,7 @@ Also return:
 Return 4-20 cues total. Return JSON only.`,
   } as Part;
   const parts: Part[] = [imgPart, textPart].filter(Boolean) as Part[];
-  const { result, error } = await runGeminiWithSchema<StructuralDetection>(parts, STRUCTURAL_DETECTION_SCHEMA);
+  const { result, error } = await runGeminiWithSchema<StructuralDetection>(parts, STRUCTURAL_DETECTION_SCHEMA, 0.25, 'segment_analysis');
   if (error) console.warn('[RoofVision] detectRoofStructure failed:', error);
   return result;
 }
@@ -694,7 +897,7 @@ Based on all available data, provide a complete roof assessment:
 Return JSON only.`,
   } as Part);
 
-  const { result, error } = await runGeminiWithSchema<CombinedRoofAnalysis>(parts, COMBINED_ANALYSIS_SCHEMA, 0.3);
+  const { result, error } = await runGeminiWithSchema<CombinedRoofAnalysis>(parts, COMBINED_ANALYSIS_SCHEMA, 0.3, 'segment_analysis');
   if (error) console.warn('[RoofVision] analyzeCombinedRoof failed:', error);
   return result;
 }

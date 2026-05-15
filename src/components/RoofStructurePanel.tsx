@@ -34,9 +34,9 @@ const EDGE_STYLES: Record<
   ridge: { color: '#ef4444', width: 3, label: 'Ridge' },
   hip: { color: '#f97316', width: 2.5, label: 'Hip' },
   valley: { color: '#3b82f6', width: 2.5, label: 'Valley' },
-  eave: { color: '#94a3b8', width: 1.8, dash: '5 3', label: 'Eave' },
-  rake: { color: '#64748b', width: 1.8, dash: '2 3', label: 'Rake' },
-  step: { color: '#cbd5e1', width: 1.5, dash: '4 3', label: 'Step/Transition' },
+  eave: { color: '#94a3b8', width: 1.8, label: 'Eave' },
+  rake: { color: '#64748b', width: 1.8, label: 'Rake' },
+  step: { color: '#cbd5e1', width: 1.5, label: 'Step/Transition' },
 };
 
 function edgeSegment(
@@ -91,7 +91,7 @@ function renderEdges(
           y2={seg.y2}
           stroke={lowConfidence ? '#f59e0b' : style.color}
           strokeWidth={lowConfidence ? Math.max(style.width, 2.2) : style.width}
-          strokeDasharray={lowConfidence ? '5 4' : style.dash}
+          strokeDasharray={undefined}
           strokeLinecap="round"
           onClick={() => onEdgeClick?.(facet.index, idx)}
           className={onEdgeClick ? 'cursor-pointer' : undefined}

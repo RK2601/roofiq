@@ -15,6 +15,7 @@ import {
   Layers,
   Ruler,
   ArrowRight,
+  ArrowLeft,
   Satellite,
   RotateCcw,
   Info,
@@ -36,6 +37,8 @@ import {
   Upload,
   X,
   ZoomIn,
+  FolderOpen,
+  Check,
 } from 'lucide-react';
 import { saveProject } from '../utils/db';
 import { analyzeRoofImage, analyzeRoofImageFromFile, RoofAnalysis, CONDITION_BG, URGENCY_BG, CONDITION_COLORS } from '../utils/ai';
@@ -63,12 +66,15 @@ import RoofStructurePanel from './RoofStructurePanel';
 import RoofMappingWizard from './RoofMappingWizard';
 import SaveProjectChoiceModal from './SaveProjectChoiceModal';
 import { ErrorBoundary } from './ErrorBoundary';
+import type { WizardAttachSnapshot } from '../utils/authSession';
 
 interface WizardAttach {
   mode: 'inherit' | 'new' | 'existing';
   projectId?: string;
   /** Set when mode is `new` — becomes wizard `project_name` / report `projectFolderName`. */
   newProjectName?: string;
+  /** Display title when mode is `existing` (for sidebar folder label). */
+  existingDisplayName?: string;
 }
 
 interface AnalysisPageProps {
@@ -78,17 +84,61 @@ interface AnalysisPageProps {
   /** Called when the user picks a new address from the in-tab search (updates map + clears work in progress). */
   onPropertySelect: (address: string, coordinates: Coordinates) => void;
   onComplete: (sections: Omit<RoofSection, 'polygon'>[], projectId: string | null) => void;
+  /** Return to New Analysis hub and cancel the in-progress flow. */
+  onBack?: () => void;
   /** When true, the Smart Roof Mapping Wizard opens immediately on mount. */
   startInWizardMode?: boolean;
   /** After wizard workflow saves; parent keeps projectId in sync. */
   onWizardProjectPersisted?: (projectId: string) => void;
+  /** Called when user clicks "Save Project" — parent should navigate to New Analysis. */
+  onWizardSaveAndNew?: () => void;
   /** True when arriving from the New Analysis hub via the wizard card (hides draw-outline chrome). */
   fromAnalysisHub?: boolean;
   /** When true, wizard opens in DSM auto-segmentation mode. */
   startInAutoSegmentMode?: boolean;
+  /** Restore full-screen wizard after refresh (session). */
+  restoredWizardOpen?: boolean;
+  restoredWizardAttach?: WizardAttachSnapshot | null;
+  onWizardSessionPersist?: (payload: { open: boolean; attach: WizardAttachSnapshot }) => void;
 }
 
-export default function AnalysisPage({ apiKey, address, coordinates, onPropertySelect, onComplete, startInWizardMode = false, onWizardProjectPersisted, fromAnalysisHub = false, startInAutoSegmentMode = false }: AnalysisPageProps) {
+function wizardAttachFromSnapshot(a: WizardAttachSnapshot | null | undefined): WizardAttach {
+  if (a && a.mode !== 'inherit') {
+    return {
+      mode: a.mode,
+      projectId: a.projectId,
+      newProjectName: a.newProjectName,
+      existingDisplayName: a.existingDisplayName,
+    };
+  }
+  return { mode: 'inherit' };
+}
+
+function wizardAttachToSnapshot(w: WizardAttach): WizardAttachSnapshot {
+  return {
+    mode: w.mode,
+    projectId: w.projectId,
+    newProjectName: w.newProjectName,
+    existingDisplayName: w.existingDisplayName,
+  };
+}
+
+export default function AnalysisPage({
+  apiKey,
+  address,
+  coordinates,
+  onPropertySelect,
+  onComplete,
+  onBack,
+  startInWizardMode = false,
+  onWizardProjectPersisted,
+  onWizardSaveAndNew,
+  fromAnalysisHub = false,
+  startInAutoSegmentMode = false,
+  restoredWizardOpen = false,
+  restoredWizardAttach = null,
+  onWizardSessionPersist,
+}: AnalysisPageProps) {
   const mapRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<google.maps.Map | null>(null);
   const drawingManagerRef = useRef<google.maps.drawing.DrawingManager | null>(null);
@@ -120,11 +170,31 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
   const [solarError, setSolarError] = useState<string | null>(null);
   const [roofStructure, setRoofStructure] = useState<RoofStructureAnalysis | null>(null);
   const [showRoofStructure, setShowRoofStructure] = useState(false);
-  const [showWizard, setShowWizard] = useState(startInWizardMode && !!address.trim());
+  const [showWizard, setShowWizard] = useState(() => restoredWizardOpen);
   const [showSaveProjectModal, setShowSaveProjectModal] = useState(false);
-  const [wizardAttach, setWizardAttach] = useState<WizardAttach>({ mode: 'inherit' });
+  const [wizardAttach, setWizardAttach] = useState<WizardAttach>(() => wizardAttachFromSnapshot(restoredWizardAttach));
+  /** Smart Roof Wizard sidebar: live “folder” listing from RoofMappingWizard. */
+  const [wizardFolderManifest, setWizardFolderManifest] = useState<{ id: string; label: string; done: boolean }[]>([]);
+  const [wizardFolderExpanded, setWizardFolderExpanded] = useState(true);
   // When coming from hub with no address yet, defer wizard opening until address is searched
   const [openWizardAfterPropertySearch, setOpenWizardAfterPropertySearch] = useState(startInWizardMode && !address.trim());
+
+  useEffect(() => {
+    onWizardSessionPersist?.({
+      open: showWizard,
+      attach: wizardAttachToSnapshot(wizardAttach),
+    });
+  }, [showWizard, wizardAttach, onWizardSessionPersist]);
+
+  /** Hub prep flow (Smart Roof Wizard or DSM Auto-Map): same first screen as manual wizard — hide Quick Analysis-only sidebar. Plain Quick Analysis keeps full sidebar. */
+  const hideQuickAnalysisSidebar = startInWizardMode;
+
+  const wizardSidebarFolderTitle = useMemo(() => {
+    if (wizardAttach.mode === 'new' && wizardAttach.newProjectName?.trim()) return wizardAttach.newProjectName.trim();
+    if (wizardAttach.mode === 'existing' && wizardAttach.existingDisplayName?.trim()) return wizardAttach.existingDisplayName.trim();
+    if (address.trim()) return address.trim();
+    return 'Project folder';
+  }, [wizardAttach.mode, wizardAttach.newProjectName, wizardAttach.existingDisplayName, address]);
 
   const roofStructurePreview = useMemo(() => {
     const segments = solarData?.roofSegmentStats ?? [];
@@ -181,14 +251,18 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
     setShowSaveProjectModal(true);
   }, [address, openWizardAfterPropertySearch]);
 
-  // Request to open wizard — shows project choice modal, or prompts address search first
+  // Request wizard flow: first chooses/creates project (modal), then opens overlay on a later click.
   const requestOpenWizard = useCallback(() => {
     if (!address.trim()) {
       setOpenWizardAfterPropertySearch(true);
       return;
     }
+    if (wizardAttach.mode !== 'inherit') {
+      setShowWizard(true);
+      return;
+    }
     setShowSaveProjectModal(true);
-  }, [address]);
+  }, [address, wizardAttach.mode]);
 
   // Keep ref in sync
   useEffect(() => {
@@ -910,9 +984,21 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
           </div>
         )}
 
+        {onBack && (
+          <button
+            type="button"
+            onClick={onBack}
+            className="absolute top-[max(0.5rem,env(safe-area-inset-top,0px))] right-2 z-20 touch-manipulation flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 min-h-[36px] text-xs font-semibold text-slate-700 shadow-md transition-colors hover:bg-slate-50 active:bg-slate-100 lg:top-3 lg:right-3"
+            aria-label="Go back to New Analysis"
+          >
+            <ArrowLeft size={14} aria-hidden />
+            Go back
+          </button>
+        )}
+
         {/* Map toolbar */}
         {mapLoaded && (
-          <div className="absolute top-[max(0.5rem,env(safe-area-inset-top,0px))] left-2 right-2 lg:top-3 lg:left-3 lg:right-auto flex flex-wrap gap-1.5 z-10 max-w-full">
+          <div className="absolute top-[max(0.5rem,env(safe-area-inset-top,0px))] left-2 right-2 lg:top-3 lg:left-3 lg:right-auto flex flex-wrap gap-1.5 z-10 max-w-full pr-[5.5rem] sm:pr-28 lg:pr-0">
 
             {/* ── Row 1: Zoom presets + Re-center ── */}
             <div className="flex gap-1 bg-white rounded-xl shadow-md border border-slate-200 p-1">
@@ -1052,25 +1138,116 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
               </span>
             )}
           </div>
-          <p className="hidden text-xs text-slate-500 sm:block">Draw polygons on the map to measure each roof section</p>
-
-          {/* Smart Roof Mapping Wizard launch button */}
-          <button
-            type="button"
-            onClick={requestOpenWizard}
-            className="mt-2 w-full flex items-center justify-center gap-2 bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-500 hover:to-blue-500 text-white text-xs font-semibold py-2.5 px-4 rounded-xl transition-all shadow-sm"
-          >
-            <Brain size={13} />
-            Smart Roof Mapping Wizard
-            <ArrowRight size={13} />
-          </button>
-          {openWizardAfterPropertySearch && (
-            <p className="mt-1 text-center text-xs text-amber-600 font-medium animate-pulse">
-              {startInAutoSegmentMode
-                ? '⚡ DSM Auto-Map ready — search an address above to begin'
-                : 'Search an address above — wizard opens after you pick one'}
-            </p>
+          {!hideQuickAnalysisSidebar && (
+            <p className="hidden text-xs text-slate-500 sm:block">Draw polygons on the map to measure each roof section</p>
           )}
+
+          {hideQuickAnalysisSidebar && (
+            <div className="mt-2 rounded-xl border border-purple-100 bg-gradient-to-br from-purple-50/90 to-blue-50/80 px-3 py-2.5">
+              <div className="flex items-center gap-2 text-xs font-semibold text-slate-900">
+                <Brain size={14} className="text-purple-600 shrink-0" aria-hidden />
+                Smart Roof Mapping Wizard
+              </div>
+              <p className="mt-1 text-[11px] text-slate-600 leading-snug">
+                Guided analysis: structural map, multi-angle photos, and a combined report — saved in your project folder.
+              </p>
+            </div>
+          )}
+          {hideQuickAnalysisSidebar && (() => {
+            const hasAddress = !!address.trim();
+            const hasFolder = wizardAttach.mode !== 'inherit';
+            const analysisStarted = showWizard;
+            let activeIdx = 0;
+            if (!hasAddress) activeIdx = 0;
+            else if (!hasFolder) activeIdx = 1;
+            else if (!analysisStarted) activeIdx = 2;
+            else activeIdx = -1;
+            const steps = [
+              {
+                id: 'search',
+                title: 'Search the address you want to analyze',
+                sub: 'Use the field below and pick a map suggestion.',
+              },
+              {
+                id: 'folder',
+                title: 'Create a project folder to save data',
+                sub: 'New folder or add to an existing project.',
+              },
+              {
+                id: 'start',
+                title: 'Start analysis',
+                sub: 'Open the smart roof mapping wizard when you\'re ready.',
+              },
+            ] as const;
+            return (
+              <ol className="mt-3 list-none space-y-0 p-0" aria-label="Smart roof wizard setup">
+                {steps.map((step, i) => {
+                  const done =
+                    (i === 0 && hasAddress) ||
+                    (i === 1 && hasFolder) ||
+                    (i === 2 && analysisStarted);
+                  const active = !done && activeIdx === i;
+                  const pending = !done && !active;
+                  const lineBelowDone =
+                    (i === 0 && hasAddress) || (i === 1 && hasFolder);
+                  return (
+                    <li key={step.id} className="flex gap-3">
+                      <div className="flex w-8 shrink-0 flex-col items-center">
+                        <div
+                          className={[
+                            'flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition-all duration-500 ease-out motion-reduce:transition-none',
+                            done
+                              ? 'bg-slate-700 text-white shadow-sm'
+                              : active
+                                ? 'border-2 border-slate-200 bg-fuchsia-500 text-white shadow-[0_0_0_4px_rgba(255,255,255,1),0_2px_8px_rgba(192,38,211,0.35)]'
+                                : 'scale-95 bg-slate-200',
+                          ].join(' ')}
+                        >
+                          {done ? (
+                            <Check size={15} strokeWidth={2.5} aria-hidden />
+                          ) : active ? (
+                            <span className="h-2 w-2 rounded-full bg-white" aria-hidden />
+                          ) : null}
+                        </div>
+                        {i < steps.length - 1 ? (
+                          <div
+                            className={[
+                              'min-h-[2.25rem] w-0.5 flex-1 rounded-full transition-colors duration-700 ease-out motion-reduce:transition-none',
+                              lineBelowDone ? 'bg-slate-700' : 'bg-slate-200',
+                            ].join(' ')}
+                            aria-hidden
+                          />
+                        ) : null}
+                      </div>
+                      <div
+                        className={[
+                          'min-w-0 flex-1 pb-5 pt-1 transition-opacity duration-500 ease-out last:pb-0',
+                          pending ? 'opacity-65' : 'opacity-100',
+                        ].join(' ')}
+                      >
+                        <p
+                          className={[
+                            'text-xs font-semibold leading-snug transition-colors duration-500',
+                            pending ? 'text-slate-400' : 'text-slate-900',
+                          ].join(' ')}
+                        >
+                          {step.title}
+                        </p>
+                        <p
+                          className={[
+                            'mt-0.5 text-[11px] leading-snug transition-colors duration-500',
+                            active ? 'font-medium text-fuchsia-700' : 'text-slate-500',
+                          ].join(' ')}
+                        >
+                          {step.sub}
+                        </p>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ol>
+            );
+          })()}
 
           <div className="mt-2 space-y-2 border-t border-slate-200 pt-2 sm:mt-3 sm:pt-3">
             <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
@@ -1098,11 +1275,71 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
             <p className="hidden text-[11px] leading-snug text-slate-400 sm:block">
               Choose a suggestion from the dropdown to load that roof.
             </p>
+
+            {hideQuickAnalysisSidebar && (
+              <>
+                <button
+                  type="button"
+                  onClick={requestOpenWizard}
+                  disabled={!mapLoaded || !address.trim()}
+                  className="touch-manipulation w-full flex items-center justify-center gap-2 rounded-xl bg-blue-600 px-3 py-2.5 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-blue-700 disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed"
+                >
+                  {wizardAttach.mode === 'inherit' ? (
+                    <>
+                      Choose or create project folder
+                      <ArrowRight size={14} aria-hidden />
+                    </>
+                  ) : (
+                    <>
+                      Open smart roof mapping wizard
+                      <ArrowRight size={14} aria-hidden />
+                    </>
+                  )}
+                </button>
+
+                <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
+                  <button
+                    type="button"
+                    onClick={() => setWizardFolderExpanded(e => !e)}
+                    className="flex w-full items-center gap-2 px-3 py-2.5 text-left transition-colors hover:bg-slate-50"
+                    aria-expanded={wizardFolderExpanded}
+                  >
+                    <FolderOpen size={16} className="shrink-0 text-amber-600" aria-hidden />
+                    <span className="min-w-0 flex-1 truncate text-xs font-semibold text-slate-800" title={wizardSidebarFolderTitle}>
+                      {wizardSidebarFolderTitle}
+                    </span>
+                    {wizardFolderExpanded ? <ChevronUp size={14} className="shrink-0 text-slate-400" /> : <ChevronDown size={14} className="shrink-0 text-slate-400" />}
+                  </button>
+                  {wizardFolderExpanded && (
+                    <div className="border-t border-slate-100 bg-slate-50/80 px-3 py-2 space-y-1.5 max-h-48 overflow-y-auto">
+                      {wizardFolderManifest.length === 0 ? (
+                        <p className="text-[11px] text-slate-500 leading-snug">
+                          Folder is empty. Use the button above to pick a project, then open the wizard to run each analysis step.
+                        </p>
+                      ) : (
+                        wizardFolderManifest.map(item => (
+                          <div key={item.id} className="flex items-start gap-2 text-[11px] text-slate-700">
+                            {item.done ? (
+                              <Check size={14} className="mt-0.5 shrink-0 text-emerald-600" aria-hidden />
+                            ) : (
+                              <Loader2 size={14} className="mt-0.5 shrink-0 animate-spin text-blue-500" aria-hidden />
+                            )}
+                            <span className="leading-snug min-w-0">{item.label}</span>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
           </div>
         </div>
 
         <div className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-y-contain">
 
+        {!hideQuickAnalysisSidebar && (
+        <>
         {/* Solar API status banner */}
         <div className="mx-3 mt-3 mb-1">
           {solarStatus === 'loading' && (
@@ -1595,9 +1832,13 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
           </div>
         )}
 
+        </>
+        )}
+
         </div>
 
         {/* Primary actions — outside scroll region so Draw / Save stay visible without scrolling (mobile + desktop sidebar) */}
+        {!hideQuickAnalysisSidebar && (
         <div className="shrink-0 border-t border-slate-200 bg-white p-2.5 pb-[max(0.5rem,env(safe-area-inset-bottom,0px))] shadow-[0_-6px_20px_-8px_rgba(15,23,42,0.12)] lg:p-3 lg:shadow-none">
           {!isDrawing ? (
             <div className="grid grid-cols-2 gap-2 lg:flex lg:w-full lg:flex-col lg:gap-2">
@@ -1652,6 +1893,7 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
             <p className="mt-1.5 text-center text-[11px] leading-snug text-red-500">Saved locally — DB save failed</p>
           )}
         </div>
+        )}
       </aside>
 
       {showRoofStructure && roofStructure && (
@@ -1673,12 +1915,10 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
         onChooseNew={(folderName) => {
           setWizardAttach({ mode: 'new', newProjectName: folderName });
           setShowSaveProjectModal(false);
-          setShowWizard(true);
         }}
-        onChooseExisting={(pid) => {
-          setWizardAttach({ mode: 'existing', projectId: pid });
+        onChooseExisting={(pid, displayTitle) => {
+          setWizardAttach({ mode: 'existing', projectId: pid, existingDisplayName: displayTitle });
           setShowSaveProjectModal(false);
-          setShowWizard(true);
         }}
       />
 
@@ -1690,16 +1930,25 @@ export default function AnalysisPage({ apiKey, address, coordinates, onPropertyS
             coordinates={coordinates}
             solarData={solarData}
             solarDataLayers={solarDataLayers}
-            existingProjectId={wizardAttach.mode === 'existing' ? (wizardAttach.projectId ?? null) : null}
+            existingProjectId={wizardAttach.projectId ?? null}
             forceNewProject={wizardAttach.mode === 'new'}
             initialProjectFolderName={wizardAttach.mode === 'new' ? (wizardAttach.newProjectName ?? null) : null}
             autoSegmentMode={startInAutoSegmentMode}
             onPersisted={(pid) => {
+              setWizardAttach(prev => {
+                if (prev.mode === 'new' && !prev.projectId) {
+                  return { ...prev, projectId: pid };
+                }
+                return prev;
+              });
               onWizardProjectPersisted?.(pid);
             }}
+            onFolderManifestChange={setWizardFolderManifest}
+            onSaveAndNew={onWizardSaveAndNew}
             onClose={() => {
               setShowWizard(false);
               setWizardAttach({ mode: 'inherit' });
+              setWizardFolderManifest([]);
             }}
           />
         </ErrorBoundary>

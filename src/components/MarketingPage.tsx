@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { Loader } from '@googlemaps/js-api-loader';
 import {
   Target, Search, Loader2, AlertTriangle, Trash2,
@@ -6,21 +6,17 @@ import {
 } from 'lucide-react';
 import { analyzeRoofImage, RoofAnalysis, CONDITION_COLORS, CONDITION_BG, URGENCY_BG } from '../utils/ai';
 import { readGeminiApiKey } from '../utils/googleAiKey';
+import {
+  loadMarketingProspects,
+  persistMarketingProspects,
+  type MarketingProspectStored,
+} from '../utils/marketingPersistence';
 
 interface MarketingPageProps {
   apiKey: string;
 }
 
-interface Prospect {
-  id: string;
-  latlng: { lat: number; lng: number };
-  address: string;
-  snapshot_url: string;
-  status: 'analyzing' | 'done' | 'error';
-  analysis: RoofAnalysis | null;
-  error?: string;
-  inCampaign: boolean;
-}
+type Prospect = MarketingProspectStored;
 
 const CONDITION_HEX: Record<string, string> = {
   Excellent: '22c55e',
@@ -30,15 +26,138 @@ const CONDITION_HEX: Record<string, string> = {
   Critical:  '991b1b',
 };
 
+function markerIconForProspect(
+  maps: typeof google.maps,
+  p: Prospect
+): google.maps.Symbol {
+  let fillColor = '#94a3b8';
+  if (p.status === 'done' && p.analysis) {
+    fillColor = `#${CONDITION_HEX[p.analysis.condition] ?? '94a3b8'}`;
+  } else if (p.status === 'error') {
+    fillColor = '#64748b';
+  }
+  return {
+    path: maps.SymbolPath.CIRCLE,
+    scale: 10,
+    fillColor,
+    fillOpacity: p.status === 'error' ? 0.8 : 1,
+    strokeColor: '#ffffff',
+    strokeWeight: 2,
+  };
+}
+
 export default function MarketingPage({ apiKey }: MarketingPageProps) {
   const mapRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<google.maps.Map | null>(null);
   const geocoderRef = useRef<google.maps.Geocoder | null>(null);
+  const googleRef = useRef<typeof google.maps | null>(null);
   const markersRef = useRef<Map<string, google.maps.Marker>>(new Map());
+  const prospectsRef = useRef<Prospect[]>([]);
+  const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const [prospects, setProspects] = useState<Prospect[]>([]);
+  const [hydrated, setHydrated] = useState(false);
+  const [mapReady, setMapReady] = useState(false);
   const [activeTab, setActiveTab] = useState<'prospects' | 'campaign'>('prospects');
   const [mapError, setMapError] = useState('');
+  const [saveError, setSaveError] = useState<string | null>(null);
   const geminiKeyMissing = !readGeminiApiKey();
+
+  prospectsRef.current = prospects;
+
+  const runAnalysis = useCallback((id: string, snapshotUrl: string) => {
+    const maps = googleRef.current;
+    const marker = markersRef.current.get(id);
+    analyzeRoofImage(snapshotUrl)
+      .then(analysis => {
+        if (maps && marker) {
+          const hex = CONDITION_HEX[analysis.condition] ?? '94a3b8';
+          marker.setIcon({
+            path: maps.SymbolPath.CIRCLE,
+            scale: 10,
+            fillColor: `#${hex}`,
+            fillOpacity: 1,
+            strokeColor: '#ffffff',
+            strokeWeight: 2,
+          });
+          marker.setTitle(`${analysis.condition} — ${analysis.urgency} urgency`);
+        }
+        setProspects(prev => prev.map(p =>
+          p.id === id ? { ...p, status: 'done', analysis } : p
+        ));
+      })
+      .catch(err => {
+        if (maps && marker) {
+          marker.setIcon({
+            path: maps.SymbolPath.CIRCLE,
+            scale: 10,
+            fillColor: '#64748b',
+            fillOpacity: 0.8,
+            strokeColor: '#ffffff',
+            strokeWeight: 2,
+          });
+        }
+        setProspects(prev => prev.map(p =>
+          p.id === id ? { ...p, status: 'error', error: err instanceof Error ? err.message : 'Analysis failed' } : p
+        ));
+      });
+  }, []);
+
+  const upsertMarker = useCallback((p: Prospect) => {
+    const map = mapInstanceRef.current;
+    const maps = googleRef.current;
+    if (!map || !maps) return;
+
+    let marker = markersRef.current.get(p.id);
+    if (!marker) {
+      marker = new maps.Marker({
+        position: p.latlng,
+        map,
+        icon: markerIconForProspect(maps, p),
+        title: p.status === 'done' && p.analysis
+          ? `${p.analysis.condition} — ${p.analysis.urgency} urgency`
+          : p.status === 'analyzing'
+            ? 'Analyzing…'
+            : p.address,
+      });
+      markersRef.current.set(p.id, marker);
+    } else {
+      marker.setPosition(p.latlng);
+      marker.setMap(map);
+      marker.setIcon(markerIconForProspect(maps, p));
+    }
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadMarketingProspects()
+      .then(rows => {
+        if (!cancelled) {
+          setProspects(rows);
+          setHydrated(true);
+        }
+      })
+      .catch(err => {
+        console.error('[RoofIQ] marketing load', err);
+        if (!cancelled) setHydrated(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    if (persistTimerRef.current) clearTimeout(persistTimerRef.current);
+    persistTimerRef.current = setTimeout(() => {
+      void persistMarketingProspects(prospectsRef.current)
+        .then(() => setSaveError(null))
+        .catch(() => setSaveError('Could not save prospects. Check your database connection.'));
+    }, 400);
+    return () => {
+      if (persistTimerRef.current) clearTimeout(persistTimerRef.current);
+    };
+  }, [prospects, hydrated]);
 
   useEffect(() => {
     if (!apiKey) {
@@ -55,6 +174,7 @@ export default function MarketingPage({ apiKey }: MarketingPageProps) {
     loader.load().then((google) => {
       if (!mapRef.current) return;
 
+      googleRef.current = google.maps;
       const map = new google.maps.Map(mapRef.current, {
         center: { lat: 37.7749, lng: -122.4194 },
         zoom: 19,
@@ -71,8 +191,8 @@ export default function MarketingPage({ apiKey }: MarketingPageProps) {
 
       mapInstanceRef.current = map;
       geocoderRef.current = new google.maps.Geocoder();
+      setMapReady(true);
 
-      // Search autocomplete
       const input = document.getElementById('mkt-search') as HTMLInputElement | null;
       if (input) {
         const ac = new google.maps.places.Autocomplete(input, { types: ['geocode'] });
@@ -85,7 +205,6 @@ export default function MarketingPage({ apiKey }: MarketingPageProps) {
         });
       }
 
-      // Map click → add prospect
       map.addListener('click', (e: google.maps.MapMouseEvent) => {
         if (!e.latLng) return;
         const latLng = e.latLng;
@@ -93,7 +212,6 @@ export default function MarketingPage({ apiKey }: MarketingPageProps) {
         const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
         const snapshotUrl = `https://maps.googleapis.com/maps/api/staticmap?center=${latlng.lat},${latlng.lng}&zoom=20&size=640x640&maptype=satellite&scale=2&key=${apiKey}`;
 
-        // Pending marker
         const marker = new google.maps.Marker({
           position: latLng,
           map,
@@ -120,7 +238,6 @@ export default function MarketingPage({ apiKey }: MarketingPageProps) {
         };
         setProspects(prev => [pending, ...prev]);
 
-        // Reverse geocode
         geocoderRef.current?.geocode({ location: latLng }, (results, status) => {
           if (status === 'OK' && results?.[0]) {
             const addr = results[0].formatted_address;
@@ -128,44 +245,43 @@ export default function MarketingPage({ apiKey }: MarketingPageProps) {
           }
         });
 
-        // AI analysis
-        analyzeRoofImage(snapshotUrl)
-          .then(analysis => {
-            const hex = CONDITION_HEX[analysis.condition] ?? '94a3b8';
-            marker.setIcon({
-              path: google.maps.SymbolPath.CIRCLE,
-              scale: 10,
-              fillColor: `#${hex}`,
-              fillOpacity: 1,
-              strokeColor: '#ffffff',
-              strokeWeight: 2,
-            });
-            marker.setTitle(`${analysis.condition} — ${analysis.urgency} urgency`);
-            setProspects(prev => prev.map(p =>
-              p.id === id ? { ...p, status: 'done', analysis } : p
-            ));
-          })
-          .catch(err => {
-            marker.setIcon({
-              path: google.maps.SymbolPath.CIRCLE,
-              scale: 10,
-              fillColor: '#64748b',
-              fillOpacity: 0.8,
-              strokeColor: '#ffffff',
-              strokeWeight: 2,
-            });
-            setProspects(prev => prev.map(p =>
-              p.id === id ? { ...p, status: 'error', error: err.message } : p
-            ));
-          });
+        runAnalysis(id, snapshotUrl);
       });
     }).catch(() => setMapError('Failed to load Google Maps.'));
 
     return () => {
+      setMapReady(false);
       markersRef.current.forEach(m => m.setMap(null));
       markersRef.current.clear();
+      mapInstanceRef.current = null;
+      googleRef.current = null;
     };
-  }, [apiKey]);
+  }, [apiKey, runAnalysis]);
+
+  useEffect(() => {
+    if (!mapReady || !hydrated) return;
+    const currentIds = new Set(prospects.map(p => p.id));
+    markersRef.current.forEach((marker, id) => {
+      if (!currentIds.has(id)) {
+        marker.setMap(null);
+        markersRef.current.delete(id);
+      }
+    });
+    for (const p of prospects) {
+      upsertMarker(p);
+    }
+  }, [prospects, mapReady, hydrated, upsertMarker]);
+
+  useEffect(() => {
+    if (!hydrated || !mapReady || geminiKeyMissing) return;
+    for (const p of prospects) {
+      if (p.status === 'analyzing') {
+        runAnalysis(p.id, p.snapshot_url);
+      }
+    }
+    // Only resume stuck analyses once when map becomes ready after load
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hydrated, mapReady]);
 
   const removeProspect = (id: string) => {
     markersRef.current.get(id)?.setMap(null);
@@ -219,7 +335,7 @@ export default function MarketingPage({ apiKey }: MarketingPageProps) {
         </div>
 
         {/* Instructions overlay */}
-        {prospects.length === 0 && !mapError && (
+        {prospects.length === 0 && !mapError && hydrated && (
           <div className="absolute bottom-[max(0.75rem,env(safe-area-inset-bottom,0px))] left-2 right-2 z-10 lg:bottom-6 lg:left-1/2 lg:right-auto lg:-translate-x-1/2 lg:max-w-lg">
             <div className="bg-slate-900/90 backdrop-blur-sm text-white text-xs sm:text-sm px-3 py-2.5 sm:px-4 sm:py-3 rounded-xl flex items-start gap-2 leading-snug shadow-lg">
               <Target size={16} className="text-blue-400 shrink-0 mt-0.5" aria-hidden />
@@ -260,6 +376,12 @@ export default function MarketingPage({ apiKey }: MarketingPageProps) {
             </div>
           )}
 
+          {saveError && (
+            <div className="bg-red-50 border border-red-200 rounded-xl px-3 py-2.5 text-xs sm:text-sm text-red-800 mb-3 leading-relaxed">
+              {saveError}
+            </div>
+          )}
+
           {/* Tabs */}
           <div className="flex rounded-xl bg-slate-100 p-1 gap-1">
             {(['prospects', 'campaign'] as const).map(tab => (
@@ -291,7 +413,12 @@ export default function MarketingPage({ apiKey }: MarketingPageProps) {
 
         {/* Panel body */}
         <div className="flex-1 min-h-0 overflow-y-auto overscroll-y-contain [-webkit-overflow-scrolling:touch]">
-          {activeTab === 'prospects' ? (
+          {!hydrated ? (
+            <div className="flex flex-col items-center justify-center min-h-[12rem] py-10 px-4 text-center text-slate-500 text-sm">
+              <Loader2 size={28} className="animate-spin mb-3 text-blue-600" aria-hidden />
+              Loading saved prospects…
+            </div>
+          ) : activeTab === 'prospects' ? (
             prospects.length === 0 ? (
               <div className="flex flex-col items-center justify-center min-h-[12rem] py-10 px-4 text-center">
                 <MapPin size={40} className="text-slate-200 mb-3" aria-hidden />

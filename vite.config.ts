@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { spawn } from 'node:child_process'
 import type { Plugin } from 'vite'
 import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
@@ -87,8 +88,8 @@ function resolveGeminiKey(mode: string): string {
   )
 }
 
-const STATIC_MAP_URL_RE = /^https:\/\/maps\.googleapis\.com\/maps\/api\/staticmap\?/
-const SOLAR_URL_RE = /^https:\/\/solar\.googleapis\.com\//
+const STATIC_MAP_URL_RE = /^https:\/\/maps\.googleapis\.com\/maps\/api\/(staticmap|streetview)\?/
+const SOLAR_URL_RE = /^https:\/\/(solar|storage)\.googleapis\.com\//
 
 /** Dev-only: same-origin proxy so `fetch(staticMapUrl)` works (Google often omits browser CORS on Static Maps). */
 function staticMapProxyDevPlugin(): Plugin {
@@ -259,6 +260,42 @@ function openaiProxyDevPlugin(mode: string): Plugin {
   }
 }
 
+/** Dev: proxy /api/roof-net → Python child process (Shapely). */
+function roofNetDevPlugin(): Plugin {
+  return {
+    name: 'roofiq-roof-net',
+    configureServer(server) {
+      server.middlewares.use('/api/roof-net', (req, res) => {
+        res.setHeader('Access-Control-Allow-Origin', '*')
+        res.setHeader('Content-Type', 'application/json')
+        if (req.method === 'OPTIONS') { res.statusCode = 204; return res.end() }
+        if (req.method !== 'POST') { res.statusCode = 405; return res.end('{}') }
+
+        const chunks: Buffer[] = []
+        req.on('data', (c: Buffer) => chunks.push(c))
+        req.on('end', () => {
+          const scriptPath = path.join(projectRoot, 'api', 'roof_net_dev.py')
+          const py = spawn('python3', [scriptPath])
+          let out = '', err = ''
+          py.stdout.on('data', (d: Buffer) => { out += d.toString() })
+          py.stderr.on('data', (d: Buffer) => { err += d.toString() })
+          py.on('close', (code) => {
+            if (code === 0 && out) {
+              res.statusCode = 200
+              res.end(out)
+            } else {
+              res.statusCode = 500
+              res.end(JSON.stringify({ sharedEdges: [], error: err || 'python exited ' + code }))
+            }
+          })
+          py.stdin.write(Buffer.concat(chunks))
+          py.stdin.end()
+        })
+      })
+    },
+  }
+}
+
 export default defineConfig(({ mode }) => {
   const viteEnv = loadEnv(mode, projectRoot)
   const resolvedDbUrl = resolveDatabaseUrl(mode)
@@ -289,7 +326,7 @@ export default defineConfig(({ mode }) => {
   }
 
   return {
-    plugins: [react(), staticMapProxyDevPlugin(), solarProxyDevPlugin(), openaiProxyDevPlugin(mode), replicateProxyDevPlugin()],
+    plugins: [react(), staticMapProxyDevPlugin(), solarProxyDevPlugin(), openaiProxyDevPlugin(mode), replicateProxyDevPlugin(), roofNetDevPlugin()],
     envDir: projectRoot,
     define: {
       __ROOFIQ_DATABASE_URL__: JSON.stringify(resolvedDbUrl),

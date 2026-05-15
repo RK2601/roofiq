@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import {
   LayoutDashboard,
+  Map,
   MapPin,
   FolderOpen,
   FileText,
@@ -35,6 +36,7 @@ const PAGE_TITLES: Partial<Record<AppView, string>> = {
   'hover-measure': 'HOVER Measurement',
   'depth-measure': 'AI Depth Analysis',
   'accu-measure': 'AccuMeasure',
+  'roof-wizard': 'Smart Roof Wizard',
   projects: 'Projects',
   'quotes-list': 'Quotes',
   reports: 'Reports',
@@ -45,7 +47,6 @@ const PAGE_TITLES: Partial<Record<AppView, string>> = {
 
 const MAIN_NAV: Array<{ view: AppView; label: string; icon: React.ReactNode }> = [
   { view: 'dashboard',    label: 'Dashboard',    icon: <LayoutDashboard size={18} /> },
-  { view: 'accu-measure', label: 'AccuMeasure',  icon: <Layers size={18} /> },
   { view: 'analysis-hub', label: 'New Analysis', icon: <MapPin size={18} /> },
   { view: 'projects',     label: 'Projects',     icon: <FolderOpen size={18} /> },
   { view: 'quotes-list',  label: 'Quotes',       icon: <FileText size={18} /> },
@@ -53,9 +54,11 @@ const MAIN_NAV: Array<{ view: AppView; label: string; icon: React.ReactNode }> =
   { view: 'reports',      label: 'Reports',      icon: <BarChart3 size={18} /> },
 ];
 
-/** Full-page measurement tools (also in New Analysis hub). */
+/** AccuMeasure, guided wizard, AI depth, and HOVER — full-page measurement flows. */
 const MEASUREMENT_TOOLS_NAV: Array<{ view: AppView; label: string; icon: React.ReactNode }> = [
-  { view: 'depth-measure',  label: 'AI Depth Analysis', icon: <Cpu size={18} /> },
+  { view: 'accu-measure', label: 'AccuMeasure',         icon: <Layers size={18} /> },
+  { view: 'roof-wizard',  label: 'Smart Roof Wizard',   icon: <Map size={18} /> },
+  { view: 'depth-measure', label: 'AI Depth Analysis', icon: <Cpu size={18} /> },
   { view: 'hover-measure', label: 'HOVER Measurement', icon: <Camera size={18} /> },
 ];
 

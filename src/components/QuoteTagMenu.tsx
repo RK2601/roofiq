@@ -2,56 +2,35 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { MoreVertical, Trash2 } from 'lucide-react';
 import {
-  PROJECT_TAG_OPTIONS,
-  deleteProject,
+  QUOTE_TAG_OPTIONS,
+  deleteProjectQuote,
   isDbConfigured,
   projectTagLabel,
-  updateProjectTag,
+  updateQuoteTag,
 } from '../utils/db';
+import { projectTagTone } from './ProjectTagMenu';
 import { ANCHORED_MENU_WIDTH_PX, computeAnchoredMenuPosition, type AnchoredMenuPosition } from '../utils/anchoredMenuPosition';
 
-export function projectTagTone(value: string | null | undefined): string {
-  switch (value) {
-    case 'in_progress':
-      return 'bg-blue-100 text-blue-800';
-    case 'pending':
-      return 'bg-amber-100 text-amber-900';
-    case 'on_hold':
-      return 'bg-orange-100 text-orange-900';
-    case 'closed':
-      return 'bg-slate-200 text-slate-800';
-    case 'won':
-      return 'bg-green-100 text-green-800';
-    case 'lost':
-      return 'bg-red-100 text-red-800';
-    default:
-      return 'bg-slate-100 text-slate-600';
-  }
-}
-
-interface ProjectTagMenuProps {
-  projectId: string;
+interface QuoteTagMenuProps {
+  quoteId: string;
   currentTag: string | null;
-  /** Called after tag save or after project delete. */
   onTagUpdated: (tag: string | null) => void;
-  /** When set, menu includes “Delete project” and calls this after successful delete. */
-  onProjectDeleted?: (projectId: string) => void;
-  /** Smaller trigger (e.g. table row). */
+  /** Called after the quote row is deleted from the database. */
+  onQuoteDeleted?: (quoteId: string) => void;
   compact?: boolean;
 }
 
-export default function ProjectTagMenu({
-  projectId,
+export default function QuoteTagMenu({
+  quoteId,
   currentTag,
   onTagUpdated,
-  onProjectDeleted,
+  onQuoteDeleted,
   compact = false,
-}: ProjectTagMenuProps) {
+}: QuoteTagMenuProps) {
   const [open, setOpen] = useState(false);
   const [menuPos, setMenuPos] = useState<AnchoredMenuPosition | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const btnRef = useRef<HTMLButtonElement>(null);
-  /** Menu is portaled to `document.body`; clicks inside it must not count as “outside”. */
   const menuPortalRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -76,7 +55,7 @@ export default function ProjectTagMenu({
     const anchor = btnRef.current.getBoundingClientRect();
     const menuHeight = menuPortalRef.current.offsetHeight;
     setMenuPos(computeAnchoredMenuPosition(anchor, menuHeight));
-  }, [open, currentTag, onProjectDeleted]);
+  }, [open, currentTag, onQuoteDeleted]);
 
   const applyTag = async (tag: string | null) => {
     if (!isDbConfigured()) {
@@ -86,36 +65,36 @@ export default function ProjectTagMenu({
       return;
     }
     try {
-      await updateProjectTag(projectId, tag);
+      await updateQuoteTag(quoteId, tag);
       onTagUpdated(tag);
       setOpen(false);
     } catch (err) {
-      console.error('[ProjectTagMenu] update tag', err);
+      console.error('[QuoteTagMenu] update tag', err);
       window.alert(
-        `Could not update project status: ${err instanceof Error ? err.message : String(err)}`
+        `Could not update quote status: ${err instanceof Error ? err.message : String(err)}`
       );
     }
   };
 
   const handleDelete = async () => {
-    if (!onProjectDeleted) return;
+    if (!onQuoteDeleted) return;
     if (!isDbConfigured()) {
       window.alert(
         'Database is not connected. Add VITE_DATABASE_URL or DATABASE_URL (your Neon connection string) to .env, restart the dev server, and ensure the variable is available when you run production builds (e.g. on Vercel).'
       );
       return;
     }
-    if (!window.confirm('Delete this project and all related data (sections, quotes, reports)? This cannot be undone.')) {
+    if (!window.confirm('Delete this quote? This cannot be undone.')) {
       return;
     }
     try {
-      await deleteProject(projectId);
+      await deleteProjectQuote(quoteId);
       setOpen(false);
-      onProjectDeleted(projectId);
+      onQuoteDeleted(quoteId);
     } catch (err) {
-      console.error('[ProjectTagMenu] delete project', err);
+      console.error('[QuoteTagMenu] delete quote', err);
       window.alert(
-        `Could not delete project: ${err instanceof Error ? err.message : String(err)}`
+        `Could not delete quote: ${err instanceof Error ? err.message : String(err)}`
       );
     }
   };
@@ -147,7 +126,7 @@ export default function ProjectTagMenu({
             </div>
           )}
           <p className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-slate-400">Set status</p>
-          {PROJECT_TAG_OPTIONS.map(opt => (
+          {QUOTE_TAG_OPTIONS.map(opt => (
             <button
               key={opt.value}
               type="button"
@@ -176,7 +155,7 @@ export default function ProjectTagMenu({
           >
             Clear tag
           </button>
-          {onProjectDeleted && (
+          {onQuoteDeleted && (
             <>
               <div className="my-1 border-t border-slate-100" />
               <button
@@ -189,7 +168,7 @@ export default function ProjectTagMenu({
                 className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm font-semibold text-red-600 hover:bg-red-50"
               >
                 <Trash2 size={14} aria-hidden />
-                Delete project
+                Delete quote
               </button>
             </>
           )}
@@ -218,7 +197,7 @@ export default function ProjectTagMenu({
         }`}
         aria-expanded={open}
         aria-haspopup="menu"
-        aria-label="Project status and actions"
+        aria-label="Quote status"
       >
         <MoreVertical size={compact ? 16 : 18} aria-hidden />
       </button>

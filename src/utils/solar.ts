@@ -61,7 +61,7 @@ export interface SolarSegmentFilterSummary {
 }
 
 const SOLAR_API_BASE = 'https://solar.googleapis.com/v1';
-const SOLAR_URL_RE = /^https:\/\/solar\.googleapis\.com\//;
+const SOLAR_URL_RE = /^https:\/\/(solar|storage)\.googleapis\.com\//;
 
 function solarProxyUrl(original: string): string {
   if (typeof window === 'undefined') return original;
@@ -277,6 +277,18 @@ export async function fetchBuildingInsights(
   }
 }
 
+/**
+ * Solar `dataLayers:get` only allows radius > 100m when `pixelSizeMeters * 1000 >= radius`
+ * (default pixel is 0.1 ⇒ max radius 100m). Clamp grid size when callers pass a larger radius.
+ */
+function dataLayersRadiusAndPixelParam(radiusMeters: number): { radius: number; extraQuery: string } {
+  const r = Math.max(1, Math.min(1000, radiusMeters));
+  if (r <= 100) return { radius: r, extraQuery: '' };
+  const pixels = [0.25, 0.5, 1.0] as const;
+  const pixel = pixels.find(p => r <= p * 1000) ?? 1.0;
+  return { radius: r, extraQuery: `&pixelSizeMeters=${pixel}` };
+}
+
 /** Phase 2 prep: fetches Solar data layer metadata (DSM/RGB URLs when available). */
 export async function fetchDataLayers(
   lat: number,
@@ -286,9 +298,10 @@ export async function fetchDataLayers(
   options?: FetchBuildingInsightsOptions
 ): Promise<SolarDataLayersResponse | null> {
   const requiredQuality = options?.requiredQuality ?? 'LOW';
+  const { radius, extraQuery } = dataLayersRadiusAndPixelParam(radiusMeters);
   const url =
     `${SOLAR_API_BASE}/dataLayers:get?location.latitude=${lat}` +
-    `&location.longitude=${lng}&radiusMeters=${radiusMeters}&requiredQuality=${requiredQuality}&key=${apiKey}`;
+    `&location.longitude=${lng}&radiusMeters=${radius}${extraQuery}&requiredQuality=${requiredQuality}&key=${apiKey}`;
 
   const tryFetch = async (u: string): Promise<SolarDataLayersResponse | null> => {
     const res = await fetch(u);

@@ -1,4 +1,12 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }]
+  "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }],
+  "functions": {
+    "api/proxy-openai.ts": {
+      "maxDuration": 120
+    },
+    "api/roof-net.py": {
+      "maxDuration": 30
+    }
+  }
 }

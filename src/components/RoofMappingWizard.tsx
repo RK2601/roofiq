@@ -47,8 +47,18 @@ import {
   FileSpreadsheet,
   Zap,
   Sparkles,
+  Maximize2,
+  ZoomIn,
+  Navigation,
+  Eye,
+  EyeOff,
+  Satellite,
+  Undo2,
+  RefreshCw,
+  FolderOpen,
 } from 'lucide-react';
 import type { Coordinates } from '../types';
+import { formatArea } from '../utils/roofCalculations';
 import type { SolarBuildingInsights, SolarDataLayersResponse } from '../utils/solar';
 import { analyzeDsmForSegments, autoSegmentRoofPlanes, pitchDegToRatio, type DsmAnalysisResult } from '../utils/roofDsm';
 import { analyzeSolarSegments, type RoofStructureAnalysis } from '../utils/roofStructure';
@@ -57,6 +67,7 @@ import { runPhotoDepthAnalysis, consensusDepthPitch, type PhotoDepthResult } fro
 import {
   analyzeRoofOutline,
   analyzeRoofSegment,
+  analyzeAllRoofSegments,
   detectRoofStructure,
   analyzeCombinedRoof,
   deriveVisionRoofCuesFromFile,
@@ -69,8 +80,10 @@ import {
 } from '../utils/roofVision';
 import { readGeminiApiKey } from '../utils/googleAiKey';
 import { isDbConfigured, saveWizardWorkflowReport, type WizardWorkflowReportPayload } from '../utils/db';
+import { buildRoofOutlineSnapshotDataUrl } from '../utils/wizardOutlineSnapshot';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
+import RoofVertexEdgeDrawer from './RoofVertexEdgeDrawer';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -96,6 +109,212 @@ interface DrawnSegment {
   dsmPitchRatio?: string;
   dsmFacingDirection?: string;
   dsmConfidence?: number;
+}
+
+/** Meters — max close radius; click within this of the first corner closes the outline (after ≥3 points). */
+const OUTLINE_SKETCH_CLOSE_M = 9.0;
+/** Meters — min close radius (floor for very small structures). */
+const OUTLINE_SKETCH_CLOSE_MIN_M = 2.0;
+
+function polyPathFromPolygon(poly: google.maps.Polygon): { lat: number; lng: number }[] {
+  const path: { lat: number; lng: number }[] = [];
+  poly.getPath().forEach(ll => path.push({ lat: ll.lat(), lng: ll.lng() }));
+  return path;
+}
+
+/** Collapse nearly-identical vertices and redundant colinear points on a closed segment ring (save-time only). */
+function dedupeSegmentPathForSave(points: { lat: number; lng: number }[]): { lat: number; lng: number }[] {
+  const geom = typeof google !== 'undefined' ? google.maps?.geometry?.spherical : undefined;
+  if (!geom || points.length < 3) return points;
+
+  const dist = (a: { lat: number; lng: number }, b: { lat: number; lng: number }) =>
+    geom.computeDistanceBetween(new google.maps.LatLng(a.lat, a.lng), new google.maps.LatLng(b.lat, b.lng));
+
+  const MIN_GAP_M = 0.25;
+  const COLINEAR_EXCESS_M = 0.12;
+
+  let ring = points.map(p => ({ lat: p.lat, lng: p.lng }));
+
+  for (let iter = 0; iter < ring.length + 8; iter++) {
+    const prevLen = ring.length;
+    const next: typeof ring = [];
+    for (let i = 0; i < ring.length; i++) {
+      const p = ring[i];
+      if (next.length === 0 || dist(next[next.length - 1], p) >= MIN_GAP_M) next.push(p);
+    }
+    ring = next;
+    if (ring.length >= 2 && dist(ring[0], ring[ring.length - 1]) < MIN_GAP_M) ring.pop();
+    if (ring.length === prevLen) break;
+  }
+
+  if (ring.length < 3) return points;
+
+  for (let guard = 0; guard < ring.length + 24 && ring.length > 3; guard++) {
+    let removed = false;
+    for (let i = 0; i < ring.length; i++) {
+      const A = ring[(i - 1 + ring.length) % ring.length];
+      const B = ring[i];
+      const C = ring[(i + 1) % ring.length];
+      const dAB = dist(A, B);
+      const dBC = dist(B, C);
+      const dAC = dist(A, C);
+      if (dAB < MIN_GAP_M || dBC < MIN_GAP_M) continue;
+      if (dAB + dBC - dAC < COLINEAR_EXCESS_M) {
+        ring.splice(i, 1);
+        removed = true;
+        break;
+      }
+    }
+    if (!removed) break;
+  }
+
+  return ring.length >= 3 ? ring : points;
+}
+
+/** Reuse roof outline / existing segment corners when drawing a new segment. */
+const SEGMENT_SHARED_VERTEX_SNAP_M = 4.5;
+/** Snap clicks onto an existing edge so shared boundaries share one line (geodesic). */
+const SEGMENT_SHARED_EDGE_SNAP_M = 7.0;
+
+function closestPointOnGeodesicSegment(
+  geom: { interpolate: (a: google.maps.LatLng, b: google.maps.LatLng, f: number) => google.maps.LatLng; computeDistanceBetween: (a: google.maps.LatLng, b: google.maps.LatLng) => number },
+  a: google.maps.LatLng,
+  b: google.maps.LatLng,
+  p: google.maps.LatLng
+): { point: google.maps.LatLng; dist: number } {
+  let bestT = 0;
+  let bestD = Infinity;
+  for (let k = 0; k <= 40; k++) {
+    const t = k / 40;
+    const q = geom.interpolate(a, b, t);
+    const d = geom.computeDistanceBetween(p, q);
+    if (d < bestD) {
+      bestD = d;
+      bestT = t;
+    }
+  }
+  let lo = Math.max(0, bestT - 0.03);
+  let hi = Math.min(1, bestT + 0.03);
+  for (let r = 0; r < 14; r++) {
+    const t1 = lo + (hi - lo) / 3;
+    const t2 = hi - (hi - lo) / 3;
+    const d1 = geom.computeDistanceBetween(p, geom.interpolate(a, b, t1));
+    const d2 = geom.computeDistanceBetween(p, geom.interpolate(a, b, t2));
+    if (d1 < d2) hi = t2;
+    else lo = t1;
+  }
+  bestT = (lo + hi) / 2;
+  const point = geom.interpolate(a, b, bestT);
+  return { point, dist: geom.computeDistanceBetween(p, point) };
+}
+
+function forEachPolygonRingEdge(
+  path: google.maps.MVCArray<google.maps.LatLng>,
+  fn: (a: google.maps.LatLng, b: google.maps.LatLng) => void
+): void {
+  const n = path.getLength();
+  if (n < 2) return;
+  for (let i = 0; i < n; i++) fn(path.getAt(i), path.getAt((i + 1) % n));
+}
+
+/** While drawing a segment: snap to outline / existing segments / prior sketch vertices. */
+function snapSegmentSketchLatLng(
+  raw: google.maps.LatLng,
+  outlinePoly: google.maps.Polygon | null,
+  neighborSegments: DrawnSegment[],
+  sketchPathSoFar: google.maps.MVCArray<google.maps.LatLng> | null
+): google.maps.LatLng {
+  const geom = typeof google !== 'undefined' ? google.maps?.geometry?.spherical : undefined;
+  if (!geom) return raw;
+
+  type Hit = { ll: google.maps.LatLng; d: number };
+  const vertexHits: Hit[] = [];
+  const edgeHits: Hit[] = [];
+
+  const pushVertex = (ll: google.maps.LatLng) => {
+    const d = geom.computeDistanceBetween(raw, ll);
+    if (d <= SEGMENT_SHARED_VERTEX_SNAP_M) vertexHits.push({ ll, d });
+  };
+  const pushEdge = (a: google.maps.LatLng, b: google.maps.LatLng) => {
+    const { point, dist } = closestPointOnGeodesicSegment(geom, a, b, raw);
+    if (dist <= SEGMENT_SHARED_EDGE_SNAP_M) edgeHits.push({ ll: point, d: dist });
+  };
+
+  if (outlinePoly) {
+    const pth = outlinePoly.getPath();
+    for (let i = 0; i < pth.getLength(); i++) pushVertex(pth.getAt(i));
+    forEachPolygonRingEdge(pth, pushEdge);
+  }
+  for (const s of neighborSegments) {
+    const pth = s.polygon.getPath();
+    for (let i = 0; i < pth.getLength(); i++) pushVertex(pth.getAt(i));
+    forEachPolygonRingEdge(pth, pushEdge);
+  }
+  if (sketchPathSoFar) {
+    const n = sketchPathSoFar.getLength();
+    for (let i = 0; i < n; i++) pushVertex(sketchPathSoFar.getAt(i));
+  }
+
+  if (vertexHits.length) {
+    vertexHits.sort((u, v) => u.d - v.d);
+    return vertexHits[0].ll;
+  }
+  if (edgeHits.length) {
+    edgeHits.sort((u, v) => u.d - v.d);
+    return edgeHits[0].ll;
+  }
+  return raw;
+}
+
+/** After closing a segment, move each corner onto outline / neighbor edges so borders line up exactly. */
+function alignSegmentRingToNeighborGeometry(
+  ring: { lat: number; lng: number }[],
+  outlinePoly: google.maps.Polygon | null,
+  neighborSegments: DrawnSegment[]
+): { lat: number; lng: number }[] {
+  const geom = typeof google !== 'undefined' ? google.maps?.geometry?.spherical : undefined;
+  if (!geom || ring.length < 3) return ring;
+
+  const vSnap = SEGMENT_SHARED_VERTEX_SNAP_M + 0.35;
+  const eSnap = SEGMENT_SHARED_EDGE_SNAP_M + 0.45;
+
+  return ring.map(p => {
+    const raw = new google.maps.LatLng(p.lat, p.lng);
+    type Hit = { ll: google.maps.LatLng; d: number };
+    const vertexHits: Hit[] = [];
+    const edgeHits: Hit[] = [];
+    const pushVertex = (ll: google.maps.LatLng) => {
+      const d = geom.computeDistanceBetween(raw, ll);
+      if (d <= vSnap) vertexHits.push({ ll, d });
+    };
+    const pushEdge = (a: google.maps.LatLng, b: google.maps.LatLng) => {
+      const { point, dist } = closestPointOnGeodesicSegment(geom, a, b, raw);
+      if (dist <= eSnap) edgeHits.push({ ll: point, d: dist });
+    };
+
+    if (outlinePoly) {
+      const pth = outlinePoly.getPath();
+      for (let i = 0; i < pth.getLength(); i++) pushVertex(pth.getAt(i));
+      forEachPolygonRingEdge(pth, pushEdge);
+    }
+    for (const s of neighborSegments) {
+      const pth = s.polygon.getPath();
+      for (let i = 0; i < pth.getLength(); i++) pushVertex(pth.getAt(i));
+      forEachPolygonRingEdge(pth, pushEdge);
+    }
+
+    if (vertexHits.length) {
+      vertexHits.sort((u, v) => u.d - v.d);
+      const ll = vertexHits[0].ll;
+      return { lat: ll.lat(), lng: ll.lng() };
+    }
+    if (edgeHits.length) {
+      edgeHits.sort((u, v) => u.d - v.d);
+      const ll = edgeHits[0].ll;
+      return { lat: ll.lat(), lng: ll.lng() };
+    }
+    return { lat: p.lat, lng: p.lng };
+  });
 }
 
 type PhotoSlotId = 'top' | 'front' | 'back' | 'left' | 'right' | 'street' | '3d';
@@ -211,6 +430,10 @@ interface Props {
   autoSegmentMode?: boolean;
   /** User label for a new project (from Save dialog). Stored as `project_name` on first save. */
   initialProjectFolderName?: string | null;
+  /** Live list of completed / in-progress analyses for parent sidebar “project folder” UI. */
+  onFolderManifestChange?: (entries: { id: string; label: string; done: boolean }[]) => void;
+  /** Called after Save Project — parent should navigate to the New Analysis view. */
+  onSaveAndNew?: () => void;
   onClose: () => void;
 }
 
@@ -242,27 +465,143 @@ function QualityBadge({ score }: { score: number }) {
   return <span className={`font-bold ${color}`}>{pct}%</span>;
 }
 
+/** White corner handles — match Google Maps drawing style (main vertices). */
+function outlineSketchVertexIcon(): google.maps.Symbol {
+  return {
+    path: google.maps.SymbolPath.CIRCLE,
+    scale: 6,
+    fillColor: '#ffffff',
+    fillOpacity: 1,
+    strokeColor: '#334155',
+    strokeWeight: 1.5,
+  };
+}
+
+/** Smaller semi-transparent dots mid-edge — like Maps “add a point here” handles while drawing. */
+function outlineSketchMidpointIcon(): google.maps.Symbol {
+  return {
+    path: google.maps.SymbolPath.CIRCLE,
+    scale: 4,
+    fillColor: '#ffffff',
+    fillOpacity: 0.6,
+    strokeColor: '#64748b',
+    strokeWeight: 1,
+  };
+}
+
 // ─── Main Component ───────────────────────────────────────────────────────────
 
-export default function RoofMappingWizard({ apiKey, address, coordinates, solarData, solarDataLayers, existingProjectId = null, forceNewProject = false, initialProjectFolderName = null, onPersisted, autoSegmentMode = false, onClose }: Props) {
+export default function RoofMappingWizard({ apiKey, address, coordinates, solarData, solarDataLayers, existingProjectId = null, forceNewProject = false, initialProjectFolderName = null, onPersisted, autoSegmentMode = false, onFolderManifestChange, onSaveAndNew, onClose }: Props) {
   // Map refs
   const mapRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<google.maps.Map | null>(null);
   const drawingManagerRef = useRef<google.maps.drawing.DrawingManager | null>(null);
+  const outlineSketchPolylineRef = useRef<google.maps.Polyline | null>(null);
+  const outlineSketchClickListenerRef = useRef<google.maps.MapsEventListener | null>(null);
+  const outlineSketchDblClickListenerRef = useRef<google.maps.MapsEventListener | null>(null);
+  const outlineSketchVertexMarkersRef = useRef<google.maps.Marker[]>([]);
+  const outlineSketchPathListenersRef = useRef<google.maps.MapsEventListener[]>([]);
+  const outlineSketchPreviewPolylineRef = useRef<google.maps.Polyline | null>(null);
+  const outlineSketchMouseMoveListenerRef = useRef<google.maps.MapsEventListener | null>(null);
+  const outlineSketchCloseCircleRef = useRef<google.maps.Circle | null>(null);
+  const outlineSketchCloseRadiusRef = useRef<number>(OUTLINE_SKETCH_CLOSE_M);
+  const finalizeOutlineSketchRef = useRef<() => void>(() => {});
+
+  const segmentSketchPolylineRef = useRef<google.maps.Polyline | null>(null);
+  const segmentSketchPreviewPolylineRef = useRef<google.maps.Polyline | null>(null);
+  const segmentSketchClickListenerRef = useRef<google.maps.MapsEventListener | null>(null);
+  const segmentSketchDblClickListenerRef = useRef<google.maps.MapsEventListener | null>(null);
+  const segmentSketchMouseMoveListenerRef = useRef<google.maps.MapsEventListener | null>(null);
+  const segmentSketchPathListenersRef = useRef<google.maps.MapsEventListener[]>([]);
+  const segmentSketchVertexMarkersRef = useRef<google.maps.Marker[]>([]);
+  const segmentSketchColorRef = useRef('#3b82f6');
+  const segmentSketchCloseCircleRef = useRef<google.maps.Circle | null>(null);
+  const finalizeSegmentSketchRef = useRef<() => void>(() => {});
+
   const structLinesRef = useRef<google.maps.Polyline[]>([]);
+  const streetViewRef = useRef<HTMLDivElement>(null);
+  const panoramaRef = useRef<google.maps.StreetViewPanorama | null>(null);
+  const labelsRef = useRef<google.maps.InfoWindow[]>([]);
+  /** Keys: `'outline'`, `'segment:${id}'` — stays hidden after user closes that InfoWindow until Pins is toggled off then on. */
+  const dismissedMapLabelsRef = useRef<Set<string>>(new Set());
+  /** Ignore `closeclick` while effect replaces InfoWindows so user dismiss state is not polluted. */
+  const suppressLabelCloseDismissRef = useRef(false);
+  /**
+   * DB `projects.id` for this wizard session. Synced from `existingProjectId` and set as soon as a save
+   * returns so rapid autosaves never call `saveWizardWorkflowReport` without a project id (which, with
+   * `forceNewProject`, would INSERT a new row every time).
+   */
+  const wizardLinkedProjectIdRef = useRef<string | null>(existingProjectId?.trim() ? existingProjectId.trim() : null);
+  useEffect(() => {
+    const p = existingProjectId?.trim();
+    if (p) wizardLinkedProjectIdRef.current = p;
+  }, [existingProjectId]);
+
+  // ── Sequential segment-analysis queue ──────────────────────────────────────
+  // All analyzeRoofSegment calls go through this queue so we never fire more
+  // than one Gemini request at a time (prevents rate-limit failures when many
+  // segments are committed at once).
+  const segAnalysisQueueRef   = useRef<Array<() => Promise<void>>>([]);
+  const segAnalysisActiveRef  = useRef(false);
+
+  const drainSegAnalysisQueue = useCallback(async () => {
+    if (segAnalysisActiveRef.current) return;
+    segAnalysisActiveRef.current = true;
+    while (segAnalysisQueueRef.current.length > 0) {
+      const task = segAnalysisQueueRef.current.shift();
+      if (!task) break;
+      // Retry wrapper: up to 2 retries with growing delay; each attempt has a 60s cap
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          await Promise.race([
+            task(),
+            new Promise<never>((_, reject) =>
+              setTimeout(() => reject(new Error('QUEUE_TASK_TIMEOUT')), 60_000)
+            ),
+          ]);
+          break;
+        } catch (err) {
+          console.warn(`[RoofWizard] seg-analysis attempt ${attempt + 1} failed:`, err instanceof Error ? err.message : err);
+          if (attempt < 2) await new Promise<void>(r => setTimeout(r, 2_000 * (attempt + 1)));
+        }
+      }
+      // Pace between calls to avoid 429 rate limits
+      if (segAnalysisQueueRef.current.length > 0) {
+        await new Promise<void>(r => setTimeout(r, 1_500));
+      }
+    }
+    segAnalysisActiveRef.current = false;
+  }, []);
+
+  const enqueueSegAnalysis = useCallback((task: () => Promise<void>) => {
+    segAnalysisQueueRef.current.push(task);
+    void drainSegAnalysisQueue();
+  }, [drainSegAnalysisQueue]);
 
   // State
   const [phase, setPhase] = useState<Phase>(1);
-  // AI/DSM modes skip the manual outline step — start at segments directly
-  const [step1Sub, setStep1Sub] = useState<'outline' | 'segments' | 'structure'>(
-    autoSegmentMode ? 'segments' : 'outline'
-  );
+  /** Always start on Outline; DSM auto-map runs only after outline exists and user opens Segments. */
+  const [step1Sub, setStep1Sub] = useState<'outline' | 'segments' | 'structure'>('outline');
   const [mapLoaded, setMapLoaded] = useState(false);
   const [mapError, setMapError] = useState('');
   const [isDrawing, setIsDrawing] = useState(false);
+  const [mapType, setMapType] = useState<'satellite' | 'hybrid'>('satellite');
+  const [tilt, setTilt] = useState(false);
+  const [showLabels, setShowLabels] = useState(true);
+  const wasShowLabelsRef = useRef(showLabels);
+  const [showStreetView, setShowStreetView] = useState(false);
+  const [streetViewAvailable, setStreetViewAvailable] = useState(false);
+  const [outlineSketchMode, setOutlineSketchMode] = useState(false);
+  const [outlineSketchPointCount, setOutlineSketchPointCount] = useState(0);
+  const [segmentSketchMode, setSegmentSketchMode] = useState(false);
+  const [segmentSketchPointCount, setSegmentSketchPointCount] = useState(0);
+  const [vertexEdgeActive, setVertexEdgeActive] = useState(false);
 
   const [outline, setOutline] = useState<DrawnOutline | null>(null);
   const [segments, setSegments] = useState<DrawnSegment[]>([]);
+  // Mirror segments in a ref so callbacks can read current value without stale closures
+  const segmentsRef = useRef<DrawnSegment[]>([]);
+  segmentsRef.current = segments;
   const [structureResult, setStructureResult] = useState<StructuralDetection | null>(null);
   const [structureAnalyzing, setStructureAnalyzing] = useState(false);
   const [structureError, setStructureError] = useState<string | null>(null);
@@ -273,8 +612,9 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
   const [dsmError, setDsmError] = useState<string | null>(null);
 
   const [autoSegmenting, setAutoSegmenting] = useState(false);
-  const [autoSegmentError, setAutoSegmentError] = useState<string | null>(null);
   const autoSegmentRanRef = useRef(false);
+  /** DSM Auto-Map: one-shot trigger after user advances to Segments (avoids mount-time skip + effect retry loops on failure). */
+  const pendingAutoSegmentAfterOutlineRef = useRef(false);
   const dsmVisionEnrichAppliedRef = useRef(false);
 
   const [photoSlots, setPhotoSlots] = useState<PhotoSlot[]>(INITIAL_PHOTO_SLOTS);
@@ -286,7 +626,19 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
   const [finalError, setFinalError] = useState<string | null>(null);
   const [finalSource, setFinalSource] = useState<'ai' | 'fallback' | null>(null);
   const [showFullReport, setShowFullReport] = useState(false);
-  const [persistStatus, setPersistStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const persistStatusRef = useRef<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [persistStatus, _setPersistStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const setPersistStatus = useCallback((s: 'idle' | 'saving' | 'saved' | 'error') => {
+    persistStatusRef.current = s;
+    _setPersistStatus(s);
+  }, []);
+  const [quoteDraftSaved, setQuoteDraftSaved] = useState(false);
+  const [projectSaving, setProjectSaving] = useState(false);
+
+  /** Append one history run on the next persistence cycle (consumed by the auto-save effect). */
+  const appendHistoryNextRef = useRef(false);
+  /** Used to trigger the auto-save effect to run once more on explicit actions. */
+  const [historySaveNonce, setHistorySaveNonce] = useState(0);
 
   // Satellite image cache for Gemini calls
   const satelliteImageRef = useRef<{ data: string; mimeType: string } | null>(null);
@@ -353,6 +705,42 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
 
     return () => {
       cancelled = true;
+      labelsRef.current.forEach(iw => iw.close());
+      labelsRef.current = [];
+      panoramaRef.current = null;
+      if (outlineSketchMouseMoveListenerRef.current) {
+        google.maps.event.removeListener(outlineSketchMouseMoveListenerRef.current);
+        outlineSketchMouseMoveListenerRef.current = null;
+      }
+      outlineSketchPreviewPolylineRef.current?.setMap(null);
+      outlineSketchPreviewPolylineRef.current = null;
+      if (outlineSketchClickListenerRef.current) {
+        google.maps.event.removeListener(outlineSketchClickListenerRef.current);
+        outlineSketchClickListenerRef.current = null;
+      }
+      outlineSketchPathListenersRef.current.forEach(l => google.maps.event.removeListener(l));
+      outlineSketchPathListenersRef.current = [];
+      outlineSketchVertexMarkersRef.current.forEach(m => m.setMap(null));
+      outlineSketchVertexMarkersRef.current = [];
+      outlineSketchPolylineRef.current?.setMap(null);
+      outlineSketchPolylineRef.current = null;
+
+      if (segmentSketchMouseMoveListenerRef.current) {
+        google.maps.event.removeListener(segmentSketchMouseMoveListenerRef.current);
+        segmentSketchMouseMoveListenerRef.current = null;
+      }
+      if (segmentSketchClickListenerRef.current) {
+        google.maps.event.removeListener(segmentSketchClickListenerRef.current);
+        segmentSketchClickListenerRef.current = null;
+      }
+      segmentSketchPathListenersRef.current.forEach(l => google.maps.event.removeListener(l));
+      segmentSketchPathListenersRef.current = [];
+      segmentSketchVertexMarkersRef.current.forEach(m => m.setMap(null));
+      segmentSketchVertexMarkersRef.current = [];
+      segmentSketchPreviewPolylineRef.current?.setMap(null);
+      segmentSketchPreviewPolylineRef.current = null;
+      segmentSketchPolylineRef.current?.setMap(null);
+      segmentSketchPolylineRef.current = null;
       outline?.polygon.setMap(null);
       segments.forEach(s => s.polygon.setMap(null));
       clearStructureLines();
@@ -410,114 +798,596 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
     drawingManagerRef.current?.setDrawingMode(null);
   }, []);
 
-  const startDrawing = useCallback((color = '#3b82f6') => {
-    if (!drawingManagerRef.current) return;
-    drawingManagerRef.current.setOptions({
-      polygonOptions: {
-        fillColor: color,
-        strokeColor: color,
-        fillOpacity: 0.2,
-        strokeWeight: 2.5,
-        editable: true,
-        draggable: false,
-      },
-    });
-    drawingManagerRef.current.setDrawingMode(google.maps.drawing.OverlayType.POLYGON);
-    setIsDrawing(true);
-  }, []);
-
-  function polyPath(poly: google.maps.Polygon): { lat: number; lng: number }[] {
-    const path: { lat: number; lng: number }[] = [];
-    poly.getPath().forEach(ll => path.push({ lat: ll.lat(), lng: ll.lng() }));
-    return path;
-  }
-
-  function normalizePath(path: { lat: number; lng: number }[]) {
-    return path.map(p => latLngToImageNorm(p, coordinates, 20, 640));
-  }
-
-  // ── Step 1a: Outline ────────────────────────────────────────────────────────
-
-  useEffect(() => {
-    if (!mapLoaded || step1Sub !== 'outline' || phase !== 1) return;
-    const dm = drawingManagerRef.current;
-    if (!dm) return;
-
-    const listener = google.maps.event.addListener(dm, 'polygoncomplete', async (polygon: google.maps.Polygon) => {
+  const applyCompletedOutlinePolygon = useCallback(
+    async (polygon: google.maps.Polygon) => {
       stopDrawing();
       polygon.setOptions({ fillColor: '#f97316', strokeColor: '#ea580c', editable: true });
-
-      // Remove previous outline polygon if any
       setOutline(prev => {
         prev?.polygon.setMap(null);
         return null;
       });
 
-      const path = polyPath(polygon);
-      const newOutline: DrawnOutline = { polygon, path, analysis: null, analyzing: hasGeminiKey };
+      const pathPts = polyPathFromPolygon(polygon);
+      const newOutline: DrawnOutline = { polygon, path: pathPts, analysis: null, analyzing: hasGeminiKey };
       setOutline(newOutline);
 
       if (!hasGeminiKey) return;
 
-      const normalized = normalizePath(path);
+      const normalized = pathPts.map(p => latLngToImageNorm(p, coordinates, 20, 640));
       const imgData = satelliteImageRef.current;
 
       try {
         const analysis = await analyzeRoofOutline(imgData, normalized);
-        setOutline(prev => prev ? { ...prev, analysis, analyzing: false } : prev);
+        setOutline(prev => (prev ? { ...prev, analysis, analyzing: false } : prev));
       } catch {
-        setOutline(prev => prev ? { ...prev, analyzing: false } : prev);
+        setOutline(prev => (prev ? { ...prev, analyzing: false } : prev));
+      }
+    },
+    [stopDrawing, hasGeminiKey, coordinates]
+  );
+
+  const clearOutlineSketch = useCallback(() => {
+    if (outlineSketchMouseMoveListenerRef.current) {
+      google.maps.event.removeListener(outlineSketchMouseMoveListenerRef.current);
+      outlineSketchMouseMoveListenerRef.current = null;
+    }
+    if (outlineSketchDblClickListenerRef.current) {
+      google.maps.event.removeListener(outlineSketchDblClickListenerRef.current);
+      outlineSketchDblClickListenerRef.current = null;
+    }
+    outlineSketchCloseCircleRef.current?.setMap(null);
+    outlineSketchCloseCircleRef.current = null;
+    outlineSketchPreviewPolylineRef.current?.setMap(null);
+    outlineSketchPreviewPolylineRef.current = null;
+    outlineSketchPathListenersRef.current.forEach(l => google.maps.event.removeListener(l));
+    outlineSketchPathListenersRef.current = [];
+    outlineSketchVertexMarkersRef.current.forEach(m => m.setMap(null));
+    outlineSketchVertexMarkersRef.current = [];
+    if (outlineSketchClickListenerRef.current) {
+      google.maps.event.removeListener(outlineSketchClickListenerRef.current);
+      outlineSketchClickListenerRef.current = null;
+    }
+    outlineSketchPolylineRef.current?.setMap(null);
+    outlineSketchPolylineRef.current = null;
+    setOutlineSketchMode(false);
+    setOutlineSketchPointCount(0);
+    setIsDrawing(false);
+  }, []);
+
+  const finalizeOutlineSketch = useCallback(() => {
+    const polyline = outlineSketchPolylineRef.current;
+    const map = mapInstanceRef.current;
+    if (!polyline || !map) return;
+    const path = polyline.getPath();
+    if (path.getLength() < 3) return;
+
+    if (outlineSketchClickListenerRef.current) {
+      google.maps.event.removeListener(outlineSketchClickListenerRef.current);
+      outlineSketchClickListenerRef.current = null;
+    }
+    if (outlineSketchDblClickListenerRef.current) {
+      google.maps.event.removeListener(outlineSketchDblClickListenerRef.current);
+      outlineSketchDblClickListenerRef.current = null;
+    }
+    if (outlineSketchMouseMoveListenerRef.current) {
+      google.maps.event.removeListener(outlineSketchMouseMoveListenerRef.current);
+      outlineSketchMouseMoveListenerRef.current = null;
+    }
+    outlineSketchCloseCircleRef.current?.setMap(null);
+    outlineSketchCloseCircleRef.current = null;
+    outlineSketchPreviewPolylineRef.current?.setMap(null);
+    outlineSketchPreviewPolylineRef.current = null;
+    outlineSketchPathListenersRef.current.forEach(l => google.maps.event.removeListener(l));
+    outlineSketchPathListenersRef.current = [];
+    outlineSketchVertexMarkersRef.current.forEach(m => m.setMap(null));
+    outlineSketchVertexMarkersRef.current = [];
+
+    const closedPath = path.getArray().map(ll => ({ lat: ll.lat(), lng: ll.lng() }));
+    polyline.setMap(null);
+    outlineSketchPolylineRef.current = null;
+    const polygon = new google.maps.Polygon({
+      paths: closedPath,
+      fillColor: '#f97316',
+      strokeColor: '#ea580c',
+      fillOpacity: 0.2,
+      strokeWeight: 2.5,
+      editable: true,
+      draggable: false,
+      map,
+    });
+
+    setOutlineSketchMode(false);
+    setIsDrawing(false);
+    setOutlineSketchPointCount(0);
+
+    void applyCompletedOutlinePolygon(polygon);
+  }, [applyCompletedOutlinePolygon]);
+
+  finalizeOutlineSketchRef.current = finalizeOutlineSketch;
+
+  const undoOutlineSketchLastPoint = useCallback(() => {
+    const pl = outlineSketchPolylineRef.current;
+    if (!pl) return;
+    const path = pl.getPath();
+    const n = path.getLength();
+    if (n === 0) return;
+    path.removeAt(n - 1);
+    // insert_at / remove_at listeners refresh dots and point count
+  }, []);
+
+  const startOutlineSketch = useCallback(() => {
+    const map = mapInstanceRef.current;
+    if (!map || !mapLoaded || step1Sub !== 'outline' || phase !== 1) return;
+
+    drawingManagerRef.current?.setDrawingMode(null);
+    clearOutlineSketch();
+    setOutline(prev => {
+      prev?.polygon.setMap(null);
+      return null;
+    });
+
+    const path = new google.maps.MVCArray<google.maps.LatLng>();
+    const polyline = new google.maps.Polyline({
+      path,
+      strokeColor: '#ea580c',
+      strokeOpacity: 1,
+      strokeWeight: 2.5,
+      clickable: false,
+      zIndex: 3,
+      map,
+    });
+    outlineSketchPolylineRef.current = polyline;
+
+    const previewPath = new google.maps.MVCArray<google.maps.LatLng>();
+    const previewPolyline = new google.maps.Polyline({
+      path: previewPath,
+      strokeColor: '#fdba74',
+      strokeOpacity: 0.98,
+      strokeWeight: 2.5,
+      zIndex: 4,
+      clickable: false,
+      map,
+      icons: [
+        {
+          icon: { path: 'M 0,-1 0,1', strokeOpacity: 1, scale: 2 },
+          offset: '0',
+          repeat: '10px',
+        },
+      ],
+    });
+    outlineSketchPreviewPolylineRef.current = previewPolyline;
+
+    const moveListener = map.addListener('mousemove', (e: google.maps.MapMouseEvent) => {
+      previewPath.clear();
+      if (!e.latLng) return;
+      const n = path.getLength();
+      if (n >= 1) {
+        previewPath.push(path.getAt(n - 1));
+        previewPath.push(e.latLng);
       }
     });
+    outlineSketchMouseMoveListenerRef.current = moveListener;
 
-    return () => google.maps.event.removeListener(listener);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mapLoaded, step1Sub, phase, hasGeminiKey]);
+    const refreshOutlineSketchDots = () => {
+      outlineSketchVertexMarkersRef.current.forEach(m => m.setMap(null));
+      outlineSketchVertexMarkersRef.current = [];
+      const g = mapInstanceRef.current;
+      if (!g) return;
+      const n = path.getLength();
+      const hasGeom = typeof google !== 'undefined' && !!google.maps?.geometry?.spherical;
 
-  // ── Step 1b: Segments ───────────────────────────────────────────────────────
+      for (let i = 0; i < n; i++) {
+        outlineSketchVertexMarkersRef.current.push(
+          new google.maps.Marker({
+            position: path.getAt(i),
+            map: g,
+            icon: outlineSketchVertexIcon(),
+            zIndex: (google.maps.Marker.MAX_ZINDEX ?? 1000000) + 2,
+            clickable: false,
+            draggable: false,
+          })
+        );
+      }
+
+      if (hasGeom) {
+        for (let i = 0; i < n - 1; i++) {
+          const a = path.getAt(i);
+          const b = path.getAt(i + 1);
+          const mid = google.maps.geometry.spherical.interpolate(a, b, 0.5);
+          outlineSketchVertexMarkersRef.current.push(
+            new google.maps.Marker({
+              position: mid,
+              map: g,
+              icon: outlineSketchMidpointIcon(),
+              zIndex: (google.maps.Marker.MAX_ZINDEX ?? 1000000) + 1,
+              clickable: false,
+              draggable: false,
+            })
+          );
+        }
+      }
+
+      setOutlineSketchPointCount(path.getLength());
+    };
+
+    const pathEvents: Array<'insert_at' | 'remove_at' | 'set_at'> = ['insert_at', 'remove_at', 'set_at'];
+    for (const ev of pathEvents) {
+      outlineSketchPathListenersRef.current.push(
+        google.maps.event.addListener(path, ev, () => refreshOutlineSketchDots())
+      );
+    }
+
+    const updateCloseCircle = () => {
+      const n = path.getLength();
+      if (n >= 3) {
+        const first = path.getAt(0);
+        let minDist = Infinity;
+        for (let i = 1; i < n; i++) {
+          const d = google.maps.geometry.spherical.computeDistanceBetween(first, path.getAt(i));
+          if (d < minDist) minDist = d;
+        }
+        const adaptiveRadius = Math.max(
+          OUTLINE_SKETCH_CLOSE_MIN_M,
+          Math.min(OUTLINE_SKETCH_CLOSE_M, minDist * 0.35),
+        );
+        outlineSketchCloseRadiusRef.current = adaptiveRadius;
+        if (!outlineSketchCloseCircleRef.current) {
+          outlineSketchCloseCircleRef.current = new google.maps.Circle({
+            center: first,
+            radius: adaptiveRadius,
+            strokeColor: '#22c55e',
+            strokeOpacity: 0.85,
+            strokeWeight: 2,
+            fillColor: '#22c55e',
+            fillOpacity: 0.18,
+            clickable: false,
+            zIndex: 5,
+            map,
+          });
+        } else {
+          outlineSketchCloseCircleRef.current.setCenter(first);
+          outlineSketchCloseCircleRef.current.setRadius(adaptiveRadius);
+          outlineSketchCloseCircleRef.current.setMap(map);
+        }
+      } else {
+        outlineSketchCloseCircleRef.current?.setMap(null);
+        outlineSketchCloseRadiusRef.current = OUTLINE_SKETCH_CLOSE_M;
+      }
+    };
+
+    const listener = map.addListener('click', (e: google.maps.MapMouseEvent) => {
+      if (!e.latLng) return;
+      const len = path.getLength();
+      if (
+        len >= 3 &&
+        google.maps.geometry.spherical.computeDistanceBetween(path.getAt(0), e.latLng) <= outlineSketchCloseRadiusRef.current
+      ) {
+        finalizeOutlineSketchRef.current();
+        return;
+      }
+      path.push(e.latLng);
+      updateCloseCircle();
+    });
+    outlineSketchClickListenerRef.current = listener;
+
+    // Double-click anywhere (with ≥3 pts) also closes the polygon
+    const dblListener = map.addListener('dblclick', (e: google.maps.MapMouseEvent) => {
+      e.stop?.();
+      if (path.getLength() >= 3) finalizeOutlineSketchRef.current();
+    });
+    outlineSketchDblClickListenerRef.current = dblListener;
+
+    refreshOutlineSketchDots();
+
+    setOutlineSketchMode(true);
+    setIsDrawing(true);
+  }, [mapLoaded, step1Sub, phase, clearOutlineSketch]);
 
   useEffect(() => {
-    if (!mapLoaded || step1Sub !== 'segments' || phase !== 1) return;
-    const dm = drawingManagerRef.current;
-    if (!dm) return;
+    if (step1Sub !== 'outline' || phase !== 1) {
+      clearOutlineSketch();
+    }
+  }, [step1Sub, phase, clearOutlineSketch]);
 
-    const listener = google.maps.event.addListener(dm, 'polygoncomplete', async (polygon: google.maps.Polygon) => {
-      stopDrawing();
+  useEffect(() => {
+    if (!outlineSketchMode) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        clearOutlineSketch();
+        return;
+      }
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z' && !e.shiftKey) {
+        const t = e.target as HTMLElement | null;
+        if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+        e.preventDefault();
+        undoOutlineSketchLastPoint();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
+  }, [outlineSketchMode, clearOutlineSketch, undoOutlineSketchLastPoint]);
 
-      setSegments(prev => {
-        const idx = prev.length;
-        const color = SEGMENT_COLORS[idx % SEGMENT_COLORS.length];
-        polygon.setOptions({ fillColor: color, strokeColor: color, fillOpacity: 0.22, editable: true });
+  const clearSegmentSketch = useCallback(() => {
+    if (segmentSketchClickListenerRef.current) {
+      google.maps.event.removeListener(segmentSketchClickListenerRef.current);
+      segmentSketchClickListenerRef.current = null;
+    }
+    if (segmentSketchDblClickListenerRef.current) {
+      google.maps.event.removeListener(segmentSketchDblClickListenerRef.current);
+      segmentSketchDblClickListenerRef.current = null;
+    }
+    if (segmentSketchMouseMoveListenerRef.current) {
+      google.maps.event.removeListener(segmentSketchMouseMoveListenerRef.current);
+      segmentSketchMouseMoveListenerRef.current = null;
+    }
+    segmentSketchCloseCircleRef.current?.setMap(null);
+    segmentSketchCloseCircleRef.current = null;
+    segmentSketchPathListenersRef.current.forEach(l => google.maps.event.removeListener(l));
+    segmentSketchPathListenersRef.current = [];
+    segmentSketchVertexMarkersRef.current.forEach(m => m.setMap(null));
+    segmentSketchVertexMarkersRef.current = [];
+    segmentSketchPreviewPolylineRef.current?.setMap(null);
+    segmentSketchPreviewPolylineRef.current = null;
+    segmentSketchPolylineRef.current?.setMap(null);
+    segmentSketchPolylineRef.current = null;
+    setSegmentSketchMode(false);
+    setSegmentSketchPointCount(0);
+    setIsDrawing(false);
+    outline?.polygon.setOptions({ clickable: true });
+    segments.forEach(s => s.polygon.setOptions({ clickable: true }));
+  }, [outline, segments]);
 
-        const id = `seg_${Date.now()}`;
-        const path = polyPath(polygon);
-        const newSeg: DrawnSegment = { id, index: idx, polygon, path, color, analysis: null, analyzing: hasGeminiKey };
-        const updated = [...prev, newSeg];
+  const undoSegmentSketchLastPoint = useCallback(() => {
+    const pl = segmentSketchPolylineRef.current;
+    if (!pl) return;
+    const path = pl.getPath();
+    if (path.getLength() === 0) return;
+    path.removeAt(path.getLength() - 1);
+  }, []);
 
-        // Kick off Gemini analysis async
-        if (hasGeminiKey) {
-          const normalized = path.map(p => latLngToImageNorm(p, coordinates, 20, 640));
-          const allPrev = prev.map(s => s.path.map(p => latLngToImageNorm(p, coordinates, 20, 640)));
-          const imgData = satelliteImageRef.current;
+  // Called when DrawingManager fires polygoncomplete for a segment.
+  const commitDrawnPolygon = useCallback((drawnPolygon: google.maps.Polygon) => {
+    const map = mapInstanceRef.current;
+    if (!map) return;
 
-          analyzeRoofSegment(imgData, normalized, idx, allPrev)
-            .then(analysis => {
-              setSegments(curr => curr.map(s => s.id === id ? { ...s, analysis, analyzing: false } : s));
-            })
-            .catch(() => {
-              setSegments(curr => curr.map(s => s.id === id ? { ...s, analyzing: false } : s));
-            });
-        }
+    // Stop DrawingManager and clean up sketch state
+    drawingManagerRef.current?.setDrawingMode(null);
+    clearSegmentSketch();
 
-        return updated;
-      });
+    const color = segmentSketchColorRef.current;
+
+    // Apply snap alignment so shared edges line up with the outline/existing segments
+    const closedPathRaw = drawnPolygon.getPath().getArray().map(ll => ({ lat: ll.lat(), lng: ll.lng() }));
+    drawnPolygon.setMap(null); // remove the DrawingManager version; we'll create our own below
+
+    let closedPath = dedupeSegmentPathForSave(closedPathRaw);
+    closedPath = alignSegmentRingToNeighborGeometry(closedPath, outline?.polygon ?? null, segments);
+    closedPath = dedupeSegmentPathForSave(closedPath);
+    if (closedPath.length < 3) closedPath = dedupeSegmentPathForSave(closedPathRaw);
+
+    const polygon = new google.maps.Polygon({
+      paths: closedPath,
+      fillColor: color,
+      strokeColor: color,
+      fillOpacity: 0.22,
+      strokeWeight: 2.5,
+      editable: true,
+      draggable: false,
+      map,
     });
 
-    return () => google.maps.event.removeListener(listener);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mapLoaded, step1Sub, phase, hasGeminiKey]);
+    const id = `seg_${Date.now()}`;
+    const pathPts = polyPathFromPolygon(polygon);
+    // Read current segments from ref so we don't need segments in deps (avoids stale closure)
+    const currentSegs = segmentsRef.current;
+    const idx = currentSegs.length;
+
+    const newSeg: DrawnSegment = {
+      id,
+      index: idx,
+      polygon,
+      path: pathPts,
+      color,
+      analysis: null,
+      analyzing: hasGeminiKey,
+    };
+
+    setSegments(prev => [...prev, newSeg]);
+
+    // Batch-analyze ALL segments in one API call (1 call total instead of N).
+    // When a new segment is committed, re-run batch analysis on every segment
+    // that still needs analysis — this uses just 1 quota unit regardless of count.
+    if (hasGeminiKey) {
+      const batchId = Date.now();
+
+      // Skip enqueue if a batch is already waiting — it reads segmentsRef at execution time
+      // so it will pick up this newly committed segment automatically.
+      if (segAnalysisQueueRef.current.length === 0) {
+      enqueueSegAnalysis(async () => {
+        // Read current segments from ref at execution time (state may have updated)
+        const currentSegs = segmentsRef.current;
+        const unanalyzed = currentSegs.filter(s => !s.analysis && s.analyzing);
+        if (unanalyzed.length === 0) {
+          setSegments(curr => curr.map(s => (s.analyzing ? { ...s, analyzing: false } : s)));
+          return;
+        }
+        // Wait for satellite image to load (captures fresh ref, not stale enqueue-time value)
+        const imgData = await waitForSatelliteImage(8_000);
+        const allNorm = currentSegs.map(s => s.path.map(p => latLngToImageNorm(p, coordinates, 20, 640)));
+        console.log(`[RoofWizard] Batch-analyzing ${unanalyzed.length} segments in 1 call (batch ${batchId})`);
+        return analyzeAllRoofSegments(imgData, allNorm)
+          .then(results => {
+            console.log(`[RoofWizard] Batch ${batchId} result:`, results ? `${results.length} segments` : 'NULL');
+            if (results && results.length > 0) {
+              setSegments(curr => {
+                return curr.map((seg, i) => {
+                  const match = results.find(r => r.index === i);
+                  if (match && (seg.analyzing || !seg.analysis)) {
+                    return { ...seg, analysis: match, analyzing: false };
+                  }
+                  if (seg.analyzing && !seg.analysis) {
+                    return { ...seg, analyzing: false };
+                  }
+                  return seg;
+                });
+              });
+            } else {
+              setSegments(curr => curr.map(s => (s.analyzing ? { ...s, analyzing: false } : s)));
+            }
+          })
+          .catch(err => {
+            console.warn(`[RoofWizard] Batch ${batchId} error:`, err);
+            setSegments(curr => curr.map(s => (s.analyzing ? { ...s, analyzing: false } : s)));
+          });
+      });
+      } // end: segAnalysisQueueRef.current.length === 0
+    }
+  }, [hasGeminiKey, coordinates, outline, clearSegmentSketch, enqueueSegAnalysis, waitForSatelliteImage]);
+
+  // Keep ref in sync so startSegmentSketch closure always calls the latest version
+  finalizeSegmentSketchRef.current = () => {}; // unused now — kept to avoid TS errors on callers
+
+  // Called when RoofVertexEdgeDrawer finishes — convert detected faces to DrawnSegments.
+  // Vertex positions are kept exactly as placed — no snapping or alignment applied.
+  const onVertexEdgeDone = useCallback((faces: Array<{ path: { lat: number; lng: number }[] }>) => {
+    setVertexEdgeActive(false);
+    const map = mapInstanceRef.current;
+    if (!map || faces.length === 0) return;
+
+    // Read current segments from ref to get stable snapshot (avoids stale closure)
+    const currentSegs = segmentsRef.current;
+    const startIdx = currentSegs.length;
+
+    // Build all segments BEFORE calling setSegments,
+    // so we never run side effects inside a state updater.
+    const added: DrawnSegment[] = [];
+    const now = Date.now();
+
+    faces.forEach((face, fi) => {
+      const closedPath = face.path;
+      if (closedPath.length < 3) return;
+
+      const color = SEGMENT_COLORS[(startIdx + fi) % SEGMENT_COLORS.length];
+      const polygon = new google.maps.Polygon({
+        paths: closedPath,
+        fillColor: color,
+        strokeColor: color,
+        fillOpacity: 0.22,
+        strokeWeight: 2.5,
+        editable: true,
+        draggable: false,
+        map,
+      });
+
+      const id = `seg_${now}_${fi}`;
+      const idx = startIdx + fi;
+      const newSeg: DrawnSegment = { id, index: idx, polygon, path: closedPath, color, analysis: null, analyzing: hasGeminiKey };
+      added.push(newSeg);
+    });
+
+    if (added.length === 0) return;
+    setSegments(prev => [...prev, ...added]);
+
+    // Batch-analyze ALL segments (existing + new) in one API call
+    if (hasGeminiKey && added.length > 0) {
+      const imgData = satelliteImageRef.current;
+      const batchId = Date.now();
+
+      enqueueSegAnalysis(() => {
+        const currentSegs = segmentsRef.current;
+        const allNorm = currentSegs.map(s => s.path.map(p => latLngToImageNorm(p, coordinates, 20, 640)));
+        console.log(`[RoofWizard] VertexEdge batch-analyzing ${currentSegs.length} segments in 1 call (batch ${batchId})`);
+        return analyzeAllRoofSegments(imgData, allNorm)
+          .then(results => {
+            console.log(`[RoofWizard] VertexEdge batch ${batchId} result:`, results ? `${results.length} segments` : 'NULL');
+            if (results && results.length > 0) {
+              setSegments(curr => {
+                return curr.map((seg, i) => {
+                  const match = results.find(r => r.index === i);
+                  if (match && (seg.analyzing || !seg.analysis)) {
+                    return { ...seg, analysis: match, analyzing: false };
+                  }
+                  if (seg.analyzing && !seg.analysis) {
+                    return { ...seg, analyzing: false };
+                  }
+                  return seg;
+                });
+              });
+            } else {
+              setSegments(curr => curr.map(s => (s.analyzing ? { ...s, analyzing: false } : s)));
+            }
+          })
+          .catch(err => {
+            console.warn(`[RoofWizard] VertexEdge batch ${batchId} error:`, err);
+            setSegments(curr => curr.map(s => (s.analyzing ? { ...s, analyzing: false } : s)));
+          });
+      });
+    }
+  }, [hasGeminiKey, coordinates, enqueueSegAnalysis]);
+
+  // Segment drawing uses Google's native DrawingManager — click to add vertices,
+  // double-click to close. Much more reliable than a custom click handler.
+  const commitDrawnPolygonRef = useRef(commitDrawnPolygon);
+  commitDrawnPolygonRef.current = commitDrawnPolygon;
+
+  const startSegmentSketch = useCallback(
+    (color: string) => {
+      const map = mapInstanceRef.current;
+      const dm = drawingManagerRef.current;
+      if (!map || !dm || !mapLoaded || step1Sub !== 'segments' || phase !== 1) return;
+
+      clearSegmentSketch();
+      segmentSketchColorRef.current = color;
+
+      // Configure polygon style for this segment's color
+      dm.setOptions({
+        polygonOptions: {
+          fillColor: color,
+          fillOpacity: 0.22,
+          strokeColor: color,
+          strokeWeight: 2.5,
+          editable: true,
+          draggable: false,
+          zIndex: 2,
+        },
+      });
+
+      // Wire up polygoncomplete — fires when user double-clicks to close the polygon
+      const completeListener = google.maps.event.addListenerOnce(dm, 'polygoncomplete', (polygon: google.maps.Polygon) => {
+        commitDrawnPolygonRef.current(polygon);
+      });
+      segmentSketchClickListenerRef.current = completeListener;
+
+      dm.setDrawingMode(google.maps.drawing.OverlayType.POLYGON);
+      setSegmentSketchMode(true);
+      setIsDrawing(true);
+    },
+    [mapLoaded, step1Sub, phase, clearSegmentSketch]
+  );
+
+  useEffect(() => {
+    if (step1Sub !== 'segments' || phase !== 1) {
+      clearSegmentSketch();
+      drawingManagerRef.current?.setDrawingMode(null);
+    }
+  }, [step1Sub, phase, clearSegmentSketch]);
+
+  useEffect(() => {
+    if (!segmentSketchMode) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        clearSegmentSketch();
+        drawingManagerRef.current?.setDrawingMode(null);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
+  }, [segmentSketchMode, clearSegmentSketch]);
 
   const deleteSegment = useCallback((id: string) => {
+    dismissedMapLabelsRef.current.delete(`segment:${id}`);
     setSegments(prev => {
       const seg = prev.find(s => s.id === id);
       seg?.polygon.setMap(null);
@@ -525,12 +1395,62 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
     });
   }, []);
 
+  const reanalyzeSegment = useCallback(
+    (id: string) => {
+      if (!hasGeminiKey) return;
+      const list = segmentsRef.current;
+      const seg = list.find(s => s.id === id);
+      if (!seg || seg.analyzing) return;
+
+      // Mark this segment for re-analysis
+      setSegments(curr => curr.map(s => (s.id === id ? { ...s, analyzing: true, analysis: null } : s)));
+
+      const batchId = Date.now();
+
+      enqueueSegAnalysis(async () => {
+        const currentSegs = segmentsRef.current;
+        // Wait for satellite image at execution time, not stale enqueue-time capture
+        const imgData = await waitForSatelliteImage(8_000);
+        const allNorm = currentSegs.map(s => s.path.map(p => latLngToImageNorm(p, coordinates, 20, 640)));
+        console.log(`[RoofWizard] Re-analyze batch (batch ${batchId})`);
+        return analyzeAllRoofSegments(imgData, allNorm, { refinement: true })
+          .then(results => {
+            console.log(`[RoofWizard] Re-analyze batch ${batchId} result:`, results ? `${results.length} segments` : 'NULL');
+            if (results && results.length > 0) {
+              setSegments(curr => {
+                return curr.map((s, i) => {
+                  const match = results.find(r => r.index === i);
+                  if (match) {
+                    return { ...s, analysis: match, analyzing: false, path: polyPathFromPolygon(s.polygon) };
+                  }
+                  return s.analyzing ? { ...s, analyzing: false } : s;
+                });
+              });
+            } else {
+              setSegments(curr => curr.map(s => (s.analyzing ? { ...s, analyzing: false } : s)));
+            }
+          })
+          .catch(err => {
+            console.warn(`[RoofWizard] Re-analyze batch ${batchId} error:`, err);
+            setSegments(curr => curr.map(s => (s.analyzing ? { ...s, analyzing: false } : s)));
+          });
+      });
+    },
+    [hasGeminiKey, coordinates, enqueueSegAnalysis, waitForSatelliteImage]
+  );
+
   // ── Step 1c: Structure detection ────────────────────────────────────────────
 
   function clearStructureLines() {
     structLinesRef.current.forEach(l => l.setMap(null));
     structLinesRef.current = [];
   }
+
+  // Show structural lines only on the Structure sub-step; hide everywhere else.
+  useEffect(() => {
+    const targetMap = step1Sub === 'structure' ? mapInstanceRef.current : null;
+    structLinesRef.current.forEach(l => l.setMap(targetMap));
+  }, [step1Sub]);
 
   const safeComputeAreaSqFt = useCallback((polygon: google.maps.Polygon): number => {
     try {
@@ -540,6 +1460,114 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
       return 0;
     }
   }, []);
+
+  const centerOnMapProperty = useCallback(() => {
+    if (!mapInstanceRef.current) return;
+    mapInstanceRef.current.setCenter(coordinates);
+    mapInstanceRef.current.setZoom(20);
+  }, [coordinates.lat, coordinates.lng]);
+
+  useEffect(() => {
+    if (!mapInstanceRef.current) return;
+    mapInstanceRef.current.setMapTypeId(mapType);
+  }, [mapType]);
+
+  useEffect(() => {
+    if (!mapInstanceRef.current) return;
+    mapInstanceRef.current.setTilt(tilt ? 45 : 0);
+  }, [tilt]);
+
+  useEffect(() => {
+    if (!mapLoaded || !streetViewRef.current || !mapInstanceRef.current) return;
+    if (panoramaRef.current) return;
+    const pano = new google.maps.StreetViewPanorama(streetViewRef.current, {
+      position: coordinates,
+      pov: { heading: 0, pitch: 0 },
+      visible: false,
+      addressControl: false,
+      fullscreenControl: false,
+      motionTracking: false,
+      motionTrackingControl: false,
+      zoomControl: false,
+      panControl: true,
+    });
+    panoramaRef.current = pano;
+    mapInstanceRef.current.setStreetView(pano);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mapLoaded]);
+
+  useEffect(() => {
+    if (!mapLoaded) return;
+    const svc = new google.maps.StreetViewService();
+    svc.getPanorama({ location: coordinates, radius: 100 }, (_data, status) => {
+      setStreetViewAvailable(status === google.maps.StreetViewStatus.OK);
+    });
+  }, [mapLoaded, coordinates.lat, coordinates.lng]);
+
+  useEffect(() => {
+    if (!panoramaRef.current) return;
+    panoramaRef.current.setVisible(showStreetView);
+    if (showStreetView) {
+      panoramaRef.current.setPosition(coordinates);
+    }
+  }, [showStreetView, coordinates]);
+
+  useEffect(() => {
+    if (showLabels && wasShowLabelsRef.current === false) {
+      dismissedMapLabelsRef.current.clear();
+    }
+    wasShowLabelsRef.current = showLabels;
+  }, [showLabels]);
+
+  useEffect(() => {
+    if (!outline?.polygon) dismissedMapLabelsRef.current.delete('outline');
+  }, [outline]);
+
+  useEffect(() => {
+    suppressLabelCloseDismissRef.current = true;
+    labelsRef.current.forEach(iw => iw.close());
+    labelsRef.current = [];
+    queueMicrotask(() => {
+      suppressLabelCloseDismissRef.current = false;
+    });
+    const map = mapInstanceRef.current;
+    if (!showLabels || !map) return;
+    if (outline?.polygon && !dismissedMapLabelsRef.current.has('outline')) {
+      const bounds = new google.maps.LatLngBounds();
+      outline.polygon.getPath().forEach(p => bounds.extend(p));
+      const center = bounds.getCenter();
+      const iw = new google.maps.InfoWindow({
+        position: center,
+        content: '<div style="font-family:Inter,sans-serif;font-size:11px;font-weight:600;padding:2px 6px;background:#ea580c;border-radius:6px;color:white;">Roof outline</div>',
+        disableAutoPan: true,
+      });
+      iw.addListener('closeclick', () => {
+        if (suppressLabelCloseDismissRef.current) return;
+        dismissedMapLabelsRef.current.add('outline');
+      });
+      iw.open(map);
+      labelsRef.current.push(iw);
+    }
+    segments.forEach(s => {
+      if (dismissedMapLabelsRef.current.has(`segment:${s.id}`)) return;
+      const bounds = new google.maps.LatLngBounds();
+      s.polygon.getPath().forEach(p => bounds.extend(p));
+      const center = bounds.getCenter();
+      const area = safeComputeAreaSqFt(s.polygon);
+      const iw = new google.maps.InfoWindow({
+        position: center,
+        content: `<div style="font-family:Inter,sans-serif;font-size:11px;font-weight:600;padding:2px 6px;background:${s.color};border-radius:6px;color:white;">Segment ${s.index + 1}<br/>${formatArea(area)}</div>`,
+        disableAutoPan: true,
+      });
+      iw.addListener('closeclick', () => {
+        if (suppressLabelCloseDismissRef.current) return;
+        dismissedMapLabelsRef.current.add(`segment:${s.id}`);
+      });
+      iw.open(map);
+      labelsRef.current.push(iw);
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showLabels, outline, segments, safeComputeAreaSqFt]);
 
   function estimateSegmentEdges(path: { x: number; y: number }[], segmentIndex: number): SegmentEdge[] {
     const edges: SegmentEdge[] = [];
@@ -743,7 +1771,7 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
     try {
       const result = await Promise.race([
         detectRoofStructure(imgData, allNorm),
-        new Promise<null>(resolve => setTimeout(() => resolve(null), 30_000)),
+        new Promise<null>(resolve => setTimeout(() => resolve(null), 150_000)),
       ]);
       const resolved = result && result.cues.length > 0
         ? result
@@ -845,7 +1873,6 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
     if (!dsmUrl || !solarData?.boundingBox) return;
     if (segments.length > 0) return; // already have segments
     setAutoSegmenting(true);
-    setAutoSegmentError(null);
     dsmVisionEnrichAppliedRef.current = false;
     try {
       const buildingBounds = {
@@ -856,11 +1883,9 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
       };
       const detected = await autoSegmentRoofPlanes(dsmUrl, buildingBounds, apiKey);
       if (detected.length === 0) {
-        setAutoSegmentError('No distinct roof planes could be detected — DSM may lack sufficient resolution for this building. Draw segments manually.');
         return;
       }
       if (!mapInstanceRef.current) {
-        setAutoSegmentError('Map not ready — please try again.');
         return;
       }
 
@@ -931,22 +1956,27 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
       });
       setSegments(newSegments);
       autoSegmentRanRef.current = true;
-      setStep1Sub('structure');
+      setStep1Sub('segments');
     } catch {
-      setAutoSegmentError('Auto-detection failed. Please draw segments manually.');
+      /* silent — user can draw segments manually */
     } finally {
       setAutoSegmenting(false);
     }
   }, [solarDataLayers, solarData, segments.length, apiKey, mapInstanceRef, waitForSatelliteImage, coordinates.lat, coordinates.lng, hasGeminiKey]);
 
-  // When autoSegmentMode is on, trigger once map + solar data are ready
+  // DSM Auto-Map: after outline + user opens Segments, run auto-detect when map/DSM are ready (no mount-time jump past Outline).
   useEffect(() => {
-    if (!autoSegmentMode || autoSegmentRanRef.current) return;
+    if (!autoSegmentMode || !pendingAutoSegmentAfterOutlineRef.current) return;
     if (!mapLoaded || !solarDataLayers?.dsmUrl || !solarData?.boundingBox) return;
-    autoSegmentRanRef.current = true;
+    if (!outline || step1Sub !== 'segments') return;
+    if (segments.length > 0 || autoSegmenting) return;
+    if (autoSegmentRanRef.current) {
+      pendingAutoSegmentAfterOutlineRef.current = false;
+      return;
+    }
+    pendingAutoSegmentAfterOutlineRef.current = false;
     void runAutoSegment();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoSegmentMode, mapLoaded, solarDataLayers, solarData]);
+  }, [autoSegmentMode, mapLoaded, solarDataLayers, solarData, outline, step1Sub, segments.length, autoSegmenting, runAutoSegment]);
 
   // ── Phase 2: Photo upload ───────────────────────────────────────────────────
 
@@ -1401,68 +2431,55 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
     }
   }, [buildFinalPayload, address, finalAnalysis]);
 
-  const downloadQuoteDraft = useCallback(() => {
-    if (!finalAnalysis) return;
-    const mappedArea = segments.reduce((sum, segment) => sum + safeComputeAreaSqFt(segment.polygon), 0);
-    const structureArea = Math.max(1, Math.round(structureResult?.totalAreaSqFt ?? mappedArea));
-    const squares = Math.max(1, Math.round(structureArea / 100));
-    const baseRate =
-      finalAnalysis.condition === 'Excellent'
-        ? 380
-        : finalAnalysis.condition === 'Good'
-          ? 430
-          : finalAnalysis.condition === 'Fair'
-            ? 520
-            : finalAnalysis.condition === 'Poor'
-              ? 610
-              : 690;
-    const subtotal = squares * baseRate;
-    const tax = Math.round(subtotal * 0.13);
-    const total = subtotal + tax;
+  const saveQuoteDraftToProject = useCallback(async () => {
+    if (!finalAnalysis || quoteDraftSaved) return;
+    // The auto-save already persists everything; this is an explicit "confirm saved" action.
+    // If the project hasn't been persisted yet (no DB or first save pending) we nudge it by
+    // updating persistStatus so the user sees the in-header save indicator.
+    setQuoteDraftSaved(true);
+    setTimeout(() => setQuoteDraftSaved(false), 2500);
+  }, [finalAnalysis, quoteDraftSaved]);
 
-    const doc = new jsPDF({ unit: 'pt', format: 'a4' });
-    let y = 44;
-    doc.setFontSize(18);
-    doc.text('Roof Quote Draft', 40, y);
-    y += 20;
-    doc.setFontSize(10);
-    doc.setTextColor(80);
-    doc.text(address, 40, y);
-    y += 16;
-    doc.text(`Condition: ${finalAnalysis.condition} (${finalAnalysis.condition_score}/100)`, 40, y);
-    y += 12;
-    doc.text(`Urgency: ${finalAnalysis.urgency}`, 40, y);
-    y += 18;
-
-    autoTable(doc, {
-      startY: y,
-      head: [['Line Item', 'Qty', 'Unit', 'Amount']],
-      body: [
-        ['Roof System', `${squares} sq`, `$${baseRate}`, `$${subtotal}`],
-        ['Assessment/QA', '1', '$350', '$350'],
-        ['Disposal & Cleanup', '1', '$420', '$420'],
-      ],
-      styles: { fontSize: 10 },
-      theme: 'grid',
+  const handleSaveAndNew = useCallback(async () => {
+    if (projectSaving) return;
+    setProjectSaving(true);
+    // Poll the ref (not state) so the closure always sees the latest value.
+    await new Promise<void>(resolve => {
+      if (persistStatusRef.current === 'saved') { resolve(); return; }
+      const start = Date.now();
+      const check = () => {
+        if (persistStatusRef.current === 'saved' || Date.now() - start > 6_000) { resolve(); return; }
+        setTimeout(check, 200);
+      };
+      check();
     });
-    const afterItems = (doc as jsPDF & { lastAutoTable?: { finalY?: number } }).lastAutoTable?.finalY ?? y + 100;
-    doc.setTextColor(20);
-    doc.setFontSize(11);
-    doc.text(`Subtotal: $${(subtotal + 770).toLocaleString()}`, 40, afterItems + 20);
-    doc.text(`Estimated Tax: $${tax.toLocaleString()}`, 40, afterItems + 36);
-    doc.setFontSize(13);
-    doc.text(`Estimated Total: $${(total + 770).toLocaleString()}`, 40, afterItems + 56);
-    doc.setFontSize(10);
-    doc.setTextColor(70);
-    doc.text(`Recommended Scope: ${finalAnalysis.recommendation}`, 40, afterItems + 82, { maxWidth: 500 });
-    doc.save(`quote-draft-${Date.now()}.pdf`);
-  }, [address, finalAnalysis, structureResult, segments, safeComputeAreaSqFt]);
+    // Persist exactly one history entry on explicit user confirmation.
+    appendHistoryNextRef.current = true;
+    setHistorySaveNonce(n => n + 1);
+
+    // Wait for the next persistence cycle to finish (saving → saved).
+    await new Promise<void>(resolve => {
+      const start = Date.now();
+      let sawSaving = false;
+      const tick = () => {
+        if (persistStatusRef.current === 'saving') sawSaving = true;
+        if (sawSaving && persistStatusRef.current === 'saved') { resolve(); return; }
+        if (Date.now() - start > 12_000) { resolve(); return; }
+        setTimeout(tick, 200);
+      };
+      tick();
+    });
+
+    setProjectSaving(false);
+    onSaveAndNew?.();
+  }, [projectSaving, onSaveAndNew]);
 
   // ── Step navigation ─────────────────────────────────────────────────────────
 
   function goToSegments() {
     setStep1Sub('segments');
     stopDrawing();
+    if (autoSegmentMode && outline) pendingAutoSegmentAfterOutlineRef.current = true;
   }
 
   function goToStructure() {
@@ -1555,17 +2572,38 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
       }
     : null;
   const diagramWidth = 920;
-  const diagramHeight = 560;
   const diagramPadding = 28;
+  // Preserve true geographic aspect ratio: 1° lng ≠ 1° lat in meters.
+  // At latitude φ: 1° lng = cos(φ) × (1° lat). Compute the real width-to-height ratio
+  // so the diagram isn't vertically squished or stretched.
+  const _midLat = diagramBounds
+    ? (diagramBounds.minLat + diagramBounds.maxLat) / 2
+    : 37;
+  const _cosLat = Math.cos(_midLat * Math.PI / 180);
+  const _spanLng = diagramBounds ? Math.max(1e-9, diagramBounds.maxLng - diagramBounds.minLng) : 1;
+  const _spanLat = diagramBounds ? Math.max(1e-9, diagramBounds.maxLat - diagramBounds.minLat) : 1;
+  // Real width and height in "equivalent degrees"
+  const _realW = _spanLng * _cosLat;
+  const _realH = _spanLat;
+  const _geoAspect = _realW / _realH; // > 1 = wider than tall
+  const _innerW = diagramWidth - 2 * diagramPadding;
+  const _innerH = Math.round(_innerW / Math.max(0.2, Math.min(6, _geoAspect)));
+  const diagramHeight = _innerH + 2 * diagramPadding;
+  // Uniform px-per-meter scale so shapes look correct
+  const _pxPerDegLat = _innerH / _spanLat;
+  const _pxPerDegLng = _innerW / _spanLng;
+  const _pxPerM_lat = _pxPerDegLat / 111111;
+  const _pxPerM_lng = _pxPerDegLng / (111111 * _cosLat);
+  const _pxPerM = Math.min(_pxPerM_lat, _pxPerM_lng);
+  const _usedW = _spanLng * 111111 * _cosLat * _pxPerM;
+  const _usedH = _spanLat * 111111 * _pxPerM;
+  const _xOff = diagramPadding + (_innerW - _usedW) / 2;
+  const _yOff = diagramPadding + (_innerH - _usedH) / 2;
   const toDiagramPoint = (point: { lat: number; lng: number }) => {
     if (!diagramBounds) return { x: diagramPadding, y: diagramPadding };
-    const spanLng = Math.max(1e-6, diagramBounds.maxLng - diagramBounds.minLng);
-    const spanLat = Math.max(1e-6, diagramBounds.maxLat - diagramBounds.minLat);
-    const xNorm = (point.lng - diagramBounds.minLng) / spanLng;
-    const yNorm = (diagramBounds.maxLat - point.lat) / spanLat;
     return {
-      x: diagramPadding + xNorm * (diagramWidth - diagramPadding * 2),
-      y: diagramPadding + yNorm * (diagramHeight - diagramPadding * 2),
+      x: _xOff + (point.lng - diagramBounds.minLng) * 111111 * _cosLat * _pxPerM,
+      y: _yOff + (diagramBounds.maxLat - point.lat) * 111111 * _pxPerM,
     };
   };
   const reportPolygons = segments.map(segment => {
@@ -1613,21 +2651,34 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
     }
 
     let cancelled = false;
-    const timer = window.setTimeout(() => {
-      if (!cancelled) setPersistStatus('saving');
-    }, 250);
-    (async () => {
+    const debounceMs = 700;
+    const debounceTimer = window.setTimeout(() => {
+      if (cancelled) return;
+      setPersistStatus('saving');
+      void (async () => {
       try {
+        const outlinePointsLive = outline ? polyPathFromPolygon(outline.polygon) : null;
+        const roofOutlineSnapshot =
+          outlinePointsLive && outlinePointsLive.length >= 3
+            ? await buildRoofOutlineSnapshotDataUrl(
+                outlinePointsLive,
+                coordinates,
+                satelliteImageRef.current,
+                20,
+                640
+              )
+            : null;
+
         const payload: WizardWorkflowReportPayload = {
           version: 'v1',
           source: 'roof-mapping-wizard',
           projectFolderName: initialProjectFolderName?.trim() ? initialProjectFolderName.trim() : null,
           address,
           coordinates,
-          outline: outline
+          outline: outlinePointsLive
             ? {
-                points: outline.path,
-                analysis: outline.analysis,
+                points: outlinePointsLive,
+                analysis: outline?.analysis ?? null,
               }
             : null,
           segments: segments.map(segment => ({
@@ -1636,6 +2687,7 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
             color: segment.color,
             path: segment.path,
             analysis: segment.analysis,
+            flatAreaSqFt: safeComputeAreaSqFt(segment.polygon),
             dsmPitchDeg: segment.dsmPitchDeg,
             dsmPitchRatio: segment.dsmPitchRatio,
             dsmFacingDirection: segment.dsmFacingDirection,
@@ -1680,28 +2732,35 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
             const dataUrl = `data:${sat.mimeType};base64,${sat.data}`;
             return dataUrl.length < 800_000 ? dataUrl : null;
           })(),
+          roofOutlineSnapshot,
           updatedAtIso: new Date().toISOString(),
         };
+        const linkedProjectId =
+          existingProjectId?.trim() || wizardLinkedProjectIdRef.current?.trim() || undefined;
+        // Consume the "append history once" flag so we only write to history on explicit completion.
+        const appendHistory = appendHistoryNextRef.current;
+        appendHistoryNextRef.current = false;
         const saved = await saveWizardWorkflowReport(payload, {
-          projectId: existingProjectId ?? undefined,
-          forceNewProject: forceNewProject && !existingProjectId,
+          projectId: linkedProjectId,
+          forceNewProject: forceNewProject && !linkedProjectId,
+          appendHistory,
         });
         if (!cancelled) {
+          wizardLinkedProjectIdRef.current = saved.projectId;
           setPersistStatus('saved');
           onPersisted?.(saved.projectId);
         }
       } catch {
         if (!cancelled) setPersistStatus('error');
-      } finally {
-        window.clearTimeout(timer);
       }
-    })();
+      })();
+    }, debounceMs);
 
     return () => {
       cancelled = true;
-      window.clearTimeout(timer);
+      window.clearTimeout(debounceTimer);
     };
-  }, [address, coordinates, outline, segments, structureResult, photoSlots, finalAnalysis, initialProjectFolderName, solarData, solarDataLayers, existingProjectId, forceNewProject]);
+  }, [address, coordinates, outline, segments, structureResult, photoSlots, finalAnalysis, initialProjectFolderName, solarData, solarDataLayers, existingProjectId, forceNewProject, historySaveNonce]);
 
   // Capture snapshot of previewUrls for cleanup on unmount only (not on every photoSlots change,
   // which would revoke URLs that are still being displayed).
@@ -1724,6 +2783,87 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
         ft: Math.round(structureResult.cues.filter(c => c.type === type).reduce((s, c) => s + c.estimatedLengthFt, 0)),
       })).filter(r => r.count > 0)
     : [];
+
+  useEffect(() => {
+    if (!onFolderManifestChange) return;
+    const entries: { id: string; label: string; done: boolean }[] = [];
+
+    if (outline || step1Sub !== 'outline') {
+      entries.push({
+        id: 'outline',
+        label: 'Roof outline (AI validation)',
+        done: !!outline?.analysis && !outline?.analyzing,
+      });
+    }
+    if (segments.length > 0 || step1Sub === 'segments' || step1Sub === 'structure') {
+      const n = segments.length;
+      const analyzed = segments.filter(s => s.analysis).length;
+      const segmentLabel =
+        autoSegmentMode && (autoSegmenting || n > 0)
+          ? n
+            ? `DSM roof planes (${analyzed}/${n})`
+            : 'DSM roof planes (auto-detect…)'
+          : n
+            ? `Segments classified (${analyzed}/${n})`
+            : 'Segments';
+      entries.push({
+        id: 'segments',
+        label: segmentLabel,
+        done: n > 0 && analyzed === n && segments.every(s => !s.analyzing) && !autoSegmenting,
+      });
+    }
+
+    if (structureAnalyzing || structureResult || phase >= 2 || (segments.length > 0 && step1Sub === 'structure')) {
+      entries.push({
+        id: 'structure',
+        label: 'Structural lines & geometry',
+        done: !!structureResult && !structureAnalyzing,
+      });
+    }
+
+    if (phase >= 2) {
+      const doneSlots = photoSlots.filter(p => p.status === 'done' && p.analysis).length;
+      entries.push({
+        id: 'photos',
+        label: `Multi-angle photos (${doneSlots} analyzed)`,
+        done: phase >= 3,
+      });
+    }
+
+    if (phase >= 3) {
+      entries.push({
+        id: 'final',
+        label: 'Final combined AI report',
+        done: !!finalAnalysis && !finalAnalyzing,
+      });
+    }
+
+    if (persistStatus === 'saved') {
+      entries.push({
+        id: 'persisted',
+        label: 'Report saved to project',
+        done: true,
+      });
+    }
+
+    onFolderManifestChange(entries);
+  }, [
+    onFolderManifestChange,
+    autoSegmentMode,
+    autoSegmenting,
+    dsmAnalyzing,
+    dsmResult,
+    outline,
+    step1Sub,
+    segments,
+    phase,
+    structureResult,
+    structureAnalyzing,
+    photoSlots,
+    finalAnalysis,
+    finalAnalyzing,
+    persistStatus,
+  ]);
 
   // ─────────────────────────────────────────────────────────────────────────────
   // Render
@@ -1777,19 +2917,150 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
       <div className="flex-1 flex overflow-hidden">
 
         {/* ── Map ── */}
-        <div className="flex-1 relative">
+        <div className="flex-1 relative min-h-0">
           {mapError ? (
-            <div className="absolute inset-0 flex items-center justify-center text-red-400 text-sm">{mapError}</div>
+            <div className="absolute inset-0 z-10 flex items-center justify-center text-red-400 text-sm">{mapError}</div>
           ) : (
-            <div ref={mapRef} className="w-full h-full" />
+            <div className="flex h-full w-full min-h-0">
+              <div
+                ref={mapRef}
+                className={`h-full min-h-0 transition-all duration-300 ${showStreetView ? 'w-1/2' : 'w-full'}`}
+              />
+              <div
+                ref={streetViewRef}
+                className={`h-full min-h-0 border-l-2 border-slate-700 transition-all duration-300 ${showStreetView ? 'w-1/2' : 'w-0 overflow-hidden'}`}
+              >
+                {showStreetView && !streetViewAvailable && (
+                  <div className="flex h-full w-full flex-col items-center justify-center gap-3 bg-slate-950 px-4 text-center">
+                    <Navigation size={32} className="text-slate-500" />
+                    <p className="text-sm font-medium text-slate-300">Street View not available</p>
+                    <p className="text-xs text-slate-500">No street-level imagery within 100 m of this address.</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {mapLoaded && !mapError && (
+            <div className="absolute top-[max(0.5rem,env(safe-area-inset-top,0px))] left-2 right-2 z-20 flex flex-wrap gap-1.5 max-w-full">
+              <div className="flex gap-1 bg-white rounded-xl shadow-md border border-slate-200 p-1">
+                <button
+                  type="button"
+                  onClick={centerOnMapProperty}
+                  title="Re-center on property"
+                  className="touch-manipulation flex items-center gap-1 text-xs font-medium px-2 py-1.5 min-h-[36px] rounded-lg text-slate-600 hover:bg-slate-100 transition-all"
+                >
+                  <Maximize2 size={13} />
+                  <span className="hidden sm:inline">Center</span>
+                </button>
+                <div className="w-px bg-slate-200 my-1" />
+                {([
+                  { label: 'Street', zoom: 17, title: 'Street level — see block context' },
+                  { label: 'Block', zoom: 19, title: 'Block level — see neighboring buildings' },
+                  { label: 'Roof', zoom: 21, title: 'Roof level — maximum detail' },
+                ] as const).map(({ label, zoom, title }) => (
+                  <button
+                    key={label}
+                    type="button"
+                    title={title}
+                    onClick={() => {
+                      if (!mapInstanceRef.current) return;
+                      mapInstanceRef.current.setCenter(coordinates);
+                      mapInstanceRef.current.setZoom(zoom);
+                    }}
+                    className="touch-manipulation flex items-center gap-1 text-xs font-medium px-2 py-1.5 min-h-[36px] rounded-lg text-slate-600 hover:bg-slate-100 transition-all"
+                  >
+                    <ZoomIn size={12} />
+                    {label}
+                  </button>
+                ))}
+              </div>
+
+              <div className="flex gap-1 bg-white rounded-xl shadow-md border border-slate-200 p-1">
+                <button
+                  type="button"
+                  onClick={() => setMapType(t => (t === 'satellite' ? 'hybrid' : 'satellite'))}
+                  title={mapType === 'satellite' ? 'Show street labels (Hybrid view)' : 'Hide street labels (Satellite view)'}
+                  className={`touch-manipulation flex items-center gap-1 text-xs font-medium px-2 py-1.5 min-h-[36px] rounded-lg transition-all ${
+                    mapType === 'hybrid' ? 'bg-green-600 text-white' : 'text-slate-600 hover:bg-slate-100'
+                  }`}
+                >
+                  <Map size={13} />
+                  <span className="hidden sm:inline">{mapType === 'hybrid' ? 'Labels On' : 'Labels'}</span>
+                </button>
+                <div className="w-px bg-slate-200 my-1" />
+                <button
+                  type="button"
+                  onClick={() => setTilt(t => !t)}
+                  title="Toggle 3D tilt"
+                  className={`touch-manipulation flex items-center gap-1 text-xs font-medium px-2 py-1.5 min-h-[36px] rounded-lg transition-all ${
+                    tilt ? 'bg-blue-600 text-white' : 'text-slate-600 hover:bg-slate-100'
+                  }`}
+                >
+                  <Satellite size={13} />
+                  <span className="hidden sm:inline">3D</span>
+                </button>
+                <div className="w-px bg-slate-200 my-1" />
+                <button
+                  type="button"
+                  onClick={() => setShowLabels(l => !l)}
+                  title="Toggle segment labels"
+                  className={`touch-manipulation flex items-center gap-1 text-xs font-medium px-2 py-1.5 min-h-[36px] rounded-lg transition-all ${
+                    showLabels ? 'text-slate-600 hover:bg-slate-100' : 'bg-slate-700 text-white'
+                  }`}
+                >
+                  {showLabels ? <Eye size={13} /> : <EyeOff size={13} />}
+                  <span className="hidden sm:inline">Pins</span>
+                </button>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setShowStreetView(v => !v)}
+                title={showStreetView ? 'Close Street View' : 'Open Street View — confirm building identity from street level'}
+                className={`touch-manipulation flex items-center gap-1.5 text-xs font-semibold px-3 py-2 min-h-[36px] rounded-xl shadow-md border transition-all ${
+                  showStreetView
+                    ? 'bg-orange-500 text-white border-orange-500'
+                    : 'bg-white text-slate-700 border-slate-200 hover:bg-orange-50 hover:border-orange-300 hover:text-orange-700'
+                }`}
+              >
+                <Navigation size={13} />
+                <span>{showStreetView ? 'Close Street View' : 'Street View'}</span>
+                {!streetViewAvailable && !showStreetView && (
+                  <span className="text-[10px] text-slate-400 hidden sm:inline">(checking…)</span>
+                )}
+              </button>
+
+              {solarData?.imageryQuality === 'LOW' && (
+                <div className="flex items-center gap-1.5 bg-red-600 text-white text-xs font-semibold px-3 py-2 min-h-[36px] rounded-xl shadow-md">
+                  <AlertCircle size={13} />
+                  <span className="hidden sm:inline">Low imagery quality — use Street View or upload a photo</span>
+                  <span className="sm:hidden">Low quality</span>
+                </div>
+              )}
+            </div>
           )}
 
           {/* Drawing instructions overlay */}
           {isDrawing && (
-            <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-blue-600/90 backdrop-blur text-white text-sm px-4 py-2 rounded-full shadow-lg flex items-center gap-2">
-              <Pencil size={14} />
-              Click to place points · Double-click to finish
-              <button onClick={stopDrawing} className="ml-2 text-white/70 hover:text-white">
+            <div className="absolute top-4 left-1/2 z-20 -translate-x-1/2 max-w-[min(100vw-2rem,440px)] bg-blue-600/90 backdrop-blur text-white text-xs sm:text-sm px-4 py-2 rounded-full shadow-lg flex items-center gap-2">
+              <Pencil size={14} className="shrink-0" />
+              <span className="min-w-0 leading-snug">
+                {outlineSketchMode
+                  ? 'Click corners → double-click or click green circle to close. ⌘Z undoes.'
+                  : segmentSketchMode
+                    ? 'Click corners on the map — double-click the final point to finish the segment.'
+                    : 'Click the map to continue drawing.'}
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  clearOutlineSketch();
+                  clearSegmentSketch();
+                }}
+                className="ml-1 shrink-0 text-white/70 hover:text-white"
+                aria-label="Cancel drawing"
+              >
                 <X size={14} />
               </button>
             </div>
@@ -1797,7 +3068,7 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
 
           {/* Structural line legend (step 1c) */}
           {phase === 1 && step1Sub === 'structure' && structureResult && (
-            <div className="absolute bottom-4 left-4 bg-slate-900/90 backdrop-blur border border-slate-700 rounded-xl p-3">
+            <div className="absolute bottom-4 left-4 z-10 bg-slate-900/90 backdrop-blur border border-slate-700 rounded-xl p-3">
               <div className="text-xs font-semibold text-white mb-2">Structural Lines</div>
               <div className="flex flex-col gap-1">
                 {Object.entries(EDGE_COLORS).map(([type, color]) => (
@@ -1863,19 +3134,58 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
                     <p className="text-slate-400 text-xs leading-relaxed">
                       Trace the <strong className="text-slate-200">complete outer boundary</strong> of the roof. Include all sections — gables, overhangs, and additions.
                       AI will validate your outline and estimate coverage quality.
+                      <span className="block mt-1.5 text-slate-500">
+                        A <strong className="text-slate-400">dashed line follows your cursor</strong> from the last corner so you can see the next edge before you click.
+                        {' '}
+                        <kbd className="rounded border border-slate-600 bg-slate-800/80 px-1 py-0.5 font-mono text-[10px]">⌘Z</kbd>{' '}
+                        / <kbd className="rounded border border-slate-600 bg-slate-800/80 px-1 py-0.5 font-mono text-[10px]">Ctrl+Z</kbd> undo last corner ·{' '}
+                        <span className="text-slate-400">click near the first corner to close</span> (or use Close outline).
+                        {' '}<kbd className="rounded border border-slate-600 bg-slate-800/80 px-1 py-0.5 font-mono text-[10px]">Esc</kbd> cancels.
+                      </span>
                     </p>
                   </div>
 
-                  {!outline ? (
+                  {!outline && !outlineSketchMode && (
                     <button
-                      onClick={() => startDrawing('#f97316')}
+                      onClick={() => startOutlineSketch()}
                       disabled={!mapLoaded || isDrawing}
                       className="flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-sm font-medium py-2.5 px-4 rounded-lg transition-colors"
                     >
                       <Pencil size={14} />
-                      {isDrawing ? 'Drawing...' : 'Draw Roof Outline'}
+                      Draw Roof Outline
                     </button>
-                  ) : (
+                  )}
+
+                  {!outline && outlineSketchMode && (
+                    <div className="flex flex-col gap-2 rounded-xl border border-orange-700/40 bg-orange-950/25 p-3">
+                      <div className="text-xs text-orange-100/90 leading-snug">
+                        {outlineSketchPointCount === 0
+                          ? 'Click the map to place the first corner of the roof outline.'
+                          : `${outlineSketchPointCount} corner${outlineSketchPointCount === 1 ? '' : 's'} placed — add more, undo a mistake, or close the outline.`}
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          onClick={undoOutlineSketchLastPoint}
+                          disabled={outlineSketchPointCount === 0}
+                          className="touch-manipulation inline-flex items-center justify-center gap-1.5 rounded-lg border border-slate-600 bg-slate-800/80 px-3 py-2 text-xs font-semibold text-slate-100 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                          <Undo2 size={14} aria-hidden />
+                          Undo last point
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => finalizeOutlineSketch()}
+                          disabled={outlineSketchPointCount < 3}
+                          className="touch-manipulation inline-flex items-center justify-center gap-1.5 rounded-lg bg-green-600 px-3 py-2 text-xs font-semibold text-white hover:bg-green-500 disabled:bg-slate-600 disabled:text-slate-400 disabled:cursor-not-allowed"
+                        >
+                          Close outline
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {outline && (
                     <div className="flex flex-col gap-3">
                       <div className="bg-orange-900/30 border border-orange-700/40 rounded-xl p-3">
                         <div className="flex items-center justify-between mb-2">
@@ -1921,7 +3231,7 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
                       </div>
 
                       <button
-                        onClick={() => startDrawing('#f97316')}
+                        onClick={() => startOutlineSketch()}
                         className="text-xs text-slate-400 hover:text-white flex items-center gap-1.5 transition-colors"
                       >
                         <RotateCcw size={12} /> Redraw outline
@@ -1946,18 +3256,68 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
                   <div>
                     <h3 className="text-white font-semibold text-sm mb-1">Step 2 — Trace Each Segment</h3>
                     <p className="text-slate-400 text-xs leading-relaxed">
-                      Draw each <strong className="text-slate-200">distinct roof section</strong> one at a time — main slopes, dormers, flat sections, additions. AI will classify each as you go.
+                      Draw each <strong className="text-slate-200">roof section</strong> one at a time. When you{' '}
+                      <strong className="text-slate-200">finish</strong> a segment (double-click to close), AI classifies{' '}
+                      <strong className="text-slate-200">that segment immediately</strong> (one at a time in the queue). After
+                      editing vertices on the map, use <strong className="text-slate-200">Re-analyze</strong> on a card to refresh
+                      pitch and facing.
                     </p>
                   </div>
 
-                  <button
-                    onClick={() => startDrawing(SEGMENT_COLORS[segments.length % SEGMENT_COLORS.length])}
-                    disabled={!mapLoaded || isDrawing}
-                    className="flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-sm font-medium py-2.5 px-4 rounded-lg transition-colors shrink-0"
-                  >
-                    <Pencil size={14} />
-                    {isDrawing ? 'Drawing segment...' : `Draw Segment ${segments.length + 1}`}
-                  </button>
+                  {/* Vertex+Edge drawer (active) */}
+                  {vertexEdgeActive && mapInstanceRef.current && (
+                    <RoofVertexEdgeDrawer
+                      map={mapInstanceRef.current}
+                      outline={outline?.polygon ?? null}
+                      onDone={onVertexEdgeDone}
+                      onCancel={() => setVertexEdgeActive(false)}
+                    />
+                  )}
+
+                  {/* DrawingManager polygon mode (active) */}
+                  {segmentSketchMode && (
+                    <div className="flex flex-col gap-2 rounded-xl border border-blue-700/40 bg-blue-900/20 p-3">
+                      <div className="text-xs font-semibold text-blue-200">Drawing active</div>
+                      <div className="text-xs text-slate-300 leading-relaxed">
+                        Click corners on the map to trace the segment outline.{' '}
+                        <strong className="text-white">Double-click</strong> the last point to finish.
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => { clearSegmentSketch(); drawingManagerRef.current?.setDrawingMode(null); }}
+                        className="touch-manipulation inline-flex items-center justify-center gap-1.5 rounded-lg border border-slate-600 bg-slate-800/80 px-3 py-2 text-xs font-semibold text-slate-100 hover:bg-slate-700"
+                      >
+                        <X size={13} aria-hidden />
+                        Cancel
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Drawing mode buttons — shown when neither drawer is active */}
+                  {!segmentSketchMode && !vertexEdgeActive && (
+                    <div className="flex flex-col gap-2">
+                      <button
+                        onClick={() => {
+                          clearSegmentSketch();
+                          drawingManagerRef.current?.setDrawingMode(null);
+                          setVertexEdgeActive(true);
+                        }}
+                        disabled={!mapLoaded || isDrawing || autoSegmenting}
+                        className="flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-sm font-medium py-2.5 px-4 rounded-lg transition-colors shrink-0"
+                      >
+                        <Pencil size={14} />
+                        {autoSegmenting ? 'Please wait…' : `Draw Segment${segments.length > 0 ? 's' : ''}`}
+                      </button>
+                      <button
+                        onClick={() => startSegmentSketch(SEGMENT_COLORS[segments.length % SEGMENT_COLORS.length])}
+                        disabled={!mapLoaded || isDrawing || autoSegmenting}
+                        className="flex items-center justify-center gap-2 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-slate-200 text-xs font-medium py-2 px-4 rounded-lg transition-colors shrink-0"
+                      >
+                        <Pencil size={12} />
+                        Quick draw (polygon)
+                      </button>
+                    </div>
+                  )}
 
                   <div className="flex flex-col gap-2">
                     {segments.map(seg => (
@@ -1973,6 +3333,17 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
                           </div>
                           <div className="flex items-center gap-1.5">
                             {seg.analyzing && <Loader2 size={12} className="animate-spin text-blue-400" />}
+                            {hasGeminiKey && (
+                              <button
+                                type="button"
+                                title="Re-run AI on this polygon (use after editing shape)"
+                                disabled={seg.analyzing}
+                                onClick={() => reanalyzeSegment(seg.id)}
+                                className="text-slate-400 hover:text-blue-300 transition-colors disabled:opacity-40"
+                              >
+                                <RefreshCw size={13} />
+                              </button>
+                            )}
                             <button onClick={() => deleteSegment(seg.id)} className="text-slate-400 hover:text-red-400 transition-colors">
                               <Trash2 size={13} />
                             </button>
@@ -2031,12 +3402,6 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
                       <Zap size={13} /> Auto-detect roof planes from DSM + vision
                     </button>
                   )}
-
-                  {autoSegmentError && (
-                    <div className="rounded-lg border border-amber-600/40 bg-amber-900/30 px-3 py-2 text-xs text-amber-200">
-                      {autoSegmentError}
-                    </div>
-                  )}
                   {segments.length > 0 && !autoSegmenting && (
                     <>
                       {autoSegmentRanRef.current && (
@@ -2086,9 +3451,12 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
                   )}
 
                   {structureAnalyzing && (
-                    <div className="flex items-center gap-2 text-purple-400 text-sm">
-                      <Loader2 size={16} className="animate-spin" />
-                      AI detecting structural lines…
+                    <div className="flex flex-col gap-1">
+                      <div className="flex items-center gap-2 text-purple-400 text-sm">
+                        <Loader2 size={16} className="animate-spin" />
+                        AI detecting structural lines…
+                      </div>
+                      <p className="text-xs text-slate-500 pl-6">If rate-limited, retries automatically — may take up to 2 min.</p>
                     </div>
                   )}
 
@@ -2546,10 +3914,26 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
                     <button onClick={() => void shareFinalReport()} className="text-xs text-slate-200 bg-slate-800 hover:bg-slate-700 border border-slate-600 px-2.5 py-2 rounded-lg inline-flex items-center justify-center gap-1.5">
                       <Share2 size={12} /> Share
                     </button>
-                    <button onClick={downloadQuoteDraft} className="col-span-2 text-xs text-white bg-emerald-700 hover:bg-emerald-600 px-2.5 py-2 rounded-lg inline-flex items-center justify-center gap-1.5">
-                      <FileSpreadsheet size={12} /> Save Quote Draft
+                    <button
+                      onClick={() => void saveQuoteDraftToProject()}
+                      disabled={quoteDraftSaved}
+                      className="col-span-2 text-xs text-white bg-emerald-700 hover:bg-emerald-600 disabled:opacity-70 px-2.5 py-2 rounded-lg inline-flex items-center justify-center gap-1.5 transition-colors"
+                    >
+                      {quoteDraftSaved ? <><CheckCircle2 size={12} /> Saved to project</> : <><FileSpreadsheet size={12} /> Save Quote Draft</>}
                     </button>
                   </div>
+
+                  {/* Save Project — persists everything and opens a fresh analysis */}
+                  <button
+                    onClick={() => void handleSaveAndNew()}
+                    disabled={projectSaving}
+                    className="flex items-center justify-center gap-2 bg-slate-700 hover:bg-slate-600 disabled:opacity-60 text-white text-sm font-semibold py-2.5 px-4 rounded-xl transition-colors"
+                  >
+                    {projectSaving
+                      ? <><Loader2 size={14} className="animate-spin" /> Saving…</>
+                      : <><FolderOpen size={14} /> Save Project</>}
+                  </button>
+
                   <button onClick={runFinalAnalysis} className="text-xs text-slate-500 hover:text-white flex items-center gap-1.5 transition-colors">
                     <RotateCcw size={11} /> Re-run analysis
                   </button>
@@ -2593,10 +3977,10 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
                   <Share2 size={12} /> Share
                 </button>
                 <button
-                  onClick={downloadQuoteDraft}
+                  onClick={() => void saveQuoteDraftToProject()}
                   className="text-xs bg-blue-600 hover:bg-blue-500 text-white px-2.5 py-1.5 rounded-md inline-flex items-center gap-1.5"
                 >
-                  <FileSpreadsheet size={12} /> Quote
+                  <FileSpreadsheet size={12} /> {quoteDraftSaved ? 'Saved ✓' : 'Quote'}
                 </button>
                 <button
                   onClick={() => setShowFullReport(false)}
@@ -2664,35 +4048,33 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
                 <h3 className="text-sm font-semibold text-slate-800 mb-2">Pitch & Direction Measurement Report</h3>
                 <div className="overflow-x-auto">
                   <svg viewBox={`0 0 ${diagramWidth} ${diagramHeight}`} className="w-full h-auto rounded-lg border border-slate-200 bg-slate-50">
-                    {reportEdges.map(edge => (
-                      <line
-                        key={edge.id}
-                        x1={edge.x1}
-                        y1={edge.y1}
-                        x2={edge.x2}
-                        y2={edge.y2}
-                        stroke={edge.color}
-                        strokeWidth={2.4}
-                        strokeDasharray={edge.dash.length > 0 ? edge.dash.join(' ') : undefined}
-                        strokeLinecap="round"
-                      />
-                    ))}
-                    {reportPolygons.map(poly => (
-                      <g key={poly.id}>
-                        <polygon
-                          points={poly.points.map(p => `${p.x},${p.y}`).join(' ')}
-                          fill={`${poly.color}2A`}
-                          stroke={poly.color}
-                          strokeWidth={2}
-                        />
-                        <text x={poly.center.x} y={poly.center.y - 8} textAnchor="middle" fontSize="16" fontWeight="700" fill="#0f172a">
-                          {poly.pitch} · {poly.facing}
-                        </text>
-                        <text x={poly.center.x} y={poly.center.y + 14} textAnchor="middle" fontSize="14" fill="#334155">
-                          {poly.areaSqFt} sq ft
-                        </text>
-                      </g>
-                    ))}
+                    {reportPolygons.map(poly => {
+                      const hasPitch  = poly.pitch  && poly.pitch  !== 'n/a';
+                      const hasFacing = poly.facing && poly.facing !== 'n/a';
+                      const label = hasPitch && hasFacing
+                        ? `${poly.pitch} · ${poly.facing}`
+                        : hasPitch  ? poly.pitch
+                        : hasFacing ? poly.facing
+                        : null;
+                      return (
+                        <g key={poly.id}>
+                          <polygon
+                            points={poly.points.map(p => `${p.x},${p.y}`).join(' ')}
+                            fill={`${poly.color}2A`}
+                            stroke={poly.color}
+                            strokeWidth={2}
+                          />
+                          {label && (
+                            <text x={poly.center.x} y={poly.center.y - 8} textAnchor="middle" fontSize="16" fontWeight="700" fill="#0f172a">
+                              {label}
+                            </text>
+                          )}
+                          <text x={poly.center.x} y={label ? poly.center.y + 14 : poly.center.y + 6} textAnchor="middle" fontSize="14" fill="#334155">
+                            {poly.areaSqFt > 0 ? `${poly.areaSqFt} sq ft` : ''}
+                          </text>
+                        </g>
+                      );
+                    })}
                   </svg>
                 </div>
                 <div className="mt-2 text-[11px] text-slate-500">

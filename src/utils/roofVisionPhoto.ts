@@ -10,14 +10,12 @@ import {
 } from '@google/generative-ai';
 import type { GenerateContentResult, Part, Schema } from '@google/generative-ai';
 import { readGeminiApiKey } from './googleAiKey';
-import { isGemini429OrQuotaError, withGemini429Retries } from './gemini429';
+import { enqueueGeminiRequest, isGemini429OrQuotaError, withGemini429Retries } from './gemini429';
 import { callOpenAiFallbackJson } from './openaiFallback';
 import type { VisionCueRaw } from './roofVision';
 
 const GEMINI_MODEL_IDS = [
   'gemini-2.5-flash',
-  'gemini-flash-latest',
-  'gemini-1.5-flash',
   'gemini-2.0-flash',
 ] as const;
 
@@ -40,8 +38,7 @@ const ROOF_PHOTO_CUE_SCHEMA: Schema = {
         properties: {
           type: {
             type: SchemaType.STRING,
-            format: 'enum',
-            enum: ['ridge', 'hip', 'valley', 'eave', 'rake'],
+            description: 'One of: ridge, hip, valley, eave, rake',
           },
           x1: { type: SchemaType.NUMBER },
           y1: { type: SchemaType.NUMBER },
@@ -136,6 +133,7 @@ ${slotLabel ? `Capture slot: ${slotLabel}.` : ''}`;
     { text: prompt } as Part,
   ];
 
+  return enqueueGeminiRequest(async () => {
   let receivedApiOk = false;
   let everyFailureWas429 = true;
   for (const modelId of GEMINI_MODEL_IDS) {
@@ -182,4 +180,5 @@ ${slotLabel ? `Capture slot: ${slotLabel}.` : ''}`;
     return { qualityScore: clamp(qualityScore, 0, 1), cues, byType };
   }
   return null;
+  }); // enqueueGeminiRequest
 }

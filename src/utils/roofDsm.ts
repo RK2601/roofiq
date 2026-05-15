@@ -27,6 +27,13 @@ export interface DsmAnalysisResult {
   dsmResolutionM: number;
 }
 
+/** Only Solar API download URLs need `key=`; signed storage.googleapis.com links must stay untouched. */
+function appendSolarApiKeyToDownloadUrl(url: string, apiKey: string): string {
+  if (!url.includes('solar.googleapis.com') || url.includes('key=')) return url;
+  const sep = url.includes('?') ? '&' : '?';
+  return `${url}${sep}key=${apiKey}`;
+}
+
 function pointInPolygon(px: number, py: number, poly: [number, number][]): boolean {
   let inside = false;
   for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
@@ -65,8 +72,7 @@ export async function analyzeDsmForSegments(
 ): Promise<DsmAnalysisResult | null> {
   try {
     // Ensure API key is in URL
-    const sep = dsmUrl.includes('?') ? '&' : '?';
-    const urlWithKey = dsmUrl.includes('key=') ? dsmUrl : `${dsmUrl}${sep}key=${apiKey}`;
+    const urlWithKey = appendSolarApiKeyToDownloadUrl(dsmUrl, apiKey);
     const proxied = `/api/proxy-solar?u=${encodeURIComponent(urlWithKey)}`;
 
     // Fetch GeoTIFF with timeout
@@ -363,8 +369,7 @@ export async function autoSegmentRoofPlanes(
   apiKey: string,
 ): Promise<AutoDetectedSegment[]> {
   try {
-    const sep = dsmUrl.includes('?') ? '&' : '?';
-    const urlWithKey = dsmUrl.includes('key=') ? dsmUrl : `${dsmUrl}${sep}key=${apiKey}`;
+    const urlWithKey = appendSolarApiKeyToDownloadUrl(dsmUrl, apiKey);
     const proxied = `/api/proxy-solar?u=${encodeURIComponent(urlWithKey)}`;
 
     const controller = new AbortController();

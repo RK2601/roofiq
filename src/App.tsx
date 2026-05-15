@@ -18,7 +18,7 @@ import DepthAnalysisPage from './components/DepthAnalysisPage';
 import AccuMeasurePage from './components/AccuMeasurePage';
 import { initDb, isDbConfigured } from './utils/db';
 import { readMapsApiKey } from './utils/googleMapsKey';
-import { readAuthSession, writeAuthSession, clearAuthSession } from './utils/authSession';
+import { readAuthSession, writeAuthSession, clearAuthSession, type WizardAttachSnapshot } from './utils/authSession';
 
 function getStoredUser(): User | null {
   try {
@@ -48,8 +48,14 @@ export default function App() {
   const [pendingAddr, setPendingAddr] = useState('');
   const [pendingCoords, setPendingCoords] = useState<Coordinates>({ lat: 37.422, lng: -122.084 });
   const [dbBanner, setDbBanner] = useState<string | null>(null);
-  const [startInWizardMode, setStartInWizardMode] = useState(false);
-  const [startInAutoSegmentMode, setStartInAutoSegmentMode] = useState(false);
+  const [startInWizardMode, setStartInWizardMode] = useState(
+    () => !!initial.wizardFromHub || initial.view === 'roof-wizard'
+  );
+  const [startInAutoSegmentMode, setStartInAutoSegmentMode] = useState(() => !!initial.wizardAutoSegment);
+  const [analysisWizardOpen, setAnalysisWizardOpen] = useState(() => !!initial.wizardOverlayOpen);
+  const [analysisWizardAttach, setAnalysisWizardAttach] = useState<WizardAttachSnapshot | null>(
+    () => initial.wizardAttach ?? null
+  );
 
   useEffect(() => {
     setApiKey(readMapsApiKey());
@@ -71,26 +77,77 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!user) return;
+    if (!user) {
+      if (view === 'landing' || view === 'login') {
+        writeAuthSession({
+          view,
+          address: '',
+          coordinates: { lat: 37.422, lng: -122.084 },
+          roofSections: [],
+          projectId: null,
+          wizardFromHub: undefined,
+          wizardAutoSegment: undefined,
+          wizardOverlayOpen: undefined,
+          wizardAttach: null,
+        });
+      }
+      return;
+    }
     if (view === 'landing' || view === 'login') return;
-    writeAuthSession({ view, address, coordinates, roofSections, projectId });
-  }, [user, view, address, coordinates, roofSections, projectId]);
+    writeAuthSession({
+      view,
+      address,
+      coordinates,
+      roofSections,
+      projectId,
+      wizardFromHub: startInWizardMode || view === 'roof-wizard',
+      wizardAutoSegment: startInAutoSegmentMode,
+      wizardOverlayOpen: analysisWizardOpen,
+      wizardAttach: analysisWizardAttach,
+    });
+  }, [
+    user,
+    view,
+    address,
+    coordinates,
+    roofSections,
+    projectId,
+    startInWizardMode,
+    startInAutoSegmentMode,
+    analysisWizardOpen,
+    analysisWizardAttach,
+  ]);
+
+  const persistWizardSession = useCallback((payload: { open: boolean; attach: WizardAttachSnapshot }) => {
+    setAnalysisWizardOpen(payload.open);
+    setAnalysisWizardAttach(payload.attach.mode === 'inherit' ? null : payload.attach);
+  }, []);
 
   useEffect(() => {
     if (!user) {
-      clearAuthSession();
       if (view !== 'landing' && view !== 'login') {
         setView('landing');
       }
     }
   }, [user, view]);
 
-  // Reset wizard/auto-segment/ai-segment mode flags when user navigates away from analysis
+  // Reset wizard/auto-segment/overlay when user navigates away from analysis flows
   useEffect(() => {
-    if (view !== 'analysis') {
+    if (view !== 'analysis' && view !== 'roof-wizard') {
       setStartInWizardMode(false);
       setStartInAutoSegmentMode(false);
+      setAnalysisWizardOpen(false);
+      setAnalysisWizardAttach(null);
     }
+  }, [view]);
+
+  /** Sidebar → Smart Roof Wizard: dedicated route with fresh property search. */
+  useEffect(() => {
+    if (view !== 'roof-wizard') return;
+    setStartInWizardMode(true);
+    setStartInAutoSegmentMode(false);
+    setAddress('');
+    setCoordinates({ lat: 0, lng: 0 });
   }, [view]);
 
   const handleAnalysisPropertySelect = useCallback((addr: string, coords: Coordinates) => {
@@ -189,7 +246,7 @@ export default function App() {
 
   /** Flex column + overflow-hidden on main so children can use flex-1 min-h-0 and scroll (mobile Safari). */
   const fullHeightMain =
-    view === 'analysis' || view === 'analysis-hub' || view === 'hover-measure' || view === 'depth-measure' ||
+    view === 'analysis' || view === 'roof-wizard' || view === 'analysis-hub' || view === 'hover-measure' || view === 'depth-measure' ||
     view === 'accu-measure' || view === 'marketing' || view === 'quote' || view === 'projects' || view === 'quotes-list';
 
   return (
@@ -248,19 +305,25 @@ export default function App() {
           />
         </div>
       )}
-      {view === 'analysis' && (
+      {view === 'analysis' || view === 'roof-wizard' ? (
         <AnalysisPage
+          key={view}
           apiKey={apiKey}
           address={address}
           coordinates={coordinates}
           onPropertySelect={handleAnalysisPropertySelect}
           onComplete={handleAnalysisComplete}
-          startInWizardMode={startInWizardMode || startInAutoSegmentMode}
-          fromAnalysisHub={startInWizardMode || startInAutoSegmentMode}
-          startInAutoSegmentMode={startInAutoSegmentMode}
+          onBack={() => setView('analysis-hub')}
+          startInWizardMode={view === 'roof-wizard' ? true : startInWizardMode || startInAutoSegmentMode}
+          fromAnalysisHub={view === 'roof-wizard' ? true : startInWizardMode || startInAutoSegmentMode}
+          startInAutoSegmentMode={view === 'roof-wizard' ? false : startInAutoSegmentMode}
           onWizardProjectPersisted={setProjectId}
+          onWizardSaveAndNew={() => setView('analysis-hub')}
+          restoredWizardOpen={analysisWizardOpen}
+          restoredWizardAttach={analysisWizardAttach}
+          onWizardSessionPersist={persistWizardSession}
         />
-      )}
+      ) : null}
       {view === 'quote' && (
         <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-y-contain bg-slate-50 py-4 sm:py-6 [-webkit-overflow-scrolling:touch]">
           <QuotePage

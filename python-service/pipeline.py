@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 # Pinned version — update if Replicate retires it
-DEPTH_MODEL = "chenxwh/depth-anything-v2:884d158f5b4b49ddc8f940f4e63a11bd2c6de52e92f40e9bc47a58c74c05b408"
+DEPTH_MODEL = "chenxwh/depth-anything-v2:b239ea33cff32bb7abb5db39ffe9a09c14cbc2894331d1ef66fe096eed88ebd4"
 
 # Pixel budget: resize input if larger to keep inference fast & memory safe
 MAX_SIDE_PX = 640
@@ -57,8 +57,11 @@ def _get_depth_map(image_bytes: bytes, replicate_token: str) -> tuple[np.ndarray
     output = client.run(DEPTH_MODEL, input={"image": buf})
     logger.info("Replicate depth inference: %.1fs", time.time() - t0)
 
-    # output is a FileOutput (URL-like). Download it.
-    depth_url = str(output)
+    # output may be a dict (e.g. {'color_depth': url, 'depth': url}) or a direct URL
+    if isinstance(output, dict):
+        depth_url = str(output.get("depth") or output.get("color_depth") or next(iter(output.values())))
+    else:
+        depth_url = str(output)
     req = urllib.request.Request(depth_url, headers={"User-Agent": "RoofIQ/1.0"})
     with urllib.request.urlopen(req, timeout=30) as resp:
         depth_bytes = resp.read()
@@ -214,7 +217,7 @@ def _turbo_colormap(x: np.ndarray) -> np.ndarray:
         ], dtype=np.uint8)
         _TURBO = lut
 
-    idx = np.clip((x * 255).astype(np.int32), 0, 255)
+    idx = np.clip((x * (len(_TURBO) - 1)).astype(np.int32), 0, len(_TURBO) - 1)
     return _TURBO[idx]
 
 

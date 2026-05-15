@@ -6,7 +6,8 @@
  */
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 
-const ALLOWED = /^https:\/\/solar\.googleapis\.com\//;
+/** DSM/RGB GeoTIFF links are usually on solar.googleapis.com; some responses use signed GCS URLs. */
+const ALLOWED = /^https:\/\/(solar|storage)\.googleapis\.com\//;
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader('Access-Control-Allow-Origin', '*');

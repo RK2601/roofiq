@@ -1,7 +1,9 @@
-import { useEffect, useState } from 'react';
-import { FileText, Eye, ChevronRight } from 'lucide-react';
-import { getRecentQuotes } from '../utils/db';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { FileText, Eye, ChevronRight, Search, X } from 'lucide-react';
+import { getRecentQuotes, projectTagLabel } from '../utils/db';
 import QuoteDetailModal from './QuoteDetailModal';
+import QuoteTagMenu from './QuoteTagMenu';
+import { projectTagTone } from './ProjectTagMenu';
 
 interface Quote {
   id: string;
@@ -10,6 +12,8 @@ interface Quote {
   total: number;
   generated_at: string;
   address: string | null;
+  quote_tag: string | null;
+  project_id: string | null;
 }
 
 function formatShortDate(iso: string) {
@@ -20,40 +24,99 @@ function formatShortDate(iso: string) {
   });
 }
 
+function quoteMatchesQuery(q: Quote, raw: string): boolean {
+  const query = raw.trim().toLowerCase();
+  if (!query) return true;
+  const hay = [
+    q.address ?? '',
+    q.material_name,
+    projectTagLabel(q.quote_tag) ?? '',
+    q.id,
+    String(q.total_squares),
+    String(Math.round(q.total)),
+  ]
+    .join(' ')
+    .toLowerCase();
+  return hay.includes(query);
+}
+
 export default function QuotesListPage() {
   const [quotes, setQuotes] = useState<Quote[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+
+  const reloadQuotes = useCallback(() => {
+    return getRecentQuotes(50)
+      .then(rows => setQuotes(rows as Quote[]))
+      .catch(console.error);
+  }, []);
 
   useEffect(() => {
-    getRecentQuotes(50)
-      .then(rows => setQuotes(rows as Quote[]))
-      .catch(console.error)
-      .finally(() => setLoading(false));
+    reloadQuotes().finally(() => setLoading(false));
+  }, [reloadQuotes]);
+
+  const filteredQuotes = useMemo(
+    () => quotes.filter(q => quoteMatchesQuery(q, searchQuery)),
+    [quotes, searchQuery]
+  );
+
+  const handleQuoteDeleted = useCallback((deletedId: string) => {
+    setQuotes(prev => prev.filter(q => q.id !== deletedId));
+    setSelectedId(cur => (cur === deletedId ? null : cur));
   }, []);
 
   return (
     <>
       <div className="mx-auto max-w-[1600px] px-4 py-4 sm:p-6">
-        <div className="mb-5 sm:mb-6">
-          <h2 className="text-xl sm:text-2xl font-bold text-slate-900">Quotes</h2>
-          {!loading && (
-            <p className="text-slate-500 text-sm mt-1">
-              Showing {quotes.length} quote{quotes.length !== 1 ? 's' : ''}
-            </p>
+        <div className="mb-5 flex flex-col gap-4 sm:mb-6 sm:flex-row sm:items-end sm:justify-between sm:gap-6">
+          <div className="min-w-0 flex-1">
+            <h2 className="text-xl sm:text-2xl font-bold text-slate-900">Quotes</h2>
+            {!loading && (
+              <p className="text-slate-500 text-sm mt-1">
+                {searchQuery.trim()
+                  ? `${filteredQuotes.length} match${filteredQuotes.length !== 1 ? 'es' : ''} · ${quotes.length} total`
+                  : `Showing ${quotes.length} quote${quotes.length !== 1 ? 's' : ''}`}
+              </p>
+            )}
+          </div>
+          {!loading && quotes.length > 0 && (
+            <div className="relative w-full min-w-0 sm:max-w-md sm:min-w-[12rem]">
+              <Search
+                size={18}
+                className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"
+                aria-hidden
+              />
+              <input
+                type="search"
+                value={searchQuery}
+                onChange={e => setSearchQuery(e.target.value)}
+                placeholder="Search address, material, status…"
+                className="min-h-[48px] w-full rounded-xl border border-slate-200 bg-white py-2.5 pl-10 pr-10 text-sm text-slate-900 shadow-sm outline-none placeholder:text-slate-400 focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+                aria-label="Search quotes"
+              />
+              {searchQuery.trim() !== '' && (
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery('')}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-600"
+                  aria-label="Clear search"
+                >
+                  <X size={16} aria-hidden />
+                </button>
+              )}
+            </div>
           )}
         </div>
 
         <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
           {loading ? (
             <>
-              {/* Mobile skeletons */}
               <div className="lg:hidden p-3 space-y-2 animate-pulse">
                 {Array.from({ length: 6 }).map((_, i) => (
                   <div key={i} className="h-[5.75rem] rounded-xl bg-slate-100" />
                 ))}
               </div>
-              {/* Desktop skeletons */}
               <div className="hidden lg:block animate-pulse">
                 {Array.from({ length: 6 }).map((_, i) => (
                   <div key={i} className="px-6 py-4 border-b border-slate-100 flex items-center gap-4">
@@ -74,22 +137,43 @@ export default function QuotesListPage() {
               <p className="text-slate-500 font-semibold text-lg">No quotes yet</p>
               <p className="text-slate-400 text-sm mt-2">Complete an analysis to generate your first quote.</p>
             </div>
+          ) : filteredQuotes.length === 0 ? (
+            <div className="p-8 sm:p-16 text-center">
+              <Search size={40} className="text-slate-300 mx-auto mb-4" aria-hidden />
+              <p className="text-slate-500 font-semibold text-lg">No matches</p>
+              <p className="text-slate-400 text-sm mt-2">Try a different search term or clear the filter.</p>
+              <button
+                type="button"
+                onClick={() => setSearchQuery('')}
+                className="mt-4 text-sm font-semibold text-blue-600 hover:text-blue-700"
+              >
+                Clear search
+              </button>
+            </div>
           ) : (
             <>
-              {/* Mobile: card list */}
               <ul className="lg:hidden p-2 sm:p-3 space-y-2 list-none">
-                {quotes.map(q => (
-                  <li key={q.id}>
+                {filteredQuotes.map(q => (
+                  <li key={q.id} className="flex gap-2 items-stretch">
                     <button
                       type="button"
                       onClick={() => setSelectedId(q.id)}
-                      className="touch-manipulation w-full rounded-xl border border-slate-100 bg-slate-50/60 p-3 sm:p-4 text-left transition-colors hover:bg-slate-50 active:bg-slate-100"
+                      className="touch-manipulation min-w-0 flex-1 rounded-xl border border-slate-100 bg-slate-50/60 p-3 sm:p-4 text-left transition-colors hover:bg-slate-50 active:bg-slate-100"
                     >
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0 flex-1">
-                          <p className="text-sm font-semibold text-slate-900 leading-snug line-clamp-2">
-                            {q.address ?? 'No address'}
-                          </p>
+                          <div className="flex items-start gap-2">
+                            <p className="text-sm font-semibold text-slate-900 leading-snug line-clamp-2 min-w-0 flex-1">
+                              {q.address ?? 'No address'}
+                            </p>
+                            {projectTagLabel(q.quote_tag) && (
+                              <span
+                                className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold ${projectTagTone(q.quote_tag)}`}
+                              >
+                                {projectTagLabel(q.quote_tag)}
+                              </span>
+                            )}
+                          </div>
                           <p className="mt-1 text-xs text-slate-500">
                             {q.material_name} · {q.total_squares.toLocaleString('en-US', { maximumFractionDigits: 1 })} sq
                           </p>
@@ -106,13 +190,27 @@ export default function QuotesListPage() {
                         </span>
                       </div>
                     </button>
+                    <div
+                      className="shrink-0 flex flex-col justify-center py-2"
+                      onClick={e => e.stopPropagation()}
+                      onKeyDown={e => e.stopPropagation()}
+                    >
+                      <QuoteTagMenu
+                        quoteId={q.id}
+                        currentTag={q.quote_tag}
+                        compact
+                        onTagUpdated={tag =>
+                          setQuotes(prev => prev.map(x => (x.id === q.id ? { ...x, quote_tag: tag } : x)))
+                        }
+                        onQuoteDeleted={handleQuoteDeleted}
+                      />
+                    </div>
                   </li>
                 ))}
               </ul>
 
-              {/* Desktop: table */}
               <div className="hidden lg:block overflow-x-auto">
-                <table className="w-full text-sm min-w-[48rem]">
+                <table className="w-full text-sm min-w-[52rem]">
                   <thead>
                     <tr className="bg-slate-50 border-b border-slate-200">
                       <th className="text-left px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider w-10">#</th>
@@ -122,10 +220,11 @@ export default function QuotesListPage() {
                       <th className="text-right px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Total</th>
                       <th className="text-right px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Date</th>
                       <th className="text-center px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Actions</th>
+                      <th className="text-right px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider w-36">Tag</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
-                    {quotes.map((q, idx) => (
+                    {filteredQuotes.map((q, idx) => (
                       <tr
                         key={q.id}
                         className="hover:bg-slate-50 transition-colors cursor-pointer"
@@ -159,6 +258,29 @@ export default function QuotesListPage() {
                             View
                           </button>
                         </td>
+                        <td className="px-6 py-3" onClick={e => e.stopPropagation()}>
+                          <div className="flex items-center justify-end gap-2">
+                            {projectTagLabel(q.quote_tag) ? (
+                              <span
+                                className={`max-w-[6.5rem] truncate rounded-full px-2 py-0.5 text-xs font-semibold ${projectTagTone(q.quote_tag)}`}
+                                title={projectTagLabel(q.quote_tag) ?? undefined}
+                              >
+                                {projectTagLabel(q.quote_tag)}
+                              </span>
+                            ) : (
+                              <span className="text-xs text-slate-400">—</span>
+                            )}
+                            <QuoteTagMenu
+                              quoteId={q.id}
+                              currentTag={q.quote_tag}
+                              compact
+                              onTagUpdated={tag =>
+                                setQuotes(prev => prev.map(x => (x.id === q.id ? { ...x, quote_tag: tag } : x)))
+                              }
+                              onQuoteDeleted={handleQuoteDeleted}
+                            />
+                          </div>
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -167,12 +289,6 @@ export default function QuotesListPage() {
             </>
           )}
         </div>
-
-        {!loading && quotes.length > 0 && (
-          <p className="text-slate-400 text-xs mt-3">
-            Showing {quotes.length} of {quotes.length} quotes
-          </p>
-        )}
       </div>
 
       {selectedId && (

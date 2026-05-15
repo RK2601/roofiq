@@ -20,8 +20,8 @@ interface SaveProjectChoiceModalProps {
   onCancel: () => void;
   /** Save as a new project row (new folder). `folderName` is stored as `project_name` / `display_name`. */
   onChooseNew: (folderName: string) => void;
-  /** Merge into this project id (same folder). */
-  onChooseExisting: (projectId: string) => void;
+  /** Merge into this project id (same folder). `displayTitle` is shown in the Smart Roof Wizard sidebar folder. */
+  onChooseExisting: (projectId: string, displayTitle: string) => void;
 }
 
 function formatListTitle(p: ProjectRow): string {
@@ -110,7 +110,8 @@ export default function SaveProjectChoiceModal({
       return;
     }
     if (choice === 'existing' && selectedId) {
-      onChooseExisting(selectedId);
+      const row = projects.find(p => p.id === selectedId);
+      onChooseExisting(selectedId, row ? formatListTitle(row) : selectedId);
     }
   };
 

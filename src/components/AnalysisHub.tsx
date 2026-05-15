@@ -1,11 +1,12 @@
-import { Zap, Map, Layers, Shield } from 'lucide-react';
+import { Zap, Layers } from 'lucide-react';
 import { AppView } from '../types';
 
 interface AnalysisHubProps {
   onNavigate: (view: AppView, wizardMode?: boolean, autoSegmentMode?: boolean) => void;
 }
 
-interface RouteCard {
+interface HubCard {
+  key: string;
   view: AppView;
   wizardMode?: boolean;
   autoSegmentMode?: boolean;
@@ -21,26 +22,9 @@ interface RouteCard {
   iconBg: string;
 }
 
-const ROUTES: RouteCard[] = [
+const HUB_CARDS: HubCard[] = [
   {
-    view: 'accu-measure',
-    icon: <Shield size={28} />,
-    badge: 'Recommended',
-    badgeColor: 'bg-indigo-100 text-indigo-700',
-    title: 'AccuMeasure',
-    subtitle: 'Multi-source roof intelligence — Solar + DSM + Gemini labels',
-    features: [
-      'Google Solar API for actual sq ft per section',
-      'DSM elevation cross-validation',
-      'Gemini satellite labels on DSM planes',
-      'One-click quote generation',
-    ],
-    cta: 'Run AccuMeasure',
-    gradient: 'from-indigo-50 to-violet-50',
-    borderColor: 'border-indigo-200 hover:border-indigo-500',
-    iconBg: 'bg-indigo-100 text-indigo-600',
-  },
-  {
+    key: 'quick',
     view: 'analysis',
     wizardMode: false,
     icon: <Zap size={28} />,
@@ -60,25 +44,7 @@ const ROUTES: RouteCard[] = [
     iconBg: 'bg-amber-100 text-amber-600',
   },
   {
-    view: 'analysis',
-    wizardMode: true,
-    icon: <Map size={28} />,
-    badge: 'Smart',
-    badgeColor: 'bg-blue-100 text-blue-700',
-    title: 'Smart Roof Wizard',
-    subtitle: 'Step-by-step guided AI + DSM measurement',
-    features: [
-      'Multi-segment roof mapping',
-      'Google Solar DSM elevation data',
-      'Gemini AI structure detection',
-      'Per-facet pitch, area & direction',
-    ],
-    cta: 'Open Roof Wizard',
-    gradient: 'from-blue-50 to-indigo-50',
-    borderColor: 'border-blue-200 hover:border-blue-400',
-    iconBg: 'bg-blue-100 text-blue-600',
-  },
-  {
+    key: 'dsm-auto',
     view: 'analysis',
     wizardMode: true,
     autoSegmentMode: true,
@@ -107,14 +73,16 @@ export default function AnalysisHub({ onNavigate }: AnalysisHubProps) {
         <div className="text-center mb-10">
           <h1 className="text-3xl font-bold text-slate-900 mb-2">Choose Analysis Method</h1>
           <p className="text-slate-500 text-lg">
-            Pick the right tool for the job — from quick estimates to contractor-grade measurements.
+            Quick estimate or DSM auto-map. AccuMeasure, Smart Roof Wizard, AI Depth, and HOVER are in the sidebar
+            under Measurement tools.
           </p>
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
-          {ROUTES.map((route, i) => (
+          {HUB_CARDS.map(route => (
             <button
-              key={i}
+              key={route.key}
+              type="button"
               onClick={() => onNavigate(route.view, route.wizardMode, route.autoSegmentMode)}
               className={`text-left bg-gradient-to-br ${route.gradient} border-2 ${route.borderColor} rounded-2xl p-6 transition-all duration-200 hover:shadow-lg hover:-translate-y-0.5 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500`}
             >
@@ -123,7 +91,7 @@ export default function AnalysisHub({ onNavigate }: AnalysisHubProps) {
                   {route.icon}
                 </div>
                 <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 mb-1">
+                  <div className="flex items-center gap-2 mb-1 flex-wrap">
                     <h2 className="text-lg font-semibold text-slate-900">{route.title}</h2>
                     {route.badge && (
                       <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${route.badgeColor}`}>
@@ -155,11 +123,7 @@ export default function AnalysisHub({ onNavigate }: AnalysisHubProps) {
         </div>
 
         <p className="text-center text-xs text-slate-400 mt-8">
-          Quick Analysis, Smart Roof Wizard, DSM Auto-Map, and AccuMeasure require Google Maps + Gemini API keys.
-          {' '}
-          <span className="text-slate-500">
-            HOVER Measurement and AI Depth Analysis are in the sidebar under Measurement tools.
-          </span>
+          Quick Analysis and DSM Auto-Map require Google Maps + Gemini API keys.
         </p>
       </div>
     </div>
