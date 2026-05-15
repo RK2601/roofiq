@@ -68,11 +68,11 @@ const HUB_CARDS: HubCard[] = [
 
 export default function AnalysisHub({ onNavigate }: AnalysisHubProps) {
   return (
-    <div className="min-h-full bg-slate-50 py-8 px-4">
+    <div className="min-h-full bg-slate-50 py-6 px-4 sm:py-8 safe-pb">
       <div className="max-w-5xl mx-auto">
-        <div className="text-center mb-10">
-          <h1 className="text-3xl font-bold text-slate-900 mb-2">Choose Analysis Method</h1>
-          <p className="text-slate-500 text-lg">
+        <div className="text-center mb-8 sm:mb-10">
+          <h1 className="text-2xl sm:text-3xl font-bold text-slate-900 mb-2">Choose Analysis Method</h1>
+          <p className="text-slate-500 text-base sm:text-lg px-1">
             Quick estimate or DSM auto-map. AccuMeasure, Smart Roof Wizard, AI Depth, and HOVER are in the sidebar
             under Measurement tools.
           </p>
@@ -84,7 +84,7 @@ export default function AnalysisHub({ onNavigate }: AnalysisHubProps) {
               key={route.key}
               type="button"
               onClick={() => onNavigate(route.view, route.wizardMode, route.autoSegmentMode)}
-              className={`text-left bg-gradient-to-br ${route.gradient} border-2 ${route.borderColor} rounded-2xl p-6 transition-all duration-200 hover:shadow-lg hover:-translate-y-0.5 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500`}
+              className={`touch-manipulation text-left bg-gradient-to-br ${route.gradient} border-2 ${route.borderColor} rounded-2xl p-5 sm:p-6 min-h-[52px] transition-all duration-200 hover:shadow-lg active:scale-[0.99] sm:hover:-translate-y-0.5 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500`}
             >
               <div className="flex items-start gap-4 mb-4">
                 <div className={`w-14 h-14 rounded-xl flex items-center justify-center flex-shrink-0 ${route.iconBg}`}>

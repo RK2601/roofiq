@@ -44,7 +44,7 @@ export default function SettingsPage({ apiKey, user, onNeedApiKey, onLogout }: S
   };
 
   return (
-    <div className="p-6 max-w-2xl space-y-8">
+    <div className="p-4 sm:p-6 max-w-2xl space-y-6 sm:space-y-8 safe-pb">
       <div>
         <h2 className="text-2xl font-bold text-slate-900">Settings</h2>
         <p className="text-slate-500 mt-1">Manage your account and application configuration.</p>
@@ -59,8 +59,8 @@ export default function SettingsPage({ apiKey, user, onNeedApiKey, onLogout }: S
         <div className="divide-y divide-slate-100">
 
           {/* Google Maps key */}
-          <div className="px-6 py-5 flex items-center justify-between gap-4">
-            <div>
+          <div className="px-4 sm:px-6 py-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div className="min-w-0 flex-1">
               <p className="text-sm font-medium text-slate-700 mb-1">Google Maps API Key</p>
               <p className="font-mono text-sm text-slate-500 bg-slate-100 px-3 py-1.5 rounded">
                 {maskApiKey(apiKey) || '(not set)'}
@@ -68,7 +68,7 @@ export default function SettingsPage({ apiKey, user, onNeedApiKey, onLogout }: S
             </div>
             <button
               onClick={onNeedApiKey}
-              className="flex-shrink-0 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors"
+              className="btn-primary flex-shrink-0 text-sm px-4 py-2 min-h-[44px]"
             >
               Update Key
             </button>

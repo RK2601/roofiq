@@ -705,11 +705,11 @@ export default function ProjectDetailModal({
           </div>
         </div>
 
-        <div className="flex shrink-0 border-b border-slate-200 bg-white px-4 sm:px-8">
+        <div className="mobile-scroll-x flex shrink-0 border-b border-slate-200 bg-white px-2 sm:px-8">
           <button
             type="button"
             onClick={() => setActiveTab('overview')}
-            className={`flex items-center gap-2 px-4 py-3 text-sm font-semibold border-b-2 -mb-px transition-colors ${
+            className={`flex shrink-0 items-center gap-2 px-3 sm:px-4 py-3 min-h-[48px] text-sm font-semibold border-b-2 -mb-px transition-colors touch-manipulation ${
               activeTab === 'overview'
                 ? 'border-blue-600 text-blue-700'
                 : 'border-transparent text-slate-500 hover:text-slate-700'
@@ -721,7 +721,7 @@ export default function ProjectDetailModal({
           <button
             type="button"
             onClick={() => setActiveTab('wizard')}
-            className={`flex items-center gap-2 px-4 py-3 text-sm font-semibold border-b-2 -mb-px transition-colors ${
+            className={`flex shrink-0 items-center gap-2 px-3 sm:px-4 py-3 min-h-[48px] text-sm font-semibold border-b-2 -mb-px transition-colors touch-manipulation ${
               activeTab === 'wizard'
                 ? 'border-blue-600 text-blue-700'
                 : 'border-transparent text-slate-500 hover:text-slate-700'
@@ -733,7 +733,7 @@ export default function ProjectDetailModal({
           <button
             type="button"
             onClick={() => setActiveTab('quote')}
-            className={`flex items-center gap-2 px-4 py-3 text-sm font-semibold border-b-2 -mb-px transition-colors ${
+            className={`flex shrink-0 items-center gap-2 px-3 sm:px-4 py-3 min-h-[48px] text-sm font-semibold border-b-2 -mb-px transition-colors touch-manipulation ${
               activeTab === 'quote'
                 ? 'border-emerald-600 text-emerald-700'
                 : 'border-transparent text-slate-500 hover:text-slate-700'
@@ -745,7 +745,7 @@ export default function ProjectDetailModal({
           <button
             type="button"
             onClick={() => setActiveTab('materials')}
-            className={`flex items-center gap-2 px-4 py-3 text-sm font-semibold border-b-2 -mb-px transition-colors ${
+            className={`flex shrink-0 items-center gap-2 px-3 sm:px-4 py-3 min-h-[48px] text-sm font-semibold border-b-2 -mb-px transition-colors touch-manipulation ${
               activeTab === 'materials'
                 ? 'border-orange-500 text-orange-700'
                 : 'border-transparent text-slate-500 hover:text-slate-700'
@@ -757,7 +757,7 @@ export default function ProjectDetailModal({
           <button
             type="button"
             onClick={() => setActiveTab('history')}
-            className={`flex items-center gap-2 px-4 py-3 text-sm font-semibold border-b-2 -mb-px transition-colors ${
+            className={`flex shrink-0 items-center gap-2 px-3 sm:px-4 py-3 min-h-[48px] text-sm font-semibold border-b-2 -mb-px transition-colors touch-manipulation ${
               activeTab === 'history'
                 ? 'border-violet-600 text-violet-700'
                 : 'border-transparent text-slate-500 hover:text-slate-700'

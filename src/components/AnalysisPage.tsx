@@ -944,17 +944,23 @@ export default function AnalysisPage({
   return (
     <div className="flex h-full min-h-0 flex-col lg:flex-row overflow-hidden">
       {/* Map area — fixed share of height on phones; full flex on desktop */}
-      <div className="relative w-full h-[38%] min-h-[170px] shrink-0 lg:h-auto lg:min-h-0 lg:flex-1">
+      <div className="relative w-full h-[42dvh] min-h-[200px] max-h-[50dvh] shrink-0 lg:h-auto lg:max-h-none lg:min-h-0 lg:flex-1">
         {/* Map + Street View side by side */}
-        <div className="flex h-full w-full">
+        <div className="relative flex h-full w-full min-h-0">
           <div
             ref={mapRef}
-            className={`h-full min-h-0 lg:min-h-[200px] transition-all duration-300 ${showStreetView ? 'w-1/2' : 'w-full'}`}
+            className={`h-full min-h-0 lg:min-h-[200px] transition-all duration-300 ${
+              showStreetView ? 'max-lg:hidden lg:w-1/2 lg:block w-full' : 'w-full'
+            }`}
           />
           {/* Street View pane */}
           <div
             ref={streetViewRef}
-            className={`h-full border-l-2 border-slate-700 transition-all duration-300 ${showStreetView ? 'w-1/2' : 'w-0 overflow-hidden'}`}
+            className={`h-full border-slate-700 transition-all duration-300 ${
+              showStreetView
+                ? 'max-lg:absolute max-lg:inset-0 max-lg:z-20 max-lg:border-0 lg:relative lg:border-l-2 lg:w-1/2 w-full'
+                : 'w-0 overflow-hidden lg:w-0'
+            }`}
           >
             {/* "Not available" overlay shown inside the div when SV is toggled but unavailable */}
             {showStreetView && !streetViewAvailable && (

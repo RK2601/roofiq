@@ -36,7 +36,7 @@ export default function LoginPage({ onLogin, onBack }: LoginPageProps) {
   };
 
   return (
-    <div className="min-h-screen flex">
+    <div className="min-h-[100dvh] flex flex-col lg:flex-row">
       {/* Left panel */}
       <div className="hidden lg:flex lg:w-1/2 bg-slate-900 flex-col justify-between p-12">
         <div>
@@ -73,7 +73,7 @@ export default function LoginPage({ onLogin, onBack }: LoginPageProps) {
       </div>
 
       {/* Right panel */}
-      <div className="flex-1 flex flex-col justify-center items-center bg-white px-8 py-12">
+      <div className="flex-1 flex flex-col justify-center items-center bg-white px-4 py-8 sm:px-8 sm:py-12 safe-pb">
         <div className="w-full max-w-md">
           {/* Mobile logo */}
           <div className="flex lg:hidden items-center gap-3 mb-8">
@@ -102,7 +102,7 @@ export default function LoginPage({ onLogin, onBack }: LoginPageProps) {
                 onChange={e => setEmail(e.target.value)}
                 required
                 placeholder="you@example.com"
-                className="w-full px-4 py-2.5 border border-slate-300 rounded-lg text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                className="mobile-field w-full px-4 border border-slate-300 text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
               />
             </div>
             <div>
@@ -113,7 +113,7 @@ export default function LoginPage({ onLogin, onBack }: LoginPageProps) {
                 onChange={e => setPassword(e.target.value)}
                 required
                 placeholder="••••••••"
-                className="w-full px-4 py-2.5 border border-slate-300 rounded-lg text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                className="mobile-field w-full px-4 border border-slate-300 text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
               />
             </div>
 
@@ -126,7 +126,7 @@ export default function LoginPage({ onLogin, onBack }: LoginPageProps) {
             <button
               type="submit"
               disabled={loading}
-              className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white font-semibold py-2.5 rounded-lg transition-colors flex items-center justify-center gap-2"
+              className="btn-primary w-full disabled:bg-blue-400"
             >
               {loading ? (
                 <>
@@ -142,7 +142,7 @@ export default function LoginPage({ onLogin, onBack }: LoginPageProps) {
 
           <button
             onClick={onBack}
-            className="mt-6 text-sm text-slate-500 hover:text-slate-700 transition-colors w-full text-center"
+            className="mt-6 tap-target text-sm text-slate-500 hover:text-slate-700 transition-colors w-full text-center touch-manipulation"
           >
             ← Back to home
           </button>

@@ -443,17 +443,17 @@ function PhaseTab({ phase, current, label, sublabel }: { phase: Phase; current: 
   const isActive = phase === current;
   const isDone = phase < current;
   return (
-    <div className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-all ${
+    <div className={`flex shrink-0 items-center gap-2 px-3 py-2 min-h-[44px] rounded-lg transition-all sm:px-4 ${
       isActive ? 'bg-blue-600 text-white' : isDone ? 'bg-green-600/20 text-green-400' : 'bg-slate-700/50 text-slate-400'
     }`}>
-      <div className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold ${
+      <div className={`w-6 h-6 shrink-0 rounded-full flex items-center justify-center text-xs font-bold ${
         isActive ? 'bg-white text-blue-600' : isDone ? 'bg-green-500 text-white' : 'bg-slate-600 text-slate-300'
       }`}>
         {isDone ? <Check size={12} /> : phase}
       </div>
-      <div>
-        <div className="text-xs font-semibold">{label}</div>
-        <div className="text-xs opacity-70">{sublabel}</div>
+      <div className="min-w-0">
+        <div className="text-xs font-semibold whitespace-nowrap">{label}</div>
+        <div className="text-xs opacity-70 hidden sm:block">{sublabel}</div>
       </div>
     </div>
   );
@@ -2872,8 +2872,14 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
   return (
     <div className="fixed inset-0 z-50 bg-slate-950 flex flex-col">
       {/* ── Top bar ── */}
-      <div className="shrink-0 bg-slate-900 border-b border-slate-700 px-4 py-3 flex items-center gap-4">
-        <button onClick={onClose} className="text-slate-400 hover:text-white transition-colors p-1">
+      <div className="shrink-0 bg-slate-900 border-b border-slate-700 px-3 py-2.5 sm:px-4 sm:py-3 safe-pt flex flex-col gap-2">
+        <div className="flex items-center gap-2 min-w-0">
+        <button
+          type="button"
+          onClick={onClose}
+          className="tap-target shrink-0 text-slate-400 hover:text-white transition-colors rounded-lg -ml-1"
+          aria-label="Close wizard"
+        >
           <X size={20} />
         </button>
         <div className="flex-1 min-w-0">
@@ -2883,24 +2889,19 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
               {initialProjectFolderName.trim()}
             </div>
           )}
-          <div className="text-sm font-semibold text-white">Smart Roof Mapping Wizard</div>
+          <div className="text-sm font-semibold text-white truncate">Smart Roof Mapping Wizard</div>
         </div>
-        <div className="flex items-center gap-2">
-          <PhaseTab phase={1} current={phase} label="Structural Map" sublabel="Draw & analyze" />
-          <ChevronRight size={14} className="text-slate-600" />
-          <PhaseTab phase={2} current={phase} label="Photo Analysis" sublabel="Multi-angle" />
-          <ChevronRight size={14} className="text-slate-600" />
-          <PhaseTab phase={3} current={phase} label="Final Report" sublabel="Combined AI" />
-        </div>
+        <div className="flex shrink-0 items-center gap-1.5 flex-wrap justify-end">
         {!hasGeminiKey && (
-          <div className="flex items-center gap-1.5 bg-amber-900/40 border border-amber-700/50 text-amber-300 text-xs px-3 py-1.5 rounded-lg">
-            <AlertCircle size={13} />
-            No Gemini key — AI disabled
+          <div className="flex items-center gap-1.5 bg-amber-900/40 border border-amber-700/50 text-amber-300 text-[10px] sm:text-xs px-2 py-1 sm:px-3 sm:py-1.5 rounded-lg">
+            <AlertCircle size={13} className="shrink-0" />
+            <span className="hidden sm:inline">No Gemini key — AI disabled</span>
+            <span className="sm:hidden">No AI key</span>
           </div>
         )}
         {persistStatus !== 'idle' && (
           <div
-            className={`text-[11px] px-2.5 py-1 rounded-md border ${
+            className={`text-[10px] sm:text-[11px] px-2 py-1 sm:px-2.5 rounded-md border whitespace-nowrap ${
               persistStatus === 'saving'
                 ? 'bg-blue-900/30 border-blue-700/50 text-blue-200'
                 : persistStatus === 'saved'
@@ -2908,27 +2909,42 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
                   : 'bg-red-900/30 border-red-700/50 text-red-200'
             }`}
           >
-            {persistStatus === 'saving' ? 'Saving analysis...' : persistStatus === 'saved' ? 'Analysis saved' : 'Save failed'}
+            {persistStatus === 'saving' ? 'Saving…' : persistStatus === 'saved' ? 'Saved' : 'Save failed'}
           </div>
         )}
+        </div>
+        </div>
+        <div className="mobile-scroll-x flex items-center gap-1 pb-0.5 -mx-1 px-1">
+          <PhaseTab phase={1} current={phase} label="Structural Map" sublabel="Draw & analyze" />
+          <ChevronRight size={14} className="text-slate-600 shrink-0 hidden sm:block" />
+          <PhaseTab phase={2} current={phase} label="Photo Analysis" sublabel="Multi-angle" />
+          <ChevronRight size={14} className="text-slate-600 shrink-0 hidden sm:block" />
+          <PhaseTab phase={3} current={phase} label="Final Report" sublabel="Combined AI" />
+        </div>
       </div>
 
       {/* ── Body ── */}
-      <div className="flex-1 flex overflow-hidden">
+      <div className="flex-1 flex flex-col lg:flex-row overflow-hidden min-h-0">
 
         {/* ── Map ── */}
-        <div className="flex-1 relative min-h-0">
+        <div className="relative min-h-0 h-[42dvh] max-h-[50dvh] shrink-0 lg:h-auto lg:flex-1 lg:max-h-none">
           {mapError ? (
             <div className="absolute inset-0 z-10 flex items-center justify-center text-red-400 text-sm">{mapError}</div>
           ) : (
-            <div className="flex h-full w-full min-h-0">
+            <div className="relative flex h-full w-full min-h-0">
               <div
                 ref={mapRef}
-                className={`h-full min-h-0 transition-all duration-300 ${showStreetView ? 'w-1/2' : 'w-full'}`}
+                className={`h-full min-h-0 transition-all duration-300 ${
+                  showStreetView ? 'max-lg:hidden lg:w-1/2 lg:block w-full' : 'w-full'
+                }`}
               />
               <div
                 ref={streetViewRef}
-                className={`h-full min-h-0 border-l-2 border-slate-700 transition-all duration-300 ${showStreetView ? 'w-1/2' : 'w-0 overflow-hidden'}`}
+                className={`h-full min-h-0 border-slate-700 transition-all duration-300 ${
+                  showStreetView
+                    ? 'max-lg:absolute max-lg:inset-0 max-lg:z-20 max-lg:border-0 lg:relative lg:border-l-2 lg:w-1/2 w-full'
+                    : 'w-0 overflow-hidden lg:w-0'
+                }`}
               >
                 {showStreetView && !streetViewAvailable && (
                   <div className="flex h-full w-full flex-col items-center justify-center gap-3 bg-slate-950 px-4 text-center">
@@ -3093,7 +3109,7 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
         </div>
 
         {/* ── Side panel ── */}
-        <div className="w-80 shrink-0 bg-slate-900 border-l border-slate-700 flex flex-col overflow-hidden">
+        <div className="w-full lg:w-80 shrink-0 bg-slate-900 border-t lg:border-t-0 lg:border-l border-slate-700 flex flex-col overflow-hidden flex-1 min-h-0 lg:flex-none lg:max-h-none max-h-[52dvh]">
 
           {/* ────────── Phase 1 ────────── */}
           {phase === 1 && (
@@ -3111,7 +3127,7 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
                       else if (sub === 'segments') goToSegments();
                       else goToStructure();
                     }}
-                    className={`flex-1 py-2.5 capitalize transition-colors ${
+                    className={`flex-1 py-3 min-h-[44px] capitalize transition-colors touch-manipulation ${
                       step1Sub === sub
                         ? 'text-blue-400 border-b-2 border-blue-500 bg-blue-950/30'
                         : 'text-slate-400 hover:text-slate-200'

@@ -109,11 +109,15 @@ export default function DepthAnalysisPage({ onBack }: DepthAnalysisPageProps) {
   };
 
   return (
-    <div className="min-h-full bg-slate-50 py-6 px-4">
+    <div className="min-h-full bg-slate-50 py-6 px-4 safe-pb">
       <div className="max-w-3xl mx-auto">
         {/* Header */}
         <div className="flex items-center gap-3 mb-6">
-          <button onClick={onBack} className="text-slate-400 hover:text-slate-600 transition-colors">
+          <button
+            type="button"
+            onClick={onBack}
+            className="tap-target shrink-0 text-slate-500 hover:text-slate-700 transition-colors touch-manipulation rounded-lg -ml-1"
+          >
             ← Back
           </button>
           <div className="flex-1">
