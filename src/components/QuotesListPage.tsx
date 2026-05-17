@@ -91,7 +91,7 @@ export default function QuotesListPage() {
                 type="search"
                 value={searchQuery}
                 onChange={e => setSearchQuery(e.target.value)}
-                placeholder="Search address, material, status…"
+                placeholder="Search quotes…"
                 className="min-h-[48px] w-full rounded-xl border border-slate-200 bg-white py-2.5 pl-10 pr-10 text-sm text-slate-900 shadow-sm outline-none placeholder:text-slate-400 focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
                 aria-label="Search quotes"
               />
@@ -210,7 +210,7 @@ export default function QuotesListPage() {
               </ul>
 
               <div className="hidden lg:block overflow-x-auto">
-                <table className="w-full text-sm min-w-[52rem]">
+                <table className="w-full text-sm min-w-[44rem]">
                   <thead>
                     <tr className="bg-slate-50 border-b border-slate-200">
                       <th className="text-left px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider w-10">#</th>

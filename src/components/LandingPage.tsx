@@ -101,7 +101,7 @@ export default function LandingPage({ apiKey, onAddressSelect, onSignIn }: Landi
       {/* Nav bar */}
       <nav className="absolute top-0 left-0 right-0 z-20 flex items-center justify-between gap-3 px-4 sm:px-6 pt-[max(0.75rem,env(safe-area-inset-top,0px))] pb-3">
         <div className="flex items-center gap-2 min-w-0">
-          <div className="w-8 h-8 sm:w-7 sm:h-7 bg-blue-600 rounded-md flex items-center justify-center shrink-0">
+          <div className="w-8 h-8 bg-blue-600 rounded-md flex items-center justify-center shrink-0">
             <span className="text-white font-black text-xs">R</span>
           </div>
           <span className="text-white font-bold text-base sm:text-sm truncate">RoofIQ</span>
@@ -116,7 +116,7 @@ export default function LandingPage({ apiKey, onAddressSelect, onSignIn }: Landi
       </nav>
 
       {/* Hero */}
-      <section className="relative flex-1 flex flex-col items-center justify-center px-4 sm:px-6 pt-[max(5.5rem,calc(env(safe-area-inset-top,0px)+4.75rem))] pb-12 sm:pb-20 sm:pt-28 overflow-hidden bg-gradient-to-br from-slate-900 via-slate-800 to-blue-950">
+      <section className="relative flex-1 flex flex-col items-center justify-start sm:justify-center px-4 sm:px-6 pt-[max(5.5rem,calc(env(safe-area-inset-top,0px)+4.75rem))] pb-12 sm:pb-20 sm:pt-28 overflow-hidden bg-gradient-to-br from-slate-900 via-slate-800 to-blue-950">
         {/* Background grid */}
         <div
           className="absolute inset-0 opacity-10"
@@ -165,6 +165,11 @@ export default function LandingPage({ apiKey, onAddressSelect, onSignIn }: Landi
                   disabled={!apiKey}
                   onChange={e => { setInputValue(e.target.value); setError(''); }}
                   onKeyDown={e => e.key === 'Enter' && handleSearch()}
+                  onFocus={() => {
+                    setTimeout(() => {
+                      inputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    }, 300);
+                  }}
                   placeholder={apiKey ? 'Enter property address…' : 'Sign in to search addresses'}
                   className="w-full min-h-[48px] pl-10 sm:pl-11 pr-3 py-3.5 sm:py-4 text-slate-800 bg-transparent outline-none placeholder-slate-400 text-base font-medium rounded-xl border border-slate-200 sm:border-0 sm:rounded-none disabled:cursor-not-allowed disabled:opacity-60"
                 />
@@ -244,7 +249,7 @@ export default function LandingPage({ apiKey, onAddressSelect, onSignIn }: Landi
               From satellite measurement to customer-ready quotes — all in one workflow.
             </p>
           </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 sm:gap-6">
             {features.map(f => {
               const Icon = f.icon;
               return (

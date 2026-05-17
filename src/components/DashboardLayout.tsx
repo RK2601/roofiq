@@ -102,7 +102,7 @@ export default function DashboardLayout({
       {/* Sidebar — drawer on small screens */}
       <aside
         className={`
-          fixed lg:static inset-y-0 left-0 z-50 w-[min(18.5rem,92vw)] max-w-[20rem] lg:w-64
+          fixed lg:static inset-y-0 left-0 z-50 w-[min(16rem,88vw)] max-w-[20rem] lg:w-64
           flex flex-col flex-shrink-0 bg-slate-900 pl-[env(safe-area-inset-left,0px)]
           transform transition-transform duration-200 ease-out
           ${navOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'}
@@ -222,7 +222,7 @@ export default function DashboardLayout({
             >
               <Menu size={22} />
             </button>
-            <h1 className="text-[15px] sm:text-lg font-semibold text-slate-900 truncate">{pageTitle}</h1>
+            <h1 className="text-[13px] sm:text-[15px] md:text-lg font-semibold text-slate-900 truncate max-w-[45vw] sm:max-w-none">{pageTitle}</h1>
           </div>
           <div className="flex items-center gap-0.5 sm:gap-2 flex-shrink-0">
             <button
@@ -236,7 +236,7 @@ export default function DashboardLayout({
               <div className="w-9 h-9 sm:w-8 sm:h-8 bg-blue-600 rounded-full flex items-center justify-center flex-shrink-0">
                 <span className="text-white text-xs font-bold">{user.avatar}</span>
               </div>
-              <span className="text-sm font-medium text-slate-700 max-w-[5.5rem] md:max-w-none truncate hidden sm:inline">{user.name}</span>
+              <span className="text-sm font-medium text-slate-700 max-w-[4rem] sm:max-w-[5.5rem] md:max-w-none truncate hidden sm:inline">{user.name}</span>
             </div>
           </div>
         </header>

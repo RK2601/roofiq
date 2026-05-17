@@ -401,7 +401,7 @@ export default function QuotePage({ address, coordinates, sections, projectId, m
           <div ref={reportRef} className="card overflow-hidden" id="quote-report">
             {/* Report header */}
             <div className="bg-gradient-to-br from-slate-900 to-slate-800 px-4 py-5 sm:px-8 sm:py-7 text-white">
-              <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+              <div className="flex flex-col gap-2 sm:gap-4 sm:flex-row sm:items-start sm:justify-between">
                 <div className="min-w-0">
                   <div className="flex items-center gap-2 mb-2 sm:mb-3">
                     <div className="w-8 h-8 sm:w-7 sm:h-7 bg-blue-500 rounded-lg flex items-center justify-center shrink-0">
@@ -537,7 +537,7 @@ export default function QuotePage({ address, coordinates, sections, projectId, m
                   </a>
                   <a
                     href="mailto:quotes@roofiq.com"
-                    className="touch-manipulation inline-flex items-center justify-center gap-2 min-h-[48px] px-4 rounded-xl text-blue-600 hover:bg-white font-medium border border-transparent hover:border-slate-200 active:bg-slate-100 break-all"
+                    className="touch-manipulation inline-flex items-center justify-center gap-2 min-h-[48px] px-4 rounded-xl text-blue-600 hover:bg-white font-medium border border-transparent hover:border-slate-200 active:bg-slate-100 break-words"
                   >
                     <Mail size={16} className="shrink-0" aria-hidden />
                     quotes@roofiq.com

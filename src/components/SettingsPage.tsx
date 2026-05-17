@@ -62,7 +62,7 @@ export default function SettingsPage({ apiKey, user, onNeedApiKey, onLogout }: S
           <div className="px-4 sm:px-6 py-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
             <div className="min-w-0 flex-1">
               <p className="text-sm font-medium text-slate-700 mb-1">Google Maps API Key</p>
-              <p className="font-mono text-sm text-slate-500 bg-slate-100 px-3 py-1.5 rounded">
+              <p className="font-mono text-sm text-slate-500 bg-slate-100 px-3 py-1.5 rounded overflow-hidden text-ellipsis max-w-full truncate">
                 {maskApiKey(apiKey) || '(not set)'}
               </p>
             </div>
@@ -192,14 +192,14 @@ export default function SettingsPage({ apiKey, user, onNeedApiKey, onLogout }: S
           <h3 className="font-semibold text-red-700">Danger Zone</h3>
           <p className="text-red-500 text-sm mt-0.5">Irreversible actions. Proceed with caution.</p>
         </div>
-        <div className="px-6 py-5 flex items-center justify-between">
+        <div className="px-6 py-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <p className="text-sm font-medium text-slate-700">Sign Out</p>
             <p className="text-slate-400 text-sm mt-0.5">You will be redirected to the home page.</p>
           </div>
           <button
             onClick={onLogout}
-            className="bg-red-600 hover:bg-red-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors"
+            className="touch-manipulation bg-red-600 hover:bg-red-700 text-white text-sm font-medium px-4 py-2 min-h-[44px] rounded-lg transition-colors shrink-0"
           >
             Sign Out
           </button>

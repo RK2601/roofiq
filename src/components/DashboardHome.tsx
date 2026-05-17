@@ -220,7 +220,7 @@ export default function DashboardHome({
                   />
                 </div>
                 <div
-                  className="h-40 sm:h-32 bg-slate-100 bg-cover bg-center relative"
+                  className="h-32 bg-slate-100 bg-cover bg-center relative"
                   style={p.snapshot_url ? { backgroundImage: `url(${p.snapshot_url})` } : undefined}
                 >
                   {!p.snapshot_url && (
@@ -310,7 +310,7 @@ export default function DashboardHome({
             </div>
             {/* Tablet+: table */}
             <div className="hidden sm:block bg-white rounded-xl border border-slate-200 overflow-x-auto">
-              <table className="w-full text-sm min-w-[36rem]">
+              <table className="w-full text-sm min-w-[32rem]">
                 <thead>
                   <tr className="bg-slate-50 border-b border-slate-200">
                     <th className="text-left px-4 lg:px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Address</th>

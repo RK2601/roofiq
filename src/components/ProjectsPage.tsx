@@ -185,17 +185,17 @@ export default function ProjectsPage({ onNewAnalysis, onOpenQuoteFromProject }: 
                     <button
                       type="button"
                       onClick={() => setSelectedId(p.id)}
-                      className="touch-manipulation min-w-0 flex-1 flex gap-3 p-3 sm:p-4 rounded-xl border border-slate-100 bg-slate-50/50 hover:bg-slate-50 active:bg-slate-100 text-left transition-colors min-h-[4.75rem]"
+                      className="touch-manipulation min-w-0 flex-1 flex gap-2 sm:gap-3 px-2.5 py-3 sm:p-4 rounded-xl border border-slate-100 bg-slate-50/50 hover:bg-slate-50 active:bg-slate-100 text-left transition-colors min-h-[4.75rem]"
                     >
                       <div className="shrink-0">
                         {p.snapshot_url ? (
                           <img
                             src={p.snapshot_url}
                             alt=""
-                            className="w-14 h-14 sm:w-16 sm:h-16 object-cover rounded-lg border border-slate-200 shadow-sm"
+                            className="w-12 h-12 sm:w-14 sm:h-14 object-cover rounded-lg border border-slate-200 shadow-sm"
                           />
                         ) : (
-                          <div className="w-14 h-14 sm:w-16 sm:h-16 rounded-lg bg-slate-100 border border-slate-200 flex items-center justify-center">
+                          <div className="w-12 h-12 sm:w-14 sm:h-14 rounded-lg bg-slate-100 border border-slate-200 flex items-center justify-center">
                             <MapPin size={20} className="text-slate-300" aria-hidden />
                           </div>
                         )}
@@ -213,7 +213,7 @@ export default function ProjectsPage({ onNewAnalysis, onOpenQuoteFromProject }: 
                             </span>
                           )}
                         </div>
-                        <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] sm:text-xs text-slate-500">
+                        <div className="mt-2 flex flex-wrap gap-x-2 gap-y-0.5 sm:gap-x-3 text-[11px] sm:text-xs text-slate-500">
                           <span className="inline-flex items-center gap-1 font-medium tabular-nums">
                             <Layers size={13} className="text-blue-600 shrink-0" aria-hidden />
                             {p.section_count} sections

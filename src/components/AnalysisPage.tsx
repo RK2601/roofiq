@@ -944,7 +944,7 @@ export default function AnalysisPage({
   return (
     <div className="flex h-full min-h-0 flex-col lg:flex-row overflow-hidden">
       {/* Map area — fixed share of height on phones; full flex on desktop */}
-      <div className="relative w-full h-[42dvh] min-h-[200px] max-h-[50dvh] shrink-0 lg:h-auto lg:max-h-none lg:min-h-0 lg:flex-1">
+      <div className="relative w-full h-[38dvh] sm:h-[42dvh] min-h-[190px] max-h-[45dvh] sm:max-h-[50dvh] shrink-0 lg:h-auto lg:max-h-none lg:min-h-0 lg:flex-1">
         {/* Map + Street View side by side */}
         <div className="relative flex h-full w-full min-h-0">
           <div
@@ -1004,7 +1004,7 @@ export default function AnalysisPage({
 
         {/* Map toolbar */}
         {mapLoaded && (
-          <div className="absolute top-[max(0.5rem,env(safe-area-inset-top,0px))] left-2 right-2 lg:top-3 lg:left-3 lg:right-auto flex flex-wrap gap-1.5 z-10 max-w-full pr-[5.5rem] sm:pr-28 lg:pr-0">
+          <div className={`absolute top-[max(0.5rem,env(safe-area-inset-top,0px))] left-2 right-2 lg:top-3 lg:left-3 lg:right-auto flex flex-wrap gap-1.5 z-10 max-w-full lg:pr-0 ${onBack ? 'pr-[5.5rem]' : ''}`}>
 
             {/* ── Row 1: Zoom presets + Re-center ── */}
             <div className="flex gap-1 bg-white rounded-xl shadow-md border border-slate-200 p-1">
@@ -1096,7 +1096,8 @@ export default function AnalysisPage({
               }`}
             >
               <Navigation size={13} />
-              <span>{showStreetView ? 'Close Street View' : 'Street View'}</span>
+              <span className="hidden sm:inline">{showStreetView ? 'Close Street View' : 'Street View'}</span>
+              <span className="sm:hidden">{showStreetView ? 'Close' : 'Street'}</span>
               {!streetViewAvailable && !showStreetView && (
                 <span className="text-[10px] text-slate-400 hidden sm:inline">(checking…)</span>
               )}
@@ -1115,7 +1116,7 @@ export default function AnalysisPage({
 
         {/* Drawing hint */}
         {isDrawing && (
-          <div className="absolute bottom-[max(0.75rem,env(safe-area-inset-bottom,0px))] left-2 right-2 sm:left-1/2 sm:right-auto sm:-translate-x-1/2 z-10 sm:max-w-[min(92vw,28rem)]">
+          <div className="absolute bottom-[max(0.75rem,env(safe-area-inset-bottom,0px))] left-2 right-2 sm:left-1/2 sm:right-auto sm:-translate-x-1/2 z-10 max-w-[min(92vw,28rem)] sm:max-w-[min(92vw,28rem)]">
             <div className="bg-slate-900/90 text-white text-[11px] sm:text-sm font-medium px-3 py-2 sm:px-4 sm:py-2.5 rounded-2xl shadow-xl flex flex-wrap items-center gap-2 backdrop-blur">
               <div className="w-2 h-2 shrink-0 rounded-full bg-orange-400 animate-pulse" />
               <span className="min-w-0 flex-1 leading-snug">Tap to add points · Double-tap to close</span>
@@ -1275,7 +1276,7 @@ export default function AnalysisPage({
                 autoComplete="off"
                 disabled={!mapLoaded}
                 placeholder={mapLoaded ? 'Search another address…' : 'Loading map…'}
-                className="touch-manipulation w-full min-h-[44px] rounded-xl border border-slate-200 bg-white py-2.5 pl-10 pr-3 text-base text-slate-800 shadow-sm outline-none placeholder:text-slate-400 focus:border-blue-400 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-100 disabled:text-slate-400"
+                className="touch-manipulation w-full min-h-[44px] rounded-xl border border-slate-200 bg-white py-2 sm:py-2.5 pl-10 pr-3 text-sm sm:text-base text-slate-800 shadow-sm outline-none placeholder:text-slate-400 focus:border-blue-400 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-100 disabled:text-slate-400"
               />
             </div>
             <p className="hidden text-[11px] leading-snug text-slate-400 sm:block">
@@ -1678,7 +1679,7 @@ export default function AnalysisPage({
                 <Ruler size={13} className="text-slate-400" />
                 <span className="text-xs font-semibold text-slate-600 uppercase tracking-wide">Measurements</span>
               </div>
-              <div className="grid grid-cols-2 gap-1.5">
+              <div className="grid grid-cols-2 xs:grid-cols-2 gap-1.5">
                 {[
                   { label: 'Roof Area', value: formatArea(m.totalActualAreaSqFt) },
                   { label: 'Roof Facets', value: String(m.facets) },
@@ -1687,9 +1688,9 @@ export default function AnalysisPage({
                   { label: 'Plan Area', value: formatArea(m.totalFlatAreaSqFt) },
                   { label: 'Perimeter', value: formatFt(m.totalPerimeterFt) },
                 ].map(item => (
-                  <div key={item.label} className="bg-white rounded-lg p-2 border border-slate-100 text-center">
-                    <div className="text-[10px] text-slate-400 leading-none mb-1">{item.label}</div>
-                    <div className="text-xs font-bold text-slate-900">{item.value}</div>
+                  <div key={item.label} className="bg-white rounded-lg p-2 border border-slate-100 text-center min-w-0">
+                    <div className="text-[10px] text-slate-400 leading-none mb-1 truncate">{item.label}</div>
+                    <div className="text-xs font-bold text-slate-900 truncate">{item.value}</div>
                   </div>
                 ))}
               </div>

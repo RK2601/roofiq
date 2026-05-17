@@ -100,7 +100,7 @@ export default function ReportsPage() {
           <FileText size={16} className="text-blue-600" />
           <h3 className="font-semibold text-slate-800 text-sm">What's included in each Measurement Report</h3>
         </div>
-        <div className="p-5 grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-2">
+        <div className="p-5 grid grid-cols-1 sm:grid-cols-2 gap-x-4 sm:gap-x-8 gap-y-2">
           {[
             'Cover page with high-res aerial satellite imagery',
             'Key stats: Roof Area, Facets, Predominant Pitch, Squares',
