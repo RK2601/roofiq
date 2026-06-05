@@ -222,6 +222,12 @@ export default function App() {
     setView('analysis-hub');
   }, []);
 
+  useEffect(() => {
+    if (user && !readMapsApiKey()) {
+      setShowKeySetup(true);
+    }
+  }, [user]);
+
   const handleApiKeySave = (key: string) => {
     setApiKey(key);
     setShowKeySetup(false);
@@ -327,6 +333,7 @@ export default function App() {
           restoredWizardOpen={analysisWizardOpen}
           restoredWizardAttach={analysisWizardAttach}
           onWizardSessionPersist={persistWizardSession}
+          onNeedApiKey={() => setShowKeySetup(true)}
         />
       ) : null}
       {view === 'quote' && (

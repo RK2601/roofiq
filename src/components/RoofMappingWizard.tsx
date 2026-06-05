@@ -79,6 +79,7 @@ import {
   type RoofPhotoCueAnalysis,
 } from '../utils/roofVision';
 import { readGeminiApiKey } from '../utils/googleAiKey';
+import { formatMapsInitError } from '../utils/googleMapsKey';
 import {
   GEMINI_QUOTA_ERROR,
   formatGeminiQuotaUserMessage,
@@ -725,8 +726,13 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
   // ── Map initialization ──────────────────────────────────────────────────────
 
   useEffect(() => {
-    if (!apiKey || !mapRef.current) return;
+    if (!mapRef.current) return;
+    if (!apiKey?.trim()) {
+      setMapError('No Google Maps API key configured.');
+      return;
+    }
     let cancelled = false;
+    setMapError('');
 
     ensureMapsLoaded(apiKey).then(() => {
       if (cancelled || !mapRef.current) return;
@@ -744,6 +750,7 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
         });
         mapInstanceRef.current = map;
 
+        if (google.maps?.drawing?.DrawingManager) {
         const dm = new google.maps.drawing.DrawingManager({
           drawingMode: null,
           drawingControl: false,
@@ -758,13 +765,16 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
         });
         dm.setMap(map);
         drawingManagerRef.current = dm;
+        }
 
         setMapLoaded(true);
-      } catch {
-        if (!cancelled) setMapError('Failed to initialize map.');
+      } catch (err) {
+        console.error('[RoofWizard] Map init error:', err);
+        if (!cancelled) setMapError(formatMapsInitError(err));
       }
-    }).catch(() => {
-      if (!cancelled) setMapError('Failed to load Google Maps.');
+    }).catch((err) => {
+      console.error('[RoofWizard] Maps loader error:', err);
+      if (!cancelled) setMapError(formatMapsInitError(err));
     });
 
     return () => {

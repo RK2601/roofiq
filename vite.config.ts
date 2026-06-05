@@ -71,6 +71,26 @@ function resolveDatabaseUrl(mode: string): string {
   )
 }
 
+/** Google Maps key — merged at build time (VITE_* and common aliases). */
+function resolveMapsKey(mode: string): string {
+  const fromProcess =
+    (process.env.VITE_GOOGLE_MAPS_API_KEY || '').trim() ||
+    (process.env.GOOGLE_MAPS_API_KEY || '').trim() ||
+    (process.env.GOOGLE_MAPS_KEY || '').trim()
+  if (fromProcess) return fromProcess
+  const envAll = loadEnv(mode, projectRoot, '')
+  const fromViteLoad =
+    (envAll.VITE_GOOGLE_MAPS_API_KEY || '').trim() ||
+    (envAll.GOOGLE_MAPS_API_KEY || '').trim()
+  if (fromViteLoad) return fromViteLoad
+  const file = loadDotEnvFiles()
+  return (
+    (file.VITE_GOOGLE_MAPS_API_KEY || '').trim() ||
+    (file.GOOGLE_MAPS_API_KEY || '').trim() ||
+    (file.GOOGLE_MAPS_KEY || '').trim()
+  )
+}
+
 /** Gemini / Google AI Studio keys use several names; only VITE_GOOGLE_AI_KEY is auto-exposed by Vite. */
 function resolveGeminiKey(mode: string): string {
   const fromProcess =
@@ -320,6 +340,7 @@ function roofNetDevPlugin(): Plugin {
 export default defineConfig(({ mode }) => {
   const viteEnv = loadEnv(mode, projectRoot)
   const resolvedDbUrl = resolveDatabaseUrl(mode)
+  const resolvedMapsKey = resolveMapsKey(mode)
   const resolvedGeminiKey = resolveGeminiKey(mode)
   const resolvedOpenAiKey = resolveOpenAiKey(mode)
 
@@ -328,7 +349,7 @@ export default defineConfig(({ mode }) => {
       resolvedDbUrl ||
       (viteEnv.VITE_DATABASE_URL || process.env.VITE_DATABASE_URL || process.env.DATABASE_URL || '').trim()
     ).trim()
-    const maps = (viteEnv.VITE_GOOGLE_MAPS_API_KEY || process.env.VITE_GOOGLE_MAPS_API_KEY || '').trim()
+    const maps = (resolvedMapsKey || viteEnv.VITE_GOOGLE_MAPS_API_KEY || process.env.VITE_GOOGLE_MAPS_API_KEY || '').trim()
     const gemini = resolvedGeminiKey.trim()
     if (!db) {
       console.warn(
@@ -357,6 +378,7 @@ export default defineConfig(({ mode }) => {
     envDir: projectRoot,
     define: {
       __ROOFIQ_DATABASE_URL__: JSON.stringify(resolvedDbUrl),
+      __ROOFIQ_MAPS_API_KEY__: JSON.stringify(resolvedMapsKey),
       __ROOFIQ_GEMINI_API_KEY__: JSON.stringify(resolvedGeminiKey),
       __ROOFIQ_OPENAI_CONFIGURED__: JSON.stringify(!!resolvedOpenAiKey),
     },

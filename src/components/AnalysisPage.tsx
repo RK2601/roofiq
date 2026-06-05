@@ -42,6 +42,7 @@ import {
 } from 'lucide-react';
 import { saveProject } from '../utils/db';
 import { analyzeRoofImage, analyzeRoofImageFromFile, RoofAnalysis, CONDITION_BG, URGENCY_BG, CONDITION_COLORS } from '../utils/ai';
+import { readMapsApiKey, formatMapsInitError } from '../utils/googleMapsKey';
 import { readGeminiApiKey } from '../utils/googleAiKey';
 import {
   fetchBuildingInsights,
@@ -100,6 +101,8 @@ interface AnalysisPageProps {
   restoredWizardOpen?: boolean;
   restoredWizardAttach?: WizardAttachSnapshot | null;
   onWizardSessionPersist?: (payload: { open: boolean; attach: WizardAttachSnapshot }) => void;
+  /** Open Google Maps key setup (Settings flow). */
+  onNeedApiKey?: () => void;
 }
 
 function wizardAttachFromSnapshot(a: WizardAttachSnapshot | null | undefined): WizardAttach {
@@ -138,6 +141,7 @@ export default function AnalysisPage({
   restoredWizardOpen = false,
   restoredWizardAttach = null,
   onWizardSessionPersist,
+  onNeedApiKey,
 }: AnalysisPageProps) {
   const mapRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<google.maps.Map | null>(null);
@@ -349,9 +353,15 @@ export default function AnalysisPage({
   }, [updateLabel]);
 
   useEffect(() => {
-    if (!apiKey || !mapRef.current) return;
+    if (!mapRef.current) return;
+    if (!apiKey?.trim()) {
+      setMapError('No Google Maps API key. Add VITE_GOOGLE_MAPS_API_KEY on Vercel or enter your key in Settings.');
+      setMapLoaded(false);
+      return;
+    }
 
     let cancelled = false;
+    setMapError('');
 
     const loader = new Loader({
       apiKey,
@@ -399,43 +409,46 @@ export default function AnalysisPage({
         });
       }
 
-      const drawingManager = new google.maps.drawing.DrawingManager({
-        drawingMode: null,
-        drawingControl: false,
-        polygonOptions: {
-          fillColor: '#3b82f6',
-          fillOpacity: 0.3,
-          strokeColor: '#2563eb',
-          strokeWeight: 2.5,
-          editable: true,
-          draggable: false,
-          zIndex: 1,
-        },
-      });
+      // Drawing tools are only required for Quick Analysis polygon mode — wizard/search still works without them.
+      if (!hideQuickAnalysisSidebar && google.maps?.drawing?.DrawingManager) {
+        const drawingManager = new google.maps.drawing.DrawingManager({
+          drawingMode: null,
+          drawingControl: false,
+          polygonOptions: {
+            fillColor: '#3b82f6',
+            fillOpacity: 0.3,
+            strokeColor: '#2563eb',
+            strokeWeight: 2.5,
+            editable: true,
+            draggable: false,
+            zIndex: 1,
+          },
+        });
 
-      drawingManager.setMap(map);
-      drawingManagerRef.current = drawingManager;
+        drawingManager.setMap(map);
+        drawingManagerRef.current = drawingManager;
 
-      google.maps.event.addListener(drawingManager, 'polygoncomplete', (polygon: google.maps.Polygon) => {
-        const areaSqM = google.maps.geometry.spherical.computeArea(polygon.getPath());
-        const areaSqFt = areaSqM * 10.7639;
-        if (areaSqFt < 10) {
-          polygon.setMap(null);
-          setIsDrawing(false);
-          drawingManager.setDrawingMode(null);
-          return;
-        }
-        addSection(polygon, areaSqFt);
-      });
+        google.maps.event.addListener(drawingManager, 'polygoncomplete', (polygon: google.maps.Polygon) => {
+          const areaSqM = google.maps.geometry.spherical.computeArea(polygon.getPath());
+          const areaSqFt = areaSqM * 10.7639;
+          if (areaSqFt < 10) {
+            polygon.setMap(null);
+            setIsDrawing(false);
+            drawingManager.setDrawingMode(null);
+            return;
+          }
+          addSection(polygon, areaSqFt);
+        });
+      }
 
       setMapLoaded(true);
       } catch (err) {
         console.error('[RoofIQ] Map init error:', err);
-        if (!cancelled) setMapError('Failed to initialize map. Please verify your API key and enabled APIs.');
+        if (!cancelled) setMapError(formatMapsInitError(err));
       }
     }).catch((err) => {
       console.error('[RoofIQ] Maps loader error:', err);
-      if (!cancelled) setMapError('Failed to load Google Maps. Please verify your API key.');
+      if (!cancelled) setMapError(formatMapsInitError(err));
     });
 
     return () => {
@@ -469,7 +482,7 @@ export default function AnalysisPage({
       setSaveStatus('idle');
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [apiKey, coordinates.lat, coordinates.lng]);
+  }, [apiKey, coordinates.lat, coordinates.lng, hideQuickAnalysisSidebar]);
 
   // Auto-fetch Solar building insights whenever coordinates change
   useEffect(() => {
@@ -992,7 +1005,16 @@ export default function AnalysisPage({
         {mapError && (
           <div className="absolute inset-0 bg-slate-900 flex flex-col items-center justify-center gap-4 z-10 p-6">
             <AlertCircle size={40} className="text-red-400" />
-            <p className="text-white font-semibold text-lg text-center">{mapError}</p>
+            <p className="text-white font-semibold text-base sm:text-lg text-center max-w-md leading-snug">{mapError}</p>
+            {onNeedApiKey && (
+              <button
+                type="button"
+                onClick={onNeedApiKey}
+                className="btn-primary text-sm px-5 py-2.5"
+              >
+                Add Google Maps API Key
+              </button>
+            )}
           </div>
         )}
 
