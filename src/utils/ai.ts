@@ -6,8 +6,15 @@ import {
 } from '@google/generative-ai';
 import type { GenerateContentResult, Schema, Part } from '@google/generative-ai';
 import { readGeminiApiKey } from './googleAiKey';
-import { enqueueGeminiRequest, isGemini429OrQuotaError, withGemini429Retries } from './gemini429';
-import { callOpenAiFallbackJson } from './openaiFallback';
+import {
+  enqueueGeminiRequest,
+  GEMINI_QUOTA_ERROR,
+  isGemini429OrQuotaError,
+  isGeminiQuotaPaused,
+  triggerGeminiQuotaCooldown,
+  withGemini429Retries,
+} from './gemini429';
+import { callOpenAiFallbackJson, isOpenAiFallbackAvailable } from './openaiFallback';
 import type { SolarBuildingInsights } from './solar';
 import { azimuthLabel, formatImageryDate } from './solar';
 
@@ -193,6 +200,7 @@ function structuredOutputUnsupported(msg: string): boolean {
 async function runGeminiLoop(parts: Part[]): Promise<RoofAnalysis> {
   const apiKey = readGeminiApiKey();
   if (!apiKey) throw new Error('GOOGLE_AI_KEY_MISSING');
+  if (isGeminiQuotaPaused()) throw new Error(GEMINI_QUOTA_ERROR);
 
   const genAI = new GoogleGenerativeAI(apiKey);
 
@@ -229,7 +237,10 @@ async function runGeminiLoop(parts: Part[]): Promise<RoofAnalysis> {
         if (isGeminiAuthError(msg)) throw new Error('GEMINI_AUTH_FAILED');
         if (mode === 'structured' && structuredOutputUnsupported(msg)) continue;
         if (isModelOrEndpointUnavailable(msg)) break;
-        if (isGemini429OrQuotaError(e)) continue;
+        if (isGemini429OrQuotaError(e)) {
+          triggerGeminiQuotaCooldown('[AI] Gemini rate-limited — pausing API calls for 15 minutes.');
+          throw new Error(GEMINI_QUOTA_ERROR);
+        }
         throw e;
       }
     }
@@ -255,7 +266,10 @@ export async function analyzeRoofImage(
   try {
     return await enqueueGeminiRequest(() => runGeminiLoop(parts));
   } catch (e) {
-    if (!isGemini429OrQuotaError(e)) throw e;
+    if (!isGemini429OrQuotaError(e) && (e instanceof Error ? e.message : String(e)) !== GEMINI_QUOTA_ERROR) {
+      throw e;
+    }
+    if (!isOpenAiFallbackAvailable()) throw new Error(GEMINI_QUOTA_ERROR);
     const fallbackPrompt =
       `${prompt}\n\nReturn JSON only with keys: condition, condition_score, issues, urgency, estimated_remaining_life, recommendation, marketing_message.`;
     return callOpenAiFallbackJson<RoofAnalysis>({
@@ -282,7 +296,10 @@ export async function analyzeRoofImageFromFile(
   try {
     return await enqueueGeminiRequest(() => runGeminiLoop(parts));
   } catch (e) {
-    if (!isGemini429OrQuotaError(e)) throw e;
+    if (!isGemini429OrQuotaError(e) && (e instanceof Error ? e.message : String(e)) !== GEMINI_QUOTA_ERROR) {
+      throw e;
+    }
+    if (!isOpenAiFallbackAvailable()) throw new Error(GEMINI_QUOTA_ERROR);
     const fallbackPrompt =
       `${prompt}\n\nReturn JSON only with keys: condition, condition_score, issues, urgency, estimated_remaining_life, recommendation, marketing_message.`;
     return callOpenAiFallbackJson<RoofAnalysis>({
@@ -337,6 +354,7 @@ function parseGeometryJson(text: string): RoofGeometryDetail {
 async function runGeminiGeometryLoop(parts: Part[]): Promise<RoofGeometryDetail> {
   const apiKey = readGeminiApiKey();
   if (!apiKey) throw new Error('GOOGLE_AI_KEY_MISSING');
+  if (isGeminiQuotaPaused()) throw new Error(GEMINI_QUOTA_ERROR);
 
   const genAI = new GoogleGenerativeAI(apiKey);
   const structuredConfig = {
@@ -371,7 +389,10 @@ async function runGeminiGeometryLoop(parts: Part[]): Promise<RoofGeometryDetail>
         if (isGeminiAuthError(msg)) throw new Error('GEMINI_AUTH_FAILED');
         if (mode === 'structured' && structuredOutputUnsupported(msg)) continue;
         if (isModelOrEndpointUnavailable(msg)) break;
-        if (isGemini429OrQuotaError(e)) continue;
+        if (isGemini429OrQuotaError(e)) {
+          triggerGeminiQuotaCooldown('[AI] Gemini rate-limited — pausing API calls for 15 minutes.');
+          throw new Error(GEMINI_QUOTA_ERROR);
+        }
         throw e;
       }
     }
@@ -398,7 +419,10 @@ export async function analyzeRoofGeometryFromCapture(
   try {
     return await runGeminiGeometryLoop(parts);
   } catch (e) {
-    if (!isGemini429OrQuotaError(e)) throw e;
+    if (!isGemini429OrQuotaError(e) && (e instanceof Error ? e.message : String(e)) !== GEMINI_QUOTA_ERROR) {
+      throw e;
+    }
+    if (!isOpenAiFallbackAvailable()) throw new Error(GEMINI_QUOTA_ERROR);
     const fallbackPrompt =
       `${prompt}\n\nReturn JSON only with keys: summary, steep_slopes, valleys, ridges_hips, perimeters_eaves_rakes, caveats.`;
     return callOpenAiFallbackJson<RoofGeometryDetail>({

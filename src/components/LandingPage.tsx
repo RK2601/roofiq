@@ -55,7 +55,7 @@ export default function LandingPage({ apiKey, onAddressSelect, onSignIn }: Landi
 
     const loader = new Loader({
       apiKey,
-      version: 'weekly',
+      version: '3.64',
       libraries: ['places', 'drawing', 'geometry'],
     });
 

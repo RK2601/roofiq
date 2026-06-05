@@ -167,7 +167,7 @@ export default function MarketingPage({ apiKey }: MarketingPageProps) {
 
     const loader = new Loader({
       apiKey,
-      version: 'weekly',
+      version: '3.64',
       libraries: ['places', 'drawing', 'geometry'],
     });
 

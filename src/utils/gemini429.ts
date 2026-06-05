@@ -1,5 +1,35 @@
 import type { GenerateContentResult } from '@google/generative-ai';
 
+/** Thrown when client-side cooldown is active after repeated 429 / quota errors. */
+export const GEMINI_QUOTA_ERROR = 'GEMINI_QUOTA_EXCEEDED';
+
+const GEMINI_COOLDOWN_MS = 15 * 60 * 1000;
+let geminiQuotaCooldownUntil = 0;
+
+export function isGeminiQuotaPaused(): boolean {
+  return Date.now() < geminiQuotaCooldownUntil;
+}
+
+export function getGeminiQuotaCooldownRemainingMs(): number {
+  return Math.max(0, geminiQuotaCooldownUntil - Date.now());
+}
+
+export function triggerGeminiQuotaCooldown(reason?: string): void {
+  geminiQuotaCooldownUntil = Date.now() + GEMINI_COOLDOWN_MS;
+  if (reason) {
+    console.warn(reason);
+  }
+}
+
+export function clearGeminiQuotaCooldown(): void {
+  geminiQuotaCooldownUntil = 0;
+}
+
+export function formatGeminiQuotaUserMessage(): string {
+  const mins = Math.max(1, Math.ceil(getGeminiQuotaCooldownRemainingMs() / 60_000));
+  return `Gemini API quota or rate limit reached. Wait about ${mins} minute${mins === 1 ? '' : 's'} (or check billing in Google AI Studio), then try again.`;
+}
+
 /**
  * Read model text, or throw with reasons when `response.text()` fails (blocked,
  * non-STOP finish, empty candidates). Keeps errors debuggable vs a bare SDK throw.
@@ -30,14 +60,17 @@ export function isGemini429OrQuotaError(e: unknown): boolean {
 /**
  * Global serial queue — ALL Gemini callers must go through this so concurrent
  * tabs/features don't stack up simultaneous requests and multiply 429s.
- * A minimum 1 s gap is enforced between requests (free tier = 15 RPM).
+ * Free tier ≈ 15 RPM → keep ≥2s between calls.
  */
-const MIN_REQUEST_GAP_MS = 1_000;
+const MIN_REQUEST_GAP_MS = 2_500;
 let _geminiTail: Promise<unknown> = Promise.resolve();
 let _lastRequestAt = 0;
 
 export function enqueueGeminiRequest<T>(fn: () => Promise<T>): Promise<T> {
   const run = async (): Promise<T> => {
+    if (isGeminiQuotaPaused()) {
+      throw new Error(GEMINI_QUOTA_ERROR);
+    }
     const gap = MIN_REQUEST_GAP_MS - (Date.now() - _lastRequestAt);
     if (gap > 0) await new Promise<void>(r => setTimeout(r, gap));
     _lastRequestAt = Date.now();
@@ -52,24 +85,30 @@ export function enqueueGeminiRequest<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 /**
- * Retry with backoff for 429 / quota errors.
- * Delays: ~30 s, ~60 s, ~90 s — long enough for Gemini's rate-limit window
- * to clear (the previous 1–3 s delays were too short and just created more 429s).
+ * Retry with backoff for 429 / quota errors (at most 2 attempts).
+ * On exhaustion, activates a 15-minute client cooldown to stop DevTools spam.
  */
-export async function withGemini429Retries<T>(fn: () => Promise<T>, maxAttempts = 4): Promise<T> {
+export async function withGemini429Retries<T>(fn: () => Promise<T>, maxAttempts = 2): Promise<T> {
+  if (isGeminiQuotaPaused()) {
+    throw new Error(GEMINI_QUOTA_ERROR);
+  }
+
   let last: unknown;
   for (let i = 0; i < maxAttempts; i++) {
     try {
       return await fn();
     } catch (e) {
       last = e;
-      if (isGemini429OrQuotaError(e) && i < maxAttempts - 1) {
-        const base = 30_000 * (i + 1);
-        const jitter = Math.floor(Math.random() * 10_000);
-        await new Promise<void>(resolve => {
-          window.setTimeout(resolve, base + jitter);
-        });
-        continue;
+      if (isGemini429OrQuotaError(e)) {
+        if (i < maxAttempts - 1) {
+          const base = 8_000 * (i + 1);
+          const jitter = Math.floor(Math.random() * 2_000);
+          await new Promise<void>(resolve => {
+            window.setTimeout(resolve, base + jitter);
+          });
+          continue;
+        }
+        triggerGeminiQuotaCooldown('[Gemini] Quota/rate limit — pausing API calls for 15 minutes.');
       }
       throw e;
     }

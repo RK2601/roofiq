@@ -19,7 +19,7 @@ function ensureMapsLoaded(apiKey: string): Promise<void> {
     return Promise.resolve();
   }
   if (!_mapsLoaderPromise) {
-    const loader = new Loader({ apiKey, version: 'weekly', libraries: ['places', 'drawing', 'geometry'] });
+    const loader = new Loader({ apiKey, version: '3.64', libraries: ['places', 'drawing', 'geometry'] });
     _mapsLoaderPromise = loader.load().then(() => undefined);
   }
   return _mapsLoaderPromise;
@@ -79,6 +79,12 @@ import {
   type RoofPhotoCueAnalysis,
 } from '../utils/roofVision';
 import { readGeminiApiKey } from '../utils/googleAiKey';
+import {
+  GEMINI_QUOTA_ERROR,
+  formatGeminiQuotaUserMessage,
+  isGemini429OrQuotaError,
+  isGeminiQuotaPaused,
+} from '../utils/gemini429';
 import { isDbConfigured, saveWizardWorkflowReport, type WizardWorkflowReportPayload } from '../utils/db';
 import { buildRoofOutlineSnapshotDataUrl } from '../utils/wizardOutlineSnapshot';
 import jsPDF from 'jspdf';
@@ -544,25 +550,56 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
   const segAnalysisQueueRef   = useRef<Array<() => Promise<void>>>([]);
   const segAnalysisActiveRef  = useRef(false);
 
+  const [geminiQuotaNotice, setGeminiQuotaNotice] = useState<string | null>(null);
+
+  const stopAnalyzingForQuota = useCallback(() => {
+    setGeminiQuotaNotice(formatGeminiQuotaUserMessage());
+    setSegments(curr => curr.map(s => (s.analyzing ? { ...s, analyzing: false } : s)));
+    setOutline(o => (o?.analyzing ? { ...o, analyzing: false } : o));
+  }, []);
+
+  useEffect(() => {
+    const sync = () => {
+      setGeminiQuotaNotice(isGeminiQuotaPaused() ? formatGeminiQuotaUserMessage() : null);
+    };
+    sync();
+    const id = window.setInterval(sync, 30_000);
+    return () => clearInterval(id);
+  }, []);
+
+  const isQuotaFailure = (err: unknown): boolean => {
+    const msg = err instanceof Error ? err.message : String(err);
+    return msg === GEMINI_QUOTA_ERROR || isGemini429OrQuotaError(err) || /\b429\b|quota exceeded/i.test(msg);
+  };
+
   const drainSegAnalysisQueue = useCallback(async () => {
     if (segAnalysisActiveRef.current) return;
     segAnalysisActiveRef.current = true;
     while (segAnalysisQueueRef.current.length > 0) {
+      if (isGeminiQuotaPaused()) {
+        segAnalysisQueueRef.current.length = 0;
+        stopAnalyzingForQuota();
+        break;
+      }
       const task = segAnalysisQueueRef.current.shift();
       if (!task) break;
-      // Retry wrapper: up to 2 retries with growing delay; each attempt has a 60s cap
-      for (let attempt = 0; attempt < 3; attempt++) {
+      for (let attempt = 0; attempt < 2; attempt++) {
         try {
           await Promise.race([
             task(),
             new Promise<never>((_, reject) =>
-              setTimeout(() => reject(new Error('QUEUE_TASK_TIMEOUT')), 60_000)
+              setTimeout(() => reject(new Error('QUEUE_TASK_TIMEOUT')), 90_000)
             ),
           ]);
           break;
         } catch (err) {
           console.warn(`[RoofWizard] seg-analysis attempt ${attempt + 1} failed:`, err instanceof Error ? err.message : err);
-          if (attempt < 2) await new Promise<void>(r => setTimeout(r, 2_000 * (attempt + 1)));
+          if (isQuotaFailure(err)) {
+            stopAnalyzingForQuota();
+            segAnalysisQueueRef.current.length = 0;
+            break;
+          }
+          if (attempt < 1) await new Promise<void>(r => setTimeout(r, 3_000));
         }
       }
       // Pace between calls to avoid 429 rate limits
@@ -571,14 +608,34 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
       }
     }
     segAnalysisActiveRef.current = false;
-  }, []);
+  }, [stopAnalyzingForQuota]);
 
   const enqueueSegAnalysis = useCallback((task: () => Promise<void>) => {
+    if (isGeminiQuotaPaused()) {
+      stopAnalyzingForQuota();
+      return;
+    }
     segAnalysisQueueRef.current.push(task);
     void drainSegAnalysisQueue();
-  }, [drainSegAnalysisQueue]);
+  }, [drainSegAnalysisQueue, stopAnalyzingForQuota]);
 
-  // State
+  // ── localStorage draft helpers ──────────────────────────────────────────────
+  const draftKey = `roofiq_wizard_draft_${address.trim().toLowerCase().replace(/\s+/g, '_').slice(0, 80)}`;
+
+  function loadDraft() {
+    try {
+      const raw = localStorage.getItem(draftKey);
+      if (!raw) return null;
+      return JSON.parse(raw) as {
+        phase: number;
+        step1Sub: string;
+        outlinePath: { lat: number; lng: number }[] | null;
+        segmentPaths: { id: string; index: number; path: { lat: number; lng: number }[]; color: string; analysis: SegmentAnalysis | null; dsmPitchDeg?: number; dsmPitchRatio?: string; dsmFacingDirection?: string; dsmConfidence?: number }[];
+      };
+    } catch { return null; }
+  }
+
+  // State — restored from localStorage draft if available
   const [phase, setPhase] = useState<Phase>(1);
   /** Always start on Outline; DSM auto-map runs only after outline exists and user opens Segments. */
   const [step1Sub, setStep1Sub] = useState<'outline' | 'segments' | 'structure'>('outline');
@@ -751,6 +808,76 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [apiKey]);
+
+  // ── Auto-save draft to localStorage ────────────────────────────────────────
+  useEffect(() => {
+    try {
+      const draft = {
+        phase,
+        step1Sub,
+        outlinePath: outline?.path ?? null,
+        segmentPaths: segments.map(s => ({
+          id: s.id,
+          index: s.index,
+          path: s.path,
+          color: s.color,
+          analysis: s.analysis,
+          dsmPitchDeg: s.dsmPitchDeg,
+          dsmPitchRatio: s.dsmPitchRatio,
+          dsmFacingDirection: s.dsmFacingDirection,
+          dsmConfidence: s.dsmConfidence,
+        })),
+      };
+      localStorage.setItem(draftKey, JSON.stringify(draft));
+    } catch { /* storage full or unavailable */ }
+  }, [phase, step1Sub, outline, segments, draftKey]);
+
+  // ── Restore draft polygons onto map after map loads ─────────────────────────
+  useEffect(() => {
+    if (!mapLoaded || !mapInstanceRef.current) return;
+    const draft = loadDraft();
+    if (!draft) return;
+
+    const map = mapInstanceRef.current;
+
+    // Restore step position
+    if (draft.phase && draft.phase >= 1) setPhase(draft.phase as Phase);
+    if (draft.step1Sub) setStep1Sub(draft.step1Sub as 'outline' | 'segments' | 'structure');
+
+    // Restore outline polygon
+    if (draft.outlinePath && draft.outlinePath.length >= 3) {
+      const polygon = new google.maps.Polygon({
+        paths: draft.outlinePath,
+        fillColor: '#3b82f6',
+        fillOpacity: 0.15,
+        strokeColor: '#2563eb',
+        strokeWeight: 2,
+        editable: true,
+        draggable: false,
+        map,
+      });
+      setOutline({ polygon, path: draft.outlinePath, analysis: null, analyzing: false });
+    }
+
+    // Restore segment polygons
+    if (draft.segmentPaths.length > 0) {
+      const restored: DrawnSegment[] = draft.segmentPaths.map(s => {
+        const polygon = new google.maps.Polygon({
+          paths: s.path,
+          fillColor: s.color,
+          fillOpacity: 0.35,
+          strokeColor: s.color,
+          strokeWeight: 2,
+          editable: true,
+          draggable: false,
+          map,
+        });
+        return { id: s.id, index: s.index, polygon, path: s.path, color: s.color, analysis: s.analysis, analyzing: false, dsmPitchDeg: s.dsmPitchDeg, dsmPitchRatio: s.dsmPitchRatio, dsmFacingDirection: s.dsmFacingDirection, dsmConfidence: s.dsmConfidence };
+      });
+      setSegments(restored);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mapLoaded]);
 
   // ── Fetch satellite image for Gemini once map is loaded ─────────────────────
 
@@ -1398,6 +1525,10 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
   const reanalyzeSegment = useCallback(
     (id: string) => {
       if (!hasGeminiKey) return;
+      if (isGeminiQuotaPaused()) {
+        stopAnalyzingForQuota();
+        return;
+      }
       const list = segmentsRef.current;
       const seg = list.find(s => s.id === id);
       if (!seg || seg.analyzing) return;
@@ -1436,7 +1567,7 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
           });
       });
     },
-    [hasGeminiKey, coordinates, enqueueSegAnalysis, waitForSatelliteImage]
+    [hasGeminiKey, coordinates, enqueueSegAnalysis, waitForSatelliteImage, stopAnalyzingForQuota]
   );
 
   // ── Step 1c: Structure detection ────────────────────────────────────────────
@@ -2876,7 +3007,7 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
         <div className="flex items-center gap-2 min-w-0">
         <button
           type="button"
-          onClick={onClose}
+          onClick={() => { try { localStorage.removeItem(draftKey); } catch { /* ok */ } onClose(); }}
           className="tap-target shrink-0 text-slate-400 hover:text-white transition-colors rounded-lg -ml-1"
           aria-label="Close wizard"
         >
@@ -2897,6 +3028,12 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
             <AlertCircle size={13} className="shrink-0" />
             <span className="hidden sm:inline">No Gemini key — AI disabled</span>
             <span className="sm:hidden">No AI key</span>
+          </div>
+        )}
+        {hasGeminiKey && geminiQuotaNotice && (
+          <div className="flex items-center gap-1.5 bg-red-900/40 border border-red-700/50 text-red-200 text-[10px] sm:text-xs px-2 py-1 sm:px-3 sm:py-1.5 rounded-lg max-w-[min(100%,280px)]">
+            <AlertCircle size={13} className="shrink-0" />
+            <span className="line-clamp-2">Rate limited</span>
           </div>
         )}
         {persistStatus !== 'idle' && (
@@ -3141,6 +3278,13 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
                   </button>
                 ))}
               </div>
+
+              {geminiQuotaNotice && (
+                <div className="shrink-0 mx-3 mt-2 mb-0 rounded-lg border border-red-700/50 bg-red-950/50 px-3 py-2 text-xs text-red-200 leading-snug">
+                  <p className="font-semibold text-red-100 mb-0.5">AI paused (quota / rate limit)</p>
+                  <p>{geminiQuotaNotice}</p>
+                </div>
+              )}
 
               {/* Step 1a: Outline */}
               {step1Sub === 'outline' && (
@@ -3472,7 +3616,7 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
                         <Loader2 size={16} className="animate-spin" />
                         AI detecting structural lines…
                       </div>
-                      <p className="text-xs text-slate-500 pl-6">If rate-limited, retries automatically — may take up to 2 min.</p>
+                      <p className="text-xs text-slate-500 pl-6">If rate-limited, AI pauses ~15 min to protect your quota.</p>
                     </div>
                   )}
 

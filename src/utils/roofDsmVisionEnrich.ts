@@ -12,7 +12,14 @@ import {
 } from '@google/generative-ai';
 import type { Part, Schema } from '@google/generative-ai';
 import { readGeminiApiKey } from './googleAiKey';
-import { enqueueGeminiRequest, isGemini429OrQuotaError, readGeminiResponseText, withGemini429Retries } from './gemini429';
+import {
+  enqueueGeminiRequest,
+  GEMINI_QUOTA_ERROR,
+  isGemini429OrQuotaError,
+  readGeminiResponseText,
+  triggerGeminiQuotaCooldown,
+  withGemini429Retries,
+} from './gemini429';
 import { latLngToImageNorm } from './roofVision';
 import type { SegmentAnalysis } from './roofVision';
 
@@ -253,7 +260,8 @@ export async function enrichDsmSegmentsWithSatelliteVision(
           continue modelLoop;
         }
         if (isGemini429OrQuotaError(err)) {
-          continue;
+          triggerGeminiQuotaCooldown('[RoofDSM] Gemini rate-limited — pausing API calls for 15 minutes.');
+          throw new Error(GEMINI_QUOTA_ERROR);
         }
       }
     }

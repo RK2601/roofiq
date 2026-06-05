@@ -355,7 +355,7 @@ export default function AnalysisPage({
 
     const loader = new Loader({
       apiKey,
-      version: 'weekly',
+      version: '3.64',
       libraries: ['places', 'drawing', 'geometry'],
     });
 
@@ -430,9 +430,11 @@ export default function AnalysisPage({
 
       setMapLoaded(true);
       } catch (err) {
+        console.error('[RoofIQ] Map init error:', err);
         if (!cancelled) setMapError('Failed to initialize map. Please verify your API key and enabled APIs.');
       }
-    }).catch(() => {
+    }).catch((err) => {
+      console.error('[RoofIQ] Maps loader error:', err);
       if (!cancelled) setMapError('Failed to load Google Maps. Please verify your API key.');
     });
 
@@ -893,6 +895,10 @@ export default function AnalysisPage({
         setAiError('The model response was not valid JSON. Try Run again.');
       } else if (msg === 'GEMINI_MODEL_UNAVAILABLE') {
         setAiError('No Gemini model responded. Check your network and that your AI Studio key can use Gemini 2.5 / Flash models.');
+      } else if (msg === 'GEMINI_QUOTA_EXCEEDED' || /\b429\b|quota exceeded/i.test(msg)) {
+        setAiError('Gemini API quota or rate limit reached. Wait 15 minutes or check billing in Google AI Studio, then try again.');
+      } else if (msg === 'OPENAI_FALLBACK_UNAVAILABLE' || msg.includes('OPENAI_API_KEY missing')) {
+        setAiError('AI quota exceeded and server OpenAI fallback is not configured. Add OPENAI_API_KEY in Vercel or wait for Gemini quota to reset.');
       } else {
         setAiError(msg.length > 180 ? `${msg.slice(0, 180)}…` : msg);
       }

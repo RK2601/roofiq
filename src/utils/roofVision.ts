@@ -6,8 +6,15 @@ import {
 } from '@google/generative-ai';
 import type { GenerateContentResult, Part, Schema } from '@google/generative-ai';
 import { readGeminiApiKey } from './googleAiKey';
-import { enqueueGeminiRequest } from './gemini429';
-import { callOpenAiFallbackJson } from './openaiFallback';
+import {
+  clearGeminiQuotaCooldown,
+  enqueueGeminiRequest,
+  GEMINI_QUOTA_ERROR,
+  formatGeminiQuotaUserMessage,
+  isGeminiQuotaPaused,
+  triggerGeminiQuotaCooldown,
+} from './gemini429';
+import { callOpenAiFallbackJson, isOpenAiFallbackAvailable } from './openaiFallback';
 import type { AiRoofCue, Vec2 } from './roofStructure';
 import type { SolarBuildingInsights, SolarLatLng, SolarRoofSegment } from './solar';
 
@@ -587,10 +594,7 @@ function shouldTryOpenAiAfterGeminiFail(lastError: string, allQuotaErrors: boole
   );
 }
 
-/** After repeated Gemini 429s on every model, pause client-side Gemini calls to stop quota spam in DevTools. */
-const GEMINI_COOLDOWN_MS = 15 * 60 * 1000;
-let geminiQuotaCooldownUntil = 0;
-
+export { GEMINI_QUOTA_ERROR, formatGeminiQuotaUserMessage, isGeminiQuotaPaused };
 
 function preferOpenAiVisionFirst(): boolean {
   try {
@@ -633,19 +637,20 @@ async function runGeminiWithSchemaImpl<T>(
 
   const apiKey = readGeminiApiKey();
   if (!apiKey) {
-    if (openAiTask && (preferOpenAiVisionFirst() || Date.now() < geminiQuotaCooldownUntil)) {
+    if (openAiTask && isOpenAiFallbackAvailable() && preferOpenAiVisionFirst()) {
       return routeOpenAiFallback<T>(validParts, openAiTask);
     }
     return { result: null, error: 'NO_API_KEY' };
   }
 
-  // Skip Gemini during cooldown so DevTools is not flooded with 429s after quota exhaustion.
-  if (openAiTask && Date.now() < geminiQuotaCooldownUntil) {
-    console.warn('[RoofVision] Gemini cooldown active — using OpenAI only');
-    return routeOpenAiFallback<T>(validParts, openAiTask);
+  if (isGeminiQuotaPaused()) {
+    if (openAiTask && isOpenAiFallbackAvailable()) {
+      return routeOpenAiFallback<T>(validParts, openAiTask);
+    }
+    return { result: null, error: GEMINI_QUOTA_ERROR };
   }
 
-  if (openAiTask && preferOpenAiVisionFirst()) {
+  if (openAiTask && preferOpenAiVisionFirst() && isOpenAiFallbackAvailable()) {
     const first = await routeOpenAiFallback<T>(validParts, openAiTask);
     if (first.result !== null && first.error === null) return first;
   }
@@ -671,13 +676,18 @@ async function runGeminiWithSchemaImpl<T>(
       const text = raw.response.text();
       if (text && text.trim().length > 0) {
         const cleaned = text.replace(/```json\n?/gi, '').replace(/```\n?/g, '').trim();
-        geminiQuotaCooldownUntil = 0;
+        clearGeminiQuotaCooldown();
         return { result: JSON.parse(cleaned) as T, error: null };
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       lastError = `${modelId}(schema): ${msg.slice(0, 200)}`;
       if (!is429orQuota(err)) allQuotaErrors = false;
+
+      if (is429orQuota(err) || msg === GEMINI_QUOTA_ERROR) {
+        triggerGeminiQuotaCooldown('[RoofVision] Gemini rate-limited — pausing Gemini calls for 15 minutes.');
+        break;
+      }
 
       // On 400 (schema rejected) retry same model with JSON-only mode (no schema)
       if (msg.includes('400') || msg.includes('INVALID_ARGUMENT')) {
@@ -695,35 +705,34 @@ async function runGeminiWithSchemaImpl<T>(
           const text = raw.response.text();
           if (text && text.trim().length > 0) {
             const cleaned = text.replace(/```json\n?/gi, '').replace(/```\n?/g, '').trim();
-            geminiQuotaCooldownUntil = 0;
+            clearGeminiQuotaCooldown();
             return { result: JSON.parse(cleaned) as T, error: null };
           }
         } catch (fallbackErr) {
           lastError = `${modelId}(json): ${fallbackErr instanceof Error ? fallbackErr.message.slice(0, 200) : String(fallbackErr)}`;
           if (!is429orQuota(fallbackErr)) allQuotaErrors = false;
+          if (is429orQuota(fallbackErr)) {
+            triggerGeminiQuotaCooldown('[RoofVision] Gemini rate-limited — pausing Gemini calls for 15 minutes.');
+            break;
+          }
         }
-      }
-
-      // On 429 (rate limit), wait before trying next model
-      if (is429orQuota(err)) {
-        const delay = 30_000 + Math.random() * 15_000;
-        console.warn(`[RoofVision] 429 rate limit on ${modelId} — waiting ${Math.round(delay)}ms before next model`);
-        await new Promise<void>(r => setTimeout(r, delay));
       }
     }
   }
 
-  if (allQuotaErrors) {
-    geminiQuotaCooldownUntil = Date.now() + GEMINI_COOLDOWN_MS;
-    console.warn('[RoofVision] Gemini models rate-limited — pausing Gemini calls for 15 minutes.');
-  }
-
-  // ── OpenAI fallback: quota/capacity failures (or every attempt was rate-limited) ──
-  if (openAiTask && shouldTryOpenAiAfterGeminiFail(lastError, allQuotaErrors)) {
-    console.warn('[RoofVision] Gemini unavailable or rate-limited — falling back to OpenAI');
+  // ── OpenAI fallback: quota/capacity failures (only when proxy is configured) ──
+  if (
+    openAiTask &&
+    isOpenAiFallbackAvailable() &&
+    shouldTryOpenAiAfterGeminiFail(lastError, allQuotaErrors)
+  ) {
     const oai = await routeOpenAiFallback<T>(validParts, openAiTask);
     if (oai.result !== null && oai.error === null) return oai;
     if (oai.error) lastError = oai.error;
+  }
+
+  if (allQuotaErrors || isGeminiQuotaPaused()) {
+    return { result: null, error: GEMINI_QUOTA_ERROR };
   }
 
   return { result: null, error: lastError };

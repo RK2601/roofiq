@@ -1,5 +1,25 @@
 export type OpenAiFallbackTask = 'roof_analysis' | 'roof_geometry' | 'roof_cues' | 'segment_analysis';
 
+const OPENAI_PROXY_DISABLE_MS = 60 * 60 * 1000;
+let openAiProxyDisabledUntil = 0;
+
+/** Whether we should attempt `/api/proxy-openai` (avoids 500 spam when server has no key). */
+export function isOpenAiFallbackAvailable(): boolean {
+  if (Date.now() < openAiProxyDisabledUntil) return false;
+  try {
+    const v = import.meta.env.VITE_OPENAI_FALLBACK;
+    if (v === '0' || v === 'false') return false;
+  } catch {
+    /* ignore */
+  }
+  return true;
+}
+
+function markOpenAiProxyUnavailable(reason: string): void {
+  openAiProxyDisabledUntil = Date.now() + OPENAI_PROXY_DISABLE_MS;
+  console.warn('[OpenAI fallback] Skipping proxy for 1 hour:', reason);
+}
+
 export interface OpenAiImagePayload {
   data: string;
   mimeType: string;
@@ -83,6 +103,10 @@ export async function callOpenAiFallbackJson<T>(args: {
   prompt: string;
   image: OpenAiImagePayload;
 }): Promise<T> {
+  if (!isOpenAiFallbackAvailable()) {
+    throw new Error('OPENAI_FALLBACK_UNAVAILABLE');
+  }
+
   let payload: { task: OpenAiFallbackTask; prompt: string; image: OpenAiImagePayload } = {
     ...args,
     image: await shrinkImageForOpenAi(args.image),
@@ -123,6 +147,12 @@ export async function callOpenAiFallbackJson<T>(args: {
   }
 
   if (!res.ok) {
+    if (
+      res.status === 500 &&
+      /OPENAI_API_KEY missing|OPENAI_KEY missing/i.test(text)
+    ) {
+      markOpenAiProxyUnavailable('OPENAI_API_KEY missing on server');
+    }
     throw new Error(`OPENAI_PROXY_HTTP_${res.status}:${text.slice(0, 240)}`);
   }
   const parsed = JSON.parse(text);

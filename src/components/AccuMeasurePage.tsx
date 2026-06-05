@@ -203,7 +203,7 @@ export default function AccuMeasurePage({
   // ── Step 1: Wire up Google Places Autocomplete ──────────────────────────────
   useEffect(() => {
     if (!apiKey) return;
-    const loader = new Loader({ apiKey, version: 'weekly', libraries: ['places', 'drawing', 'geometry'] });
+    const loader = new Loader({ apiKey, version: '3.64', libraries: ['places', 'drawing', 'geometry'] });
     loader.load().then(() => {
       if (!inputRef.current) return;
       const ac = new google.maps.places.Autocomplete(inputRef.current, {
