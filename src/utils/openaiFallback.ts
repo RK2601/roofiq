@@ -1,9 +1,17 @@
-export type OpenAiFallbackTask = 'roof_analysis' | 'roof_geometry' | 'roof_cues' | 'segment_analysis';
+import { ensureOpenAiServerProbe, isOpenAiConfiguredAtBuild } from './aiProvider';
 
-const OPENAI_PROXY_DISABLE_MS = 60 * 60 * 1000;
+export type OpenAiFallbackTask =
+  | 'roof_analysis'
+  | 'roof_geometry'
+  | 'roof_cues'
+  | 'segment_analysis'
+  | 'outline_analysis'
+  | 'structure_detection'
+  | 'wizard_vision';
+
 let openAiProxyDisabledUntil = 0;
 
-/** Whether we should attempt `/api/proxy-openai` (avoids 500 spam when server has no key). */
+/** Whether we should attempt `/api/proxy-openai`. */
 export function isOpenAiFallbackAvailable(): boolean {
   if (Date.now() < openAiProxyDisabledUntil) return false;
   try {
@@ -12,12 +20,35 @@ export function isOpenAiFallbackAvailable(): boolean {
   } catch {
     /* ignore */
   }
-  return true;
+  return isOpenAiConfiguredAtBuild() || serverOpenAiKnownAvailable();
+}
+
+function serverOpenAiKnownAvailable(): boolean {
+  // Populated by ensureOpenAiServerProbe() from App mount.
+  return _probedOpenAiAvailable === true;
+}
+
+let _probedOpenAiAvailable: boolean | null = null;
+
+/** Called once from App after /api/ai-health probe. */
+export function setOpenAiServerAvailability(available: boolean): void {
+  _probedOpenAiAvailable = available;
+  if (available) openAiProxyDisabledUntil = 0;
 }
 
 function markOpenAiProxyUnavailable(reason: string): void {
-  openAiProxyDisabledUntil = Date.now() + OPENAI_PROXY_DISABLE_MS;
-  console.warn('[OpenAI fallback] Skipping proxy for 1 hour:', reason);
+  // Short backoff — env may have been fixed and redeployed.
+  openAiProxyDisabledUntil = Date.now() + 2 * 60 * 1000;
+  console.warn('[OpenAI fallback] Temporarily skipping proxy (2 min):', reason);
+}
+
+/** Warm probe — call from App on load. */
+export async function warmOpenAiFallbackAvailability(): Promise<boolean> {
+  const fromBuild = isOpenAiConfiguredAtBuild();
+  const fromServer = await ensureOpenAiServerProbe();
+  const ok = fromBuild || fromServer;
+  setOpenAiServerAvailability(ok);
+  return ok;
 }
 
 export interface OpenAiImagePayload {

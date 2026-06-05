@@ -219,6 +219,27 @@ function replicateProxyDevPlugin(): Plugin {
   }
 }
 
+/** Dev: GET `/api/ai-health` — same as Vercel function for OpenAI/Gemini config probe. */
+function aiHealthDevPlugin(mode: string): Plugin {
+  return {
+    name: 'roofiq-ai-health',
+    configureServer(server) {
+      server.middlewares.use('/api/ai-health', (req, res, next) => {
+        res.setHeader('Access-Control-Allow-Origin', '*')
+        if (req.method === 'OPTIONS') {
+          res.statusCode = 204
+          return res.end()
+        }
+        if (req.method !== 'GET') return next()
+        const openai = !!resolveOpenAiKey(mode)
+        const gemini = !!resolveGeminiKey(mode)
+        res.setHeader('Content-Type', 'application/json')
+        res.end(JSON.stringify({ openai, gemini, preferOpenAi: openai }))
+      })
+    },
+  }
+}
+
 /** Dev: same-origin POST `/api/proxy-openai` so Gemini fallback works with `npm run dev` + `.env`. */
 function openaiProxyDevPlugin(mode: string): Plugin {
   return {
@@ -300,6 +321,7 @@ export default defineConfig(({ mode }) => {
   const viteEnv = loadEnv(mode, projectRoot)
   const resolvedDbUrl = resolveDatabaseUrl(mode)
   const resolvedGeminiKey = resolveGeminiKey(mode)
+  const resolvedOpenAiKey = resolveOpenAiKey(mode)
 
   if (process.env.VERCEL) {
     const db = (
@@ -323,14 +345,20 @@ export default defineConfig(({ mode }) => {
         '[roofiq] No Gemini API key for this build. Set `VITE_GOOGLE_AI_KEY` or `GEMINI_API_KEY` in Vercel (or local .env), then redeploy.'
       )
     }
+    if (!resolvedOpenAiKey) {
+      console.warn(
+        '[roofiq] No OpenAI API key for server proxy. Set `OPENAI_API_KEY` (not only VITE_OPENAI_API_KEY) on Vercel, then redeploy.'
+      )
+    }
   }
 
   return {
-    plugins: [react(), staticMapProxyDevPlugin(), solarProxyDevPlugin(), openaiProxyDevPlugin(mode), replicateProxyDevPlugin(), roofNetDevPlugin()],
+    plugins: [react(), staticMapProxyDevPlugin(), solarProxyDevPlugin(), aiHealthDevPlugin(mode), openaiProxyDevPlugin(mode), replicateProxyDevPlugin(), roofNetDevPlugin()],
     envDir: projectRoot,
     define: {
       __ROOFIQ_DATABASE_URL__: JSON.stringify(resolvedDbUrl),
       __ROOFIQ_GEMINI_API_KEY__: JSON.stringify(resolvedGeminiKey),
+      __ROOFIQ_OPENAI_CONFIGURED__: JSON.stringify(!!resolvedOpenAiKey),
     },
   }
 })

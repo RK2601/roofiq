@@ -6,6 +6,7 @@ import {
 } from '@google/generative-ai';
 import type { GenerateContentResult, Schema, Part } from '@google/generative-ai';
 import { readGeminiApiKey } from './googleAiKey';
+import { shouldPreferOpenAiVision } from './aiProvider';
 import {
   enqueueGeminiRequest,
   GEMINI_QUOTA_ERROR,
@@ -259,6 +260,21 @@ export async function analyzeRoofImage(
   const prompt = solarInsights
     ? ANALYSIS_PROMPT + buildSolarContext(solarInsights)
     : ANALYSIS_PROMPT;
+  const fallbackPrompt =
+    `${prompt}\n\nReturn JSON only with keys: condition, condition_score, issues, urgency, estimated_remaining_life, recommendation, marketing_message.`;
+
+  if (await shouldPreferOpenAiVision()) {
+    try {
+      return await callOpenAiFallbackJson<RoofAnalysis>({
+        task: 'roof_analysis',
+        prompt: fallbackPrompt,
+        image: { data: imageData.data, mimeType: imageData.mimeType || 'image/png' },
+      });
+    } catch (e) {
+      if (!readGeminiApiKey()) throw e;
+    }
+  }
+
   const parts: Part[] = [
     { inlineData: { mimeType: imageData.mimeType || 'image/png', data: imageData.data } } as Part,
     { text: prompt } as Part,
@@ -270,8 +286,6 @@ export async function analyzeRoofImage(
       throw e;
     }
     if (!isOpenAiFallbackAvailable()) throw new Error(GEMINI_QUOTA_ERROR);
-    const fallbackPrompt =
-      `${prompt}\n\nReturn JSON only with keys: condition, condition_score, issues, urgency, estimated_remaining_life, recommendation, marketing_message.`;
     return callOpenAiFallbackJson<RoofAnalysis>({
       task: 'roof_analysis',
       prompt: fallbackPrompt,
@@ -289,6 +303,21 @@ export async function analyzeRoofImageFromFile(
   const prompt =
     `${ANALYSIS_PROMPT}\n\nNote: This image was uploaded directly by the user (e.g. a drone photo or on-site photo). Analyze it with the same criteria — the image may show the roof at an angle or from street level; do your best to assess visible condition.` +
     (solarInsights ? buildSolarContext(solarInsights) : '');
+  const fallbackPrompt =
+    `${prompt}\n\nReturn JSON only with keys: condition, condition_score, issues, urgency, estimated_remaining_life, recommendation, marketing_message.`;
+
+  if (await shouldPreferOpenAiVision()) {
+    try {
+      return await callOpenAiFallbackJson<RoofAnalysis>({
+        task: 'roof_analysis',
+        prompt: fallbackPrompt,
+        image: { data, mimeType: mimeType || 'image/jpeg' },
+      });
+    } catch (e) {
+      if (!readGeminiApiKey()) throw e;
+    }
+  }
+
   const parts: Part[] = [
     { inlineData: { mimeType: mimeType || 'image/jpeg', data } } as Part,
     { text: prompt } as Part,
@@ -300,8 +329,6 @@ export async function analyzeRoofImageFromFile(
       throw e;
     }
     if (!isOpenAiFallbackAvailable()) throw new Error(GEMINI_QUOTA_ERROR);
-    const fallbackPrompt =
-      `${prompt}\n\nReturn JSON only with keys: condition, condition_score, issues, urgency, estimated_remaining_life, recommendation, marketing_message.`;
     return callOpenAiFallbackJson<RoofAnalysis>({
       task: 'roof_analysis',
       prompt: fallbackPrompt,

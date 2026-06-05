@@ -18,6 +18,7 @@ import DepthAnalysisPage from './components/DepthAnalysisPage';
 import AccuMeasurePage from './components/AccuMeasurePage';
 import { initDb, isDbConfigured } from './utils/db';
 import { readMapsApiKey } from './utils/googleMapsKey';
+import { warmOpenAiFallbackAvailability } from './utils/openaiFallback';
 import { readAuthSession, writeAuthSession, clearAuthSession, type WizardAttachSnapshot } from './utils/authSession';
 
 function getStoredUser(): User | null {
@@ -74,6 +75,10 @@ export default function App() {
         const msg = e instanceof Error ? e.message : 'Initialization failed.';
         setDbBanner(`Could not reach the database: ${msg}`);
       });
+  }, []);
+
+  useEffect(() => {
+    void warmOpenAiFallbackAvailability();
   }, []);
 
   useEffect(() => {

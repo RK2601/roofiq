@@ -11,6 +11,7 @@ import {
   SchemaType,
 } from '@google/generative-ai';
 import type { Part, Schema } from '@google/generative-ai';
+import { shouldPreferOpenAiVision } from './aiProvider';
 import { readGeminiApiKey } from './googleAiKey';
 import {
   enqueueGeminiRequest,
@@ -192,6 +193,10 @@ export async function enrichDsmSegmentsWithSatelliteVision(
   planes: DsmPlaneVisionInput[],
 ): Promise<DsmVisionEnrichment[]> {
   if (!planes.length) return [];
+  if (await shouldPreferOpenAiVision()) {
+    // DSM pitch/facing stay authoritative; skip Gemini satellite labels when OpenAI is primary.
+    return [];
+  }
   const apiKey = readGeminiApiKey();
   if (!apiKey) throw new Error('NO_GEMINI_KEY');
   if (!imageBase64 || imageBase64.length < 100) throw new Error('NO_IMAGE');

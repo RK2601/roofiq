@@ -3,6 +3,7 @@
  * Keeps OPENAI_API_KEY off the client bundle and enables Gemini->OpenAI fallback.
  */
 import type { VercelRequest, VercelResponse } from '@vercel/node';
+import { resolveOpenAiApiKey } from './resolveEnvKeys';
 
 export const config = {
   api: {
@@ -12,10 +13,25 @@ export const config = {
   },
 };
 
-type OpenAiProxyTask = 'roof_analysis' | 'roof_geometry' | 'roof_cues' | 'segment_analysis';
+type OpenAiProxyTask =
+  | 'roof_analysis'
+  | 'roof_geometry'
+  | 'roof_cues'
+  | 'segment_analysis'
+  | 'outline_analysis'
+  | 'structure_detection'
+  | 'wizard_vision';
 
 function isTaskKind(v: unknown): v is OpenAiProxyTask {
-  return v === 'roof_analysis' || v === 'roof_geometry' || v === 'roof_cues' || v === 'segment_analysis';
+  return (
+    v === 'roof_analysis' ||
+    v === 'roof_geometry' ||
+    v === 'roof_cues' ||
+    v === 'segment_analysis' ||
+    v === 'outline_analysis' ||
+    v === 'structure_detection' ||
+    v === 'wizard_vision'
+  );
 }
 
 const UPSTREAM_MS = 180_000;
@@ -87,13 +103,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method === 'OPTIONS') return res.status(204).end();
   if (req.method !== 'POST') return res.status(405).send('Method not allowed');
 
-  const key = (
-    (process.env.OPENAI_API_KEY || '').trim() ||
-    (process.env.OPENAI_KEY || '').trim()
-  );
+  const key = resolveOpenAiApiKey();
 
   if (!key) {
-    return res.status(500).json({ error: 'OPENAI_API_KEY missing on server' });
+    return res.status(500).json({
+      error: 'OPENAI_API_KEY missing on server',
+      hint: 'Set OPENAI_API_KEY (or OPENAI_KEY / VITE_OPENAI_API_KEY) in Vercel → Settings → Environment Variables, then redeploy.',
+    });
   }
 
   let payload = req.body as Record<string, unknown>;

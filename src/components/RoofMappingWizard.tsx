@@ -85,6 +85,7 @@ import {
   isGemini429OrQuotaError,
   isGeminiQuotaPaused,
 } from '../utils/gemini429';
+import { shouldPreferOpenAiVision } from '../utils/aiProvider';
 import { isDbConfigured, saveWizardWorkflowReport, type WizardWorkflowReportPayload } from '../utils/db';
 import { buildRoofOutlineSnapshotDataUrl } from '../utils/wizardOutlineSnapshot';
 import jsPDF from 'jspdf';
@@ -702,6 +703,12 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
   const [imageReady, setImageReady] = useState(false);
 
   const hasGeminiKey = !!readGeminiApiKey();
+  const [hasServerOpenAi, setHasServerOpenAi] = useState(false);
+  const hasAiVision = hasGeminiKey || hasServerOpenAi;
+
+  useEffect(() => {
+    void shouldPreferOpenAiVision().then(setHasServerOpenAi);
+  }, []);
 
   const waitForSatelliteImage = useCallback(async (maxMs = 12000) => {
     const t0 = Date.now();
@@ -935,10 +942,10 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
       });
 
       const pathPts = polyPathFromPolygon(polygon);
-      const newOutline: DrawnOutline = { polygon, path: pathPts, analysis: null, analyzing: hasGeminiKey };
+      const newOutline: DrawnOutline = { polygon, path: pathPts, analysis: null, analyzing: hasAiVision };
       setOutline(newOutline);
 
-      if (!hasGeminiKey) return;
+      if (!hasAiVision) return;
 
       const normalized = pathPts.map(p => latLngToImageNorm(p, coordinates, 20, 640));
       const imgData = satelliteImageRef.current;
@@ -950,7 +957,7 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
         setOutline(prev => (prev ? { ...prev, analyzing: false } : prev));
       }
     },
-    [stopDrawing, hasGeminiKey, coordinates]
+    [stopDrawing, hasAiVision, coordinates]
   );
 
   const clearOutlineSketch = useCallback(() => {
@@ -1317,7 +1324,7 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
       path: pathPts,
       color,
       analysis: null,
-      analyzing: hasGeminiKey,
+      analyzing: hasAiVision,
     };
 
     setSegments(prev => [...prev, newSeg]);
@@ -1325,7 +1332,7 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
     // Batch-analyze ALL segments in one API call (1 call total instead of N).
     // When a new segment is committed, re-run batch analysis on every segment
     // that still needs analysis — this uses just 1 quota unit regardless of count.
-    if (hasGeminiKey) {
+    if (hasAiVision) {
       const batchId = Date.now();
 
       // Skip enqueue if a batch is already waiting — it reads segmentsRef at execution time
@@ -1370,7 +1377,7 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
       });
       } // end: segAnalysisQueueRef.current.length === 0
     }
-  }, [hasGeminiKey, coordinates, outline, clearSegmentSketch, enqueueSegAnalysis, waitForSatelliteImage]);
+  }, [hasAiVision, coordinates, outline, clearSegmentSketch, enqueueSegAnalysis, waitForSatelliteImage]);
 
   // Keep ref in sync so startSegmentSketch closure always calls the latest version
   finalizeSegmentSketchRef.current = () => {}; // unused now — kept to avoid TS errors on callers
@@ -1409,7 +1416,7 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
 
       const id = `seg_${now}_${fi}`;
       const idx = startIdx + fi;
-      const newSeg: DrawnSegment = { id, index: idx, polygon, path: closedPath, color, analysis: null, analyzing: hasGeminiKey };
+      const newSeg: DrawnSegment = { id, index: idx, polygon, path: closedPath, color, analysis: null, analyzing: hasAiVision };
       added.push(newSeg);
     });
 
@@ -1417,7 +1424,7 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
     setSegments(prev => [...prev, ...added]);
 
     // Batch-analyze ALL segments (existing + new) in one API call
-    if (hasGeminiKey && added.length > 0) {
+    if (hasAiVision && added.length > 0) {
       const imgData = satelliteImageRef.current;
       const batchId = Date.now();
 
@@ -1451,7 +1458,7 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
           });
       });
     }
-  }, [hasGeminiKey, coordinates, enqueueSegAnalysis]);
+  }, [hasAiVision, coordinates, enqueueSegAnalysis]);
 
   // Segment drawing uses Google's native DrawingManager — click to add vertices,
   // double-click to close. Much more reliable than a custom click handler.
@@ -1524,7 +1531,7 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
 
   const reanalyzeSegment = useCallback(
     (id: string) => {
-      if (!hasGeminiKey) return;
+      if (!hasAiVision) return;
       if (isGeminiQuotaPaused()) {
         stopAnalyzingForQuota();
         return;
@@ -1567,7 +1574,7 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
           });
       });
     },
-    [hasGeminiKey, coordinates, enqueueSegAnalysis, waitForSatelliteImage, stopAnalyzingForQuota]
+    [hasAiVision, coordinates, enqueueSegAnalysis, waitForSatelliteImage, stopAnalyzingForQuota]
   );
 
   // ── Step 1c: Structure detection ────────────────────────────────────────────
@@ -2030,7 +2037,7 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
 
       const enrichByIndex = new globalThis.Map<number, DsmVisionEnrichment>();
       const sat = await waitForSatelliteImage();
-      if (sat && hasGeminiKey) {
+      if (sat && hasAiVision) {
         try {
           const enriched = await enrichDsmSegmentsWithSatelliteVision(
             sat.data,
@@ -2093,7 +2100,7 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
     } finally {
       setAutoSegmenting(false);
     }
-  }, [solarDataLayers, solarData, segments.length, apiKey, mapInstanceRef, waitForSatelliteImage, coordinates.lat, coordinates.lng, hasGeminiKey]);
+  }, [solarDataLayers, solarData, segments.length, apiKey, mapInstanceRef, waitForSatelliteImage, coordinates.lat, coordinates.lng, hasAiVision]);
 
   // DSM Auto-Map: after outline + user opens Segments, run auto-detect when map/DSM are ready (no mount-time jump past Outline).
   useEffect(() => {
@@ -3023,14 +3030,14 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
           <div className="text-sm font-semibold text-white truncate">Smart Roof Mapping Wizard</div>
         </div>
         <div className="flex shrink-0 items-center gap-1.5 flex-wrap justify-end">
-        {!hasGeminiKey && (
+        {!hasAiVision && (
           <div className="flex items-center gap-1.5 bg-amber-900/40 border border-amber-700/50 text-amber-300 text-[10px] sm:text-xs px-2 py-1 sm:px-3 sm:py-1.5 rounded-lg">
             <AlertCircle size={13} className="shrink-0" />
-            <span className="hidden sm:inline">No Gemini key — AI disabled</span>
+            <span className="hidden sm:inline">No AI key — add Gemini in Settings or OPENAI_API_KEY on server</span>
             <span className="sm:hidden">No AI key</span>
           </div>
         )}
-        {hasGeminiKey && geminiQuotaNotice && (
+        {hasAiVision && hasGeminiKey && geminiQuotaNotice && (
           <div className="flex items-center gap-1.5 bg-red-900/40 border border-red-700/50 text-red-200 text-[10px] sm:text-xs px-2 py-1 sm:px-3 sm:py-1.5 rounded-lg max-w-[min(100%,280px)]">
             <AlertCircle size={13} className="shrink-0" />
             <span className="line-clamp-2">Rate limited</span>
@@ -3493,7 +3500,7 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
                           </div>
                           <div className="flex items-center gap-1.5">
                             {seg.analyzing && <Loader2 size={12} className="animate-spin text-blue-400" />}
-                            {hasGeminiKey && (
+                            {hasAiVision && (
                               <button
                                 type="button"
                                 title="Re-run AI on this polygon (use after editing shape)"
@@ -3535,7 +3542,7 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
                         {!seg.dsmPitchDeg && seg.analysis?.notes && (
                           <div className="text-xs text-slate-400 mt-1 italic">{seg.analysis.notes}</div>
                         )}
-                        {!seg.analyzing && !seg.analysis && !hasGeminiKey && (
+                        {!seg.analyzing && !seg.analysis && !hasAiVision && (
                           <div className="text-xs text-slate-500">{seg.path.length} vertices</div>
                         )}
                       </div>
@@ -3600,7 +3607,7 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
                         className="flex items-center justify-center gap-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white text-sm font-medium py-2.5 px-4 rounded-lg transition-colors"
                       >
                         <Brain size={15} />
-                        {hasGeminiKey ? 'Detect Roof Structure' : 'Build Structure (Fallback)'}
+                        {hasAiVision ? 'Detect Roof Structure' : 'Build Structure (Fallback)'}
                       </button>
                     </div>
                   )}
@@ -4007,7 +4014,7 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
               {/* ── Not yet run ── */}
               {!finalAnalysis && !finalAnalyzing && (
                 <div className="flex flex-col gap-3">
-                  {!hasGeminiKey && (
+                  {!hasAiVision && (
                     <div className="rounded-lg border border-amber-600/40 bg-amber-900/30 px-3 py-2 text-xs text-amber-200">
                       Gemini API key required for AI fusion. Add it in Settings.
                     </div>
@@ -4019,7 +4026,7 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
                   )}
                   <button
                     onClick={runFinalAnalysis}
-                    disabled={!hasGeminiKey}
+                    disabled={!hasAiVision}
                     className="flex items-center justify-center gap-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-semibold py-3 px-4 rounded-xl transition-colors"
                   >
                     <Brain size={16} /> Run AI Analysis
@@ -4100,7 +4107,7 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
                 </div>
               )}
 
-              {!hasGeminiKey && !finalAnalysis && !finalAnalyzing && (
+              {!hasAiVision && !finalAnalysis && !finalAnalyzing && (
                 <p className="text-[11px] text-slate-500">Add your Gemini key in Settings to enable AI fusion.</p>
               )}
 

@@ -2,10 +2,25 @@
  * Shared OpenAI proxy logic (Vercel function + Vite dev middleware).
  */
 
-export type OpenAiProxyTask = 'roof_analysis' | 'roof_geometry' | 'roof_cues' | 'segment_analysis';
+export type OpenAiProxyTask =
+  | 'roof_analysis'
+  | 'roof_geometry'
+  | 'roof_cues'
+  | 'segment_analysis'
+  | 'outline_analysis'
+  | 'structure_detection'
+  | 'wizard_vision';
 
 function isTaskKind(v: unknown): v is OpenAiProxyTask {
-  return v === 'roof_analysis' || v === 'roof_geometry' || v === 'roof_cues' || v === 'segment_analysis';
+  return (
+    v === 'roof_analysis' ||
+    v === 'roof_geometry' ||
+    v === 'roof_cues' ||
+    v === 'segment_analysis' ||
+    v === 'outline_analysis' ||
+    v === 'structure_detection' ||
+    v === 'wizard_vision'
+  );
 }
 
 export interface OpenAiProxyResult {

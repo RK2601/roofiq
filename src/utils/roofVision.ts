@@ -14,7 +14,8 @@ import {
   isGeminiQuotaPaused,
   triggerGeminiQuotaCooldown,
 } from './gemini429';
-import { callOpenAiFallbackJson, isOpenAiFallbackAvailable } from './openaiFallback';
+import { callOpenAiFallbackJson, isOpenAiFallbackAvailable, type OpenAiFallbackTask } from './openaiFallback';
+import { ensureOpenAiServerProbe, shouldPreferOpenAiVision } from './aiProvider';
 import type { AiRoofCue, Vec2 } from './roofStructure';
 import type { SolarBuildingInsights, SolarLatLng, SolarRoofSegment } from './solar';
 
@@ -596,18 +597,9 @@ function shouldTryOpenAiAfterGeminiFail(lastError: string, allQuotaErrors: boole
 
 export { GEMINI_QUOTA_ERROR, formatGeminiQuotaUserMessage, isGeminiQuotaPaused };
 
-function preferOpenAiVisionFirst(): boolean {
-  try {
-    const v = import.meta.env.VITE_PREFER_OPENAI_VISION;
-    return v === '1' || v === 'true';
-  } catch {
-    return false;
-  }
-}
-
 async function routeOpenAiFallback<T>(
   validParts: Part[],
-  task: 'segment_analysis' | 'roof_cues'
+  task: OpenAiFallbackTask,
 ): Promise<GeminiResult<T>> {
   const { prompt, image } = extractPartsForOpenAi(validParts);
   if (!image || !prompt) return { result: null, error: 'OPENAI_MISSING_PARTS' };
@@ -630,29 +622,33 @@ async function runGeminiWithSchemaImpl<T>(
   parts: Part[],
   schema: Schema,
   temperature = 0.25,
-  openAiTask?: 'segment_analysis' | 'roof_cues'
+  openAiTask?: OpenAiFallbackTask,
 ): Promise<GeminiResult<T>> {
   const validParts = parts.filter(Boolean) as Part[];
   if (validParts.length === 0) return { result: null, error: 'NO_VALID_PARTS' };
 
   const apiKey = readGeminiApiKey();
+  const preferOpenAi = openAiTask ? await shouldPreferOpenAiVision() : false;
+
+  // ── OpenAI path when server key is configured (default on Vercel with OPENAI_API_KEY) ──
+  if (openAiTask && preferOpenAi) {
+    const oai = await routeOpenAiFallback<T>(validParts, openAiTask);
+    if (oai.result !== null && oai.error === null) return oai;
+    return oai.error ? oai : { result: null, error: 'OPENAI_FAILED' };
+  }
+
   if (!apiKey) {
-    if (openAiTask && isOpenAiFallbackAvailable() && preferOpenAiVisionFirst()) {
+    if (openAiTask && (await shouldPreferOpenAiVision())) {
       return routeOpenAiFallback<T>(validParts, openAiTask);
     }
     return { result: null, error: 'NO_API_KEY' };
   }
 
   if (isGeminiQuotaPaused()) {
-    if (openAiTask && isOpenAiFallbackAvailable()) {
+    if (openAiTask && (await ensureOpenAiServerProbe())) {
       return routeOpenAiFallback<T>(validParts, openAiTask);
     }
     return { result: null, error: GEMINI_QUOTA_ERROR };
-  }
-
-  if (openAiTask && preferOpenAiVisionFirst() && isOpenAiFallbackAvailable()) {
-    const first = await routeOpenAiFallback<T>(validParts, openAiTask);
-    if (first.result !== null && first.error === null) return first;
   }
 
   const genAI = new GoogleGenerativeAI(apiKey);
@@ -742,8 +738,12 @@ async function runGeminiWithSchema<T>(
   parts: Part[],
   schema: Schema,
   temperature = 0.25,
-  openAiTask?: 'segment_analysis' | 'roof_cues'
+  openAiTask?: OpenAiFallbackTask,
 ): Promise<GeminiResult<T>> {
+  const preferOpenAi = openAiTask ? await shouldPreferOpenAiVision() : false;
+  if (openAiTask && preferOpenAi && isOpenAiFallbackAvailable()) {
+    return runGeminiWithSchemaImpl<T>(parts, schema, temperature, openAiTask);
+  }
   return enqueueGeminiRequest(() => runGeminiWithSchemaImpl<T>(parts, schema, temperature, openAiTask));
 }
 
@@ -770,7 +770,7 @@ Evaluate:
 Return JSON only.`,
   } as Part;
   const parts: Part[] = [imgPart, textPart].filter(Boolean) as Part[];
-  const { result, error } = await runGeminiWithSchema<OutlineAnalysis>(parts, OUTLINE_ANALYSIS_SCHEMA);
+  const { result, error } = await runGeminiWithSchema<OutlineAnalysis>(parts, OUTLINE_ANALYSIS_SCHEMA, 0.25, 'outline_analysis');
   if (error) console.warn('[RoofVision] analyzeRoofOutline failed:', error);
   return result;
 }
@@ -842,7 +842,7 @@ Also return:
 Return 4-20 cues total. Return JSON only.`,
   } as Part;
   const parts: Part[] = [imgPart, textPart].filter(Boolean) as Part[];
-  const { result, error } = await runGeminiWithSchema<StructuralDetection>(parts, STRUCTURAL_DETECTION_SCHEMA, 0.25, 'segment_analysis');
+  const { result, error } = await runGeminiWithSchema<StructuralDetection>(parts, STRUCTURAL_DETECTION_SCHEMA, 0.25, 'structure_detection');
   if (error) console.warn('[RoofVision] detectRoofStructure failed:', error);
   return result;
 }
