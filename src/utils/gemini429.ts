@@ -4,9 +4,19 @@ import type { GenerateContentResult } from '@google/generative-ai';
 export const GEMINI_QUOTA_ERROR = 'GEMINI_QUOTA_EXCEEDED';
 
 const GEMINI_COOLDOWN_MS = 15 * 60 * 1000;
-let geminiQuotaCooldownUntil = 0;
+const GEMINI_COOLDOWN_KEY = 'roofiq_gemini_cooldown_until';
+
+function readPersistedCooldown(): number {
+  try { return parseInt(sessionStorage.getItem(GEMINI_COOLDOWN_KEY) ?? '0', 10) || 0; } catch { return 0; }
+}
+function persistCooldown(until: number): void {
+  try { sessionStorage.setItem(GEMINI_COOLDOWN_KEY, String(until)); } catch { /* ignore */ }
+}
+
+let geminiQuotaCooldownUntil = readPersistedCooldown();
 
 export function isGeminiQuotaPaused(): boolean {
+  if (geminiQuotaCooldownUntil === 0) geminiQuotaCooldownUntil = readPersistedCooldown();
   return Date.now() < geminiQuotaCooldownUntil;
 }
 
@@ -16,13 +26,13 @@ export function getGeminiQuotaCooldownRemainingMs(): number {
 
 export function triggerGeminiQuotaCooldown(reason?: string): void {
   geminiQuotaCooldownUntil = Date.now() + GEMINI_COOLDOWN_MS;
-  if (reason) {
-    console.warn(reason);
-  }
+  persistCooldown(geminiQuotaCooldownUntil);
+  if (reason) console.warn(reason);
 }
 
 export function clearGeminiQuotaCooldown(): void {
   geminiQuotaCooldownUntil = 0;
+  persistCooldown(0);
 }
 
 export function formatGeminiQuotaUserMessage(): string {

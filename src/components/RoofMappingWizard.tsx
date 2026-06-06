@@ -527,6 +527,21 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
   const finalizeSegmentSketchRef = useRef<() => void>(() => {});
 
   const structLinesRef = useRef<google.maps.Polyline[]>([]);
+
+  // ── Coverage gap detection ──────────────────────────────────────────────────
+  const gapOverlaysRef = useRef<google.maps.Polygon[]>([]);
+  const gapAnimIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [coveragePct, setCoveragePct] = useState<number | null>(null);
+
+  function clearGapOverlays() {
+    gapOverlaysRef.current.forEach(p => p.setMap(null));
+    gapOverlaysRef.current = [];
+    if (gapAnimIntervalRef.current !== null) {
+      clearInterval(gapAnimIntervalRef.current);
+      gapAnimIntervalRef.current = null;
+    }
+  }
+
   const streetViewRef = useRef<HTMLDivElement>(null);
   const panoramaRef = useRef<google.maps.StreetViewPanorama | null>(null);
   const labelsRef = useRef<google.maps.InfoWindow[]>([]);
@@ -1594,11 +1609,101 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
     structLinesRef.current = [];
   }
 
-  // Show structural lines only on the Structure sub-step; hide everywhere else.
+  // Show structural lines only on the Structure sub-step of phase 1; hide everywhere else.
   useEffect(() => {
-    const targetMap = step1Sub === 'structure' ? mapInstanceRef.current : null;
+    const targetMap = (phase === 1 && step1Sub === 'structure') ? mapInstanceRef.current : null;
     structLinesRef.current.forEach(l => l.setMap(targetMap));
-  }, [step1Sub]);
+  }, [step1Sub, phase]);
+
+  // ── Coverage gap detection: sample grid inside outline, highlight uncovered cells ──
+  useEffect(() => {
+    clearGapOverlays();
+    if (step1Sub !== 'segments' || !outline?.polygon || segments.length === 0) {
+      setCoveragePct(null);
+      return;
+    }
+
+    const outlinePoly = outline.polygon;
+    const segPolys = segments.map(s => s.polygon);
+    const map = mapInstanceRef.current;
+    if (!map || typeof google === 'undefined' || !google.maps?.geometry?.poly) return;
+
+    // Compute bounding box of outline
+    const bounds = new google.maps.LatLngBounds();
+    outlinePoly.getPath().forEach(p => bounds.extend(p));
+    const sw = bounds.getSouthWest();
+    const ne = bounds.getNorthEast();
+
+    const GRID = 20; // 20×20 = 400 sample points
+    const latStep = (ne.lat() - sw.lat()) / GRID;
+    const lngStep = (ne.lng() - sw.lng()) / GRID;
+
+    let insideCount = 0;
+    let coveredCount = 0;
+    const gapCells: { lat: number; lng: number }[] = [];
+
+    for (let r = 0; r < GRID; r++) {
+      for (let c = 0; c < GRID; c++) {
+        const lat = sw.lat() + (r + 0.5) * latStep;
+        const lng = sw.lng() + (c + 0.5) * lngStep;
+        const pt = new google.maps.LatLng(lat, lng);
+
+        if (!google.maps.geometry.poly.containsLocation(pt, outlinePoly)) continue;
+        insideCount++;
+
+        const covered = segPolys.some(sp => google.maps.geometry.poly.containsLocation(pt, sp));
+        if (covered) {
+          coveredCount++;
+        } else {
+          gapCells.push({ lat, lng });
+        }
+      }
+    }
+
+    const pct = insideCount > 0 ? Math.round((100 * coveredCount) / insideCount) : 100;
+    setCoveragePct(pct);
+
+    if (gapCells.length === 0 || pct >= 95) return; // nothing to highlight
+
+    // Draw one small rectangle per uncovered grid cell with pulsing animation
+    const halfLat = latStep * 0.46;
+    const halfLng = lngStep * 0.46;
+
+    gapCells.forEach(cell => {
+      const rect = new google.maps.Polygon({
+        paths: [
+          { lat: cell.lat - halfLat, lng: cell.lng - halfLng },
+          { lat: cell.lat - halfLat, lng: cell.lng + halfLng },
+          { lat: cell.lat + halfLat, lng: cell.lng + halfLng },
+          { lat: cell.lat + halfLat, lng: cell.lng - halfLng },
+        ],
+        fillColor: '#f97316',
+        fillOpacity: 0.35,
+        strokeColor: '#ea580c',
+        strokeWeight: 0.5,
+        strokeOpacity: 0.6,
+        zIndex: 5,
+        map,
+      });
+      gapOverlaysRef.current.push(rect);
+    });
+
+    // Pulse opacity between 0.1 and 0.55
+    let opacity = 0.35;
+    let dir = -1;
+    const interval = setInterval(() => {
+      opacity += dir * 0.04;
+      if (opacity <= 0.08) { opacity = 0.08; dir = 1; }
+      if (opacity >= 0.55) { opacity = 0.55; dir = -1; }
+      gapOverlaysRef.current.forEach(p => p.setOptions({ fillOpacity: opacity }));
+    }, 70);
+    gapAnimIntervalRef.current = interval;
+
+    return () => {
+      clearInterval(interval);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [segments, outline, step1Sub]);
 
   const safeComputeAreaSqFt = useCallback((polygon: google.maps.Polygon): number => {
     try {
@@ -1655,10 +1760,9 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
   useEffect(() => {
     if (!panoramaRef.current) return;
     panoramaRef.current.setVisible(showStreetView);
-    if (showStreetView) {
-      panoramaRef.current.setPosition(coordinates);
-    }
-  }, [showStreetView, coordinates]);
+    // Only reset position when opening the generic street view toggle (not applyCaptureView)
+    // applyCaptureView sets position/POV directly on the panorama before calling setShowStreetView
+  }, [showStreetView]);
 
   useEffect(() => {
     if (showLabels && wasShowLabelsRef.current === false) {
@@ -2210,12 +2314,35 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
     const analysis = geminiResult.status === 'fulfilled' ? geminiResult.value : buildFallbackPhotoAnalysis(slotId);
     const depth = depthResult.status === 'fulfilled' ? depthResult.value : null;
 
+    // Convert the Replicate CDN URL to an inline base64 data URL so the depth
+    // image remains available in the report/PDF even after the CDN URL expires.
+    // We fetch via /api/proxy-image (server-side) to avoid CORS restrictions —
+    // Replicate's CDN does not send CORS headers for browser fetch() calls.
+    let depthMapUrl: string | null = depth?.depthMapUrl ?? null;
+    if (depthMapUrl && depthMapUrl.startsWith('http')) {
+      try {
+        const proxyUrl = `/api/proxy-image?url=${encodeURIComponent(depthMapUrl)}`;
+        const resp = await fetch(proxyUrl);
+        if (resp.ok) {
+          const blob = await resp.blob();
+          depthMapUrl = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result as string);
+            reader.onerror = reject;
+            reader.readAsDataURL(blob);
+          });
+        }
+      } catch {
+        // Keep the original URL if proxy fetch fails — better than nothing
+      }
+    }
+
     setPhotoSlots(prev => prev.map(s => s.id === slotId ? {
       ...s,
       status: analysis ? 'done' : 'error',
       analysis,
-      depthStatus: depth?.depthMapUrl ? 'done' : 'error',
-      depthMapUrl: depth?.depthMapUrl ?? null,
+      depthStatus: depthMapUrl ? 'done' : 'error',
+      depthMapUrl,
       depthPitchDeg: depth?.pitchEstimateDeg ?? null,
       depthPitchRatio: depth?.pitchRatio ?? null,
       depthResult: depth,
@@ -2258,20 +2385,23 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
     const preset = PHOTO_CAPTURE_PRESETS[slotId];
     setActiveCaptureSlot(slotId);
 
-    const panorama = map.getStreetView();
     if (preset.mode === 'street') {
+      // Set state first so the panorama useEffect doesn't fight us
+      setShowStreetView(true);
       map.setMapTypeId('hybrid');
       map.setTilt(0);
+      // Position + POV applied after a tick so the panorama is visible/mounted
+      const panorama = map.getStreetView();
       panorama.setPosition(coordinates);
       panorama.setPov({
         heading: preset.heading ?? 0,
         pitch: preset.pitch ?? -3,
       });
-      panorama.setVisible(true);
       return;
     }
 
-    panorama.setVisible(false);
+    // Aerial / oblique — hide street view first via state
+    setShowStreetView(false);
     map.panTo(coordinates);
     map.setMapTypeId('satellite');
     map.setHeading(preset.heading ?? 0);
@@ -3588,6 +3718,28 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
                           {' · '}Adjust vertices if needed
                         </div>
                       )}
+
+                      {/* Coverage gap warning */}
+                      {coveragePct !== null && coveragePct < 95 && (
+                        <div className="rounded-xl border border-orange-500/60 bg-orange-900/30 px-3 py-2.5 flex flex-col gap-1.5 animate-pulse-slow">
+                          <div className="flex items-center gap-2">
+                            <span className="text-orange-300 text-base leading-none">⚠️</span>
+                            <span className="text-xs font-semibold text-orange-200">
+                              ~{100 - coveragePct}% of roof outline uncovered
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-orange-300/90 leading-relaxed">
+                            The <span className="font-semibold text-orange-200">orange pulsing areas</span> on the map show sections inside the roof outline that aren't assigned to any segment yet. Draw additional segments to cover them, or adjust existing segment vertices.
+                          </p>
+                        </div>
+                      )}
+                      {coveragePct !== null && coveragePct >= 95 && segments.length >= 2 && (
+                        <div className="rounded-lg border border-green-600/40 bg-green-900/20 px-3 py-2 flex items-center gap-2">
+                          <span className="text-green-400 text-sm">✓</span>
+                          <span className="text-[11px] text-green-300 font-medium">Full coverage — roof outline is fully segmented</span>
+                        </div>
+                      )}
+
                       <button
                         onClick={goToStructure}
                         className="mt-auto flex items-center justify-center gap-2 bg-green-600 hover:bg-green-500 text-white text-sm font-medium py-2.5 px-4 rounded-lg transition-colors shrink-0"

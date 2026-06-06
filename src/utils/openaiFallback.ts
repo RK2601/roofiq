@@ -9,10 +9,19 @@ export type OpenAiFallbackTask =
   | 'structure_detection'
   | 'wizard_vision';
 
-let openAiProxyDisabledUntil = 0;
+const OPENAI_BACKOFF_KEY = 'roofiq_openai_backoff_until';
+function readOpenAiBackoff(): number {
+  try { return parseInt(sessionStorage.getItem(OPENAI_BACKOFF_KEY) ?? '0', 10) || 0; } catch { return 0; }
+}
+function persistOpenAiBackoff(until: number): void {
+  try { sessionStorage.setItem(OPENAI_BACKOFF_KEY, String(until)); } catch { /* ignore */ }
+}
+let openAiProxyDisabledUntil = readOpenAiBackoff();
 
 /** Whether we should attempt `/api/proxy-openai`. */
 export function isOpenAiFallbackAvailable(): boolean {
+  // Re-read from sessionStorage in case this was set in a previous page load
+  if (openAiProxyDisabledUntil === 0) openAiProxyDisabledUntil = readOpenAiBackoff();
   if (Date.now() < openAiProxyDisabledUntil) return false;
   try {
     const v = import.meta.env.VITE_OPENAI_FALLBACK;
@@ -37,8 +46,8 @@ export function setOpenAiServerAvailability(available: boolean): void {
 }
 
 function markOpenAiProxyUnavailable(reason: string): void {
-  // Short backoff — env may have been fixed and redeployed.
   openAiProxyDisabledUntil = Date.now() + 2 * 60 * 1000;
+  persistOpenAiBackoff(openAiProxyDisabledUntil);
   console.warn('[OpenAI fallback] Temporarily skipping proxy (2 min):', reason);
 }
 
@@ -178,11 +187,13 @@ export async function callOpenAiFallbackJson<T>(args: {
   }
 
   if (!res.ok) {
-    if (
-      res.status === 500 &&
-      /OPENAI_API_KEY missing|OPENAI_KEY missing/i.test(text)
-    ) {
+    if (res.status === 500 && /OPENAI_API_KEY missing|OPENAI_KEY missing/i.test(text)) {
       markOpenAiProxyUnavailable('OPENAI_API_KEY missing on server');
+    } else if (res.status === 429) {
+      // OpenAI rate-limited — back off for 3 minutes (persisted across page refreshes)
+      openAiProxyDisabledUntil = Date.now() + 3 * 60 * 1000;
+      persistOpenAiBackoff(openAiProxyDisabledUntil);
+      console.warn('[OpenAI fallback] Rate-limited (429) — pausing proxy calls for 3 minutes.');
     }
     throw new Error(`OPENAI_PROXY_HTTP_${res.status}:${text.slice(0, 240)}`);
   }

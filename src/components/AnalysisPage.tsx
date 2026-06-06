@@ -533,30 +533,13 @@ export default function AnalysisPage({
       setRoofAiCueStatus('idle');
       return;
     }
-
-    let cancelled = false;
-    setRoofAiCueStatus('loading');
-    (async () => {
-      const staticMapUrl =
-        `https://maps.googleapis.com/maps/api/staticmap?center=${coordinates.lat},${coordinates.lng}` +
-        `&zoom=20&size=640x640&maptype=satellite&scale=2&key=${apiKey}`;
-
-      const visionCues = await deriveVisionRoofCuesFromStaticMap(staticMapUrl, solarData).catch(() => null);
-      if (cancelled) return;
-      if (visionCues && visionCues.length > 0) {
-        setRoofAiCues(visionCues);
-        setRoofAiCueStatus('ready');
-        return;
-      }
-      const fallback = deriveHeuristicRoofCues(segments, solarData.center);
-      setRoofAiCues(fallback);
-      setRoofAiCueStatus('fallback');
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [solarData, solarStatus, coordinates.lat, coordinates.lng, apiKey]);
+    // Use heuristic cues derived from Solar segment data — no API call on page load.
+    // Vision-based cue detection (AI) is only triggered during the explicit roof analysis flow,
+    // not automatically, to avoid burning API quota on every page view.
+    const fallback = deriveHeuristicRoofCues(segments, solarData.center);
+    setRoofAiCues(fallback);
+    setRoofAiCueStatus('fallback');
+  }, [solarData, solarStatus]);
 
   // Sync map type (satellite ↔ hybrid)
   useEffect(() => {

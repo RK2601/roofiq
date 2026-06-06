@@ -93,24 +93,51 @@ export async function analyzeDsmForSegments(
     const tiff = await fromArrayBuffer(buffer);
     const image = await tiff.getImage();
 
-    // getBoundingBox returns [minLng, minLat, maxLng, maxLat] for WGS84 GeoTIFFs
-    const [minLng, minLat, maxLng, maxLat] = image.getBoundingBox() as [number, number, number, number];
+    // getBoundingBox returns coords in the native CRS of the GeoTIFF.
+    // Google Solar DSM tiles are typically EPSG:3857 (Web Mercator, units = metres),
+    // but some tiles may be EPSG:4326 (WGS84 degrees). Detect by value range.
+    const [minX, minY, maxX, maxY] = image.getBoundingBox() as [number, number, number, number];
     const width = image.getWidth();
     const height = image.getHeight();
 
     const rasters = (await image.readRasters({ interleave: false })) as { [key: number]: Float32Array };
     const elevBand = rasters[0];
 
-    // Pixel resolution in metres
-    const lngSpan = maxLng - minLng;
-    const latSpan = maxLat - minLat;
-    const midLat = (minLat + maxLat) / 2;
-    const resLng = (lngSpan * 111_320 * Math.cos((midLat * Math.PI) / 180)) / width;
-    const resLat = (latSpan * 111_320) / height;
-    const resM = (resLng + resLat) / 2;
+    // Is the bbox in geographic degrees (WGS84) or projected metres (EPSG:3857)?
+    const isGeographic =
+      Math.abs(minX) <= 180.01 && Math.abs(maxX) <= 180.01 &&
+      Math.abs(minY) <= 90.01  && Math.abs(maxY) <= 90.01;
 
-    const lngToCol = (lng: number) => ((lng - minLng) / lngSpan) * width;
-    const latToRow = (lat: number) => ((maxLat - lat) / latSpan) * height;
+    let resM: number;
+    let lngToCol: (lng: number) => number;
+    let latToRow: (lat: number) => number;
+
+    if (isGeographic) {
+      // ── WGS84 degrees ───────────────────────────────────────────────────────
+      const lngSpan = maxX - minX;
+      const latSpan = maxY - minY;
+      const midLat = (minY + maxY) / 2;
+      const resLng = (lngSpan * 111_320 * Math.cos((midLat * Math.PI) / 180)) / width;
+      const resLat = (latSpan * 111_320) / height;
+      resM = (resLng + resLat) / 2;
+      lngToCol = (lng: number) => ((lng - minX) / lngSpan) * width;
+      latToRow = (lat: number) => ((maxY - lat) / latSpan) * height;
+    } else {
+      // ── Projected metres (EPSG:3857 Web Mercator) ───────────────────────────
+      // x = lng * 20037508.34 / 180
+      // y = ln(tan(π/4 + lat*π/360)) * 180/π * 20037508.34/180
+      const xSpan = maxX - minX;
+      const ySpan = maxY - minY;
+      resM = (xSpan / width + ySpan / height) / 2;
+
+      const lngToX = (lng: number) => lng * 20_037_508.34 / 180;
+      const latToY = (lat: number) => {
+        const rad = lat * Math.PI / 180;
+        return Math.log(Math.tan(Math.PI / 4 + rad / 2)) * (180 / Math.PI) * (20_037_508.34 / 180);
+      };
+      lngToCol = (lng: number) => ((lngToX(lng) - minX) / xSpan) * width;
+      latToRow = (lat: number) => ((maxY - latToY(lat)) / ySpan) * height;
+    }
 
     const segmentMetrics: DsmSegmentMetrics[] = segments.map((path, segIdx) => {
       const pixelPoly: [number, number][] = path.map(p => [lngToCol(p.lng), latToRow(p.lat)]);

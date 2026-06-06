@@ -68,13 +68,20 @@ export default function App() {
       );
       return;
     }
-    initDb()
-      .then(() => setDbBanner(null))
-      .catch((e: unknown) => {
-        console.error('[RoofIQ] initDb', e);
-        const msg = e instanceof Error ? e.message : 'Initialization failed.';
-        setDbBanner(`Could not reach the database: ${msg}`);
-      });
+    // Retry once after 2s — Safari/ITP sometimes blocks the first attempt cold
+    const tryInit = (attempt: number) =>
+      initDb()
+        .then(() => setDbBanner(null))
+        .catch((e: unknown) => {
+          if (attempt < 2) {
+            setTimeout(() => tryInit(attempt + 1), 2000);
+            return;
+          }
+          console.error('[RoofIQ] initDb', e);
+          const msg = e instanceof Error ? e.message : 'Initialization failed.';
+          setDbBanner(`Could not reach the database: ${msg}`);
+        });
+    tryInit(1);
   }, []);
 
   useEffect(() => {

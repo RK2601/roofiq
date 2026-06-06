@@ -314,13 +314,29 @@ export default function WizardWorkflowReportView({
         facingDirection?: string;
       } | null;
       const dsm = segment as { dsmPitchRatio?: string; dsmFacingDirection?: string };
+
+      // Compute area without depending on Google Maps being loaded.
+      // Spherical shoelace formula: project lat/lng to metres at the centroid latitude,
+      // then apply the standard 2D shoelace formula. Accurate to <0.5% for roof-sized polygons.
       let areaSqFt = 0;
-      if (typeof google !== 'undefined' && google.maps?.geometry?.spherical && segment.path.length >= 3) {
+      if (segment.path.length >= 3) {
         try {
-          const gPath = new google.maps.MVCArray(segment.path.map(p => new google.maps.LatLng(p.lat, p.lng)));
-          const poly = new google.maps.Polygon({ paths: gPath });
-          areaSqFt = Math.round(google.maps.geometry.spherical.computeArea(poly.getPath()) * 10.7639);
-          gPath.clear();
+          const path = segment.path;
+          const n = path.length;
+          const centLat = (path.reduce((s, p) => s + p.lat, 0) / n) * (Math.PI / 180);
+          const cosLat = Math.cos(centLat);
+          const R = 6_371_000; // Earth radius metres
+          let area = 0;
+          for (let j = 0; j < n; j++) {
+            const a = path[j];
+            const b = path[(j + 1) % n];
+            const ax = a.lng * (Math.PI / 180) * R * cosLat;
+            const ay = a.lat * (Math.PI / 180) * R;
+            const bx = b.lng * (Math.PI / 180) * R * cosLat;
+            const by = b.lat * (Math.PI / 180) * R;
+            area += ax * by - bx * ay;
+          }
+          areaSqFt = Math.round(Math.abs(area / 2) * 10.7639);
         } catch {
           areaSqFt = 0;
         }
@@ -662,155 +678,126 @@ export default function WizardWorkflowReportView({
         </div>
       </div>
 
-      {diagramBounds && reportPolygons.length > 0 && (() => {
-        // ViewBox must include every painted primitive (fills, topology, structural cues,
-        // label callouts). Using polygon points alone can clip edges/labels in PDF rasterization.
-        const pad = 50;
-        let minX = Infinity;
-        let minY = Infinity;
-        let maxX = -Infinity;
-        let maxY = -Infinity;
-        let any = false;
-        const add = (x: number, y: number) => {
-          if (!Number.isFinite(x) || !Number.isFinite(y)) return;
-          any = true;
-          minX = Math.min(minX, x);
-          minY = Math.min(minY, y);
-          maxX = Math.max(maxX, x);
-          maxY = Math.max(maxY, y);
+      {reportPolygons.length > 0 && (() => {
+        const totalArea = reportPolygons.reduce((s, p) => s + p.areaSqFt, 0);
+        const sorted = [...reportPolygons].sort((a, b) => b.areaSqFt - a.areaSqFt);
+        const hasDsm = reportPolygons.some(p => p.isDsm);
+
+        // Compass arrow: rotate a ↑ arrow to the facing direction
+        const facingDeg: Record<string, number> = {
+          N: 0, NE: 45, E: 90, SE: 135, S: 180, SW: 225, W: 270, NW: 315,
         };
 
-        reportPolygons
-          .filter(p => p.points.length >= 3)
-          .forEach(p => p.points.forEach(pt => add(pt.x, pt.y)));
-        topoEdges.forEach(e => {
-          add(e.x1, e.y1);
-          add(e.x2, e.y2);
-        });
-        reportEdges.forEach(e => {
-          add(e.x1, e.y1);
-          add(e.x2, e.y2);
-        });
-        reportPolygons.forEach(p => {
-          add(p.center.x - 70, p.center.y - 22);
-          add(p.center.x + 70, p.center.y + 18);
-        });
-
-        const viewBox = !any
-          ? `0 0 ${diagramWidth} ${diagramHeight}`
-          : `${minX - pad} ${minY - pad} ${Math.max(1, maxX - minX + pad * 2)} ${Math.max(1, maxY - minY + pad * 2)}`;
-
         return (
-        <div
-          className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm"
-          data-pdf-keep-on-one-page
-          data-pdf-no-scale
-        >
-          <h4 className="text-sm font-semibold text-slate-800 mb-1">Pitch and direction (schematic)</h4>
-          <p className="text-[11px] text-slate-500 mb-3">
-            Topology-corrected diagram — shared edges drawn once, vertices snapped.
-            {reportPolygons.some(p => p.isDsm) && <span className="ml-1 text-cyan-600 font-medium">⚡ DSM pitch values</span>}
-          </p>
-          <div className="flex w-full justify-center overflow-visible" data-pdf-pitch-schematic-squash>
-            <svg
-              viewBox={viewBox}
-              preserveAspectRatio="xMidYMid meet"
-              overflow="visible"
-              className="rounded-lg border border-slate-200 bg-white mx-auto w-full max-w-full block"
-              style={{ height: 'auto' }}
-            >
-              {/* ── Layer 1: fills (no stroke — edges drawn separately below) ── */}
-              {reportPolygons.map(poly => (
-                <polygon
-                  key={`fill-${poly.id}`}
-                  points={poly.points.map(p => `${p.x},${p.y}`).join(' ')}
-                  fill={`${poly.color}28`}
-                  stroke="none"
-                />
-              ))}
+          <div className="rounded-xl border border-slate-200 bg-white shadow-sm overflow-hidden">
+            {/* Header */}
+            <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
+              <div>
+                <h4 className="text-sm font-semibold text-slate-800">Segment breakdown</h4>
+                <p className="text-[11px] text-slate-400 mt-0.5">
+                  Pitch · facing · area for each mapped roof plane — sorted largest first
+                  {hasDsm && <span className="ml-1.5 text-cyan-600 font-medium">⚡ DSM values</span>}
+                </p>
+              </div>
+              <div className="text-right">
+                <p className="text-xs text-slate-500">Total mapped</p>
+                <p className="text-sm font-bold text-slate-900">{totalArea.toLocaleString()} sq ft</p>
+              </div>
+            </div>
 
-              {/* ── Layer 2: topology edges — one line per boundary ── */}
-              {topoEdges.map((edge, i) => {
-                const isShared = edge.polyIndices.length > 1;
-                // For boundary edges use the owning segment's colour; shared = neutral dark
-                const segColor = isShared
-                  ? '#1e293b'
-                  : (reportPolygons[edge.polyIndices[0]]?.color ?? '#64748b');
-                return (
-                  <line
-                    key={`topo-${i}`}
-                    x1={edge.x1} y1={edge.y1}
-                    x2={edge.x2} y2={edge.y2}
-                    stroke={segColor}
-                    strokeWidth={isShared ? 1.5 : 2.5}
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    opacity={isShared ? 0.55 : 1}
-                  />
-                );
-              })}
-
-              {/* ── Layer 3: structural cues (ridge / valley / hip etc.) ── */}
-              {reportEdges.map(edge => (
-                <line
-                  key={edge.id}
-                  x1={edge.x1} y1={edge.y1}
-                  x2={edge.x2} y2={edge.y2}
-                  stroke={edge.color}
-                  strokeWidth={2.2}
-                  strokeDasharray={edge.dash.length > 0 ? edge.dash.join(' ') : undefined}
-                  strokeLinecap="round"
-                  opacity={0.85}
-                />
-              ))}
-
-              {/* ── Layer 4: labels at polygon centroid ── */}
-              {reportPolygons.map(poly => {
-                if (poly.points.length < 3) return null;
-                const cx = poly.center.x;
-                const cy = poly.center.y;
-                const hasArea = poly.areaSqFt > 0;
-                const rW = 72;
-                const rH = hasArea ? 26 : 18;
-                return (
-                  <g key={`label-${poly.id}`}>
-                    <rect
-                      x={cx - rW / 2} y={cy - rH / 2}
-                      width={rW} height={rH} rx={4}
-                      fill="white" opacity={0.88}
-                    />
-                    <text
-                      x={cx}
-                      y={hasArea ? cy - 4 : cy + 4}
-                      textAnchor="middle" dominantBaseline="middle"
-                      fontSize="10" fontWeight="700" fill="#0f172a"
-                    >
-                      {poly.pitch} · {poly.facing}
-                    </text>
-                    {hasArea && (
-                      <text
-                        x={cx} y={cy + 9}
-                        textAnchor="middle" dominantBaseline="middle"
-                        fontSize="9" fill="#475569"
+            {/* Table */}
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="bg-slate-50 border-b border-slate-100">
+                    <th className="text-left px-4 py-2 font-semibold text-slate-500 w-8">#</th>
+                    <th className="text-left px-4 py-2 font-semibold text-slate-500">Pitch</th>
+                    <th className="text-left px-4 py-2 font-semibold text-slate-500">Facing</th>
+                    <th className="text-right px-4 py-2 font-semibold text-slate-500">Area</th>
+                    <th className="text-right px-4 py-2 font-semibold text-slate-500 pr-4">% of total</th>
+                    <th className="px-4 py-2 w-32" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {sorted.map((poly, idx) => {
+                    const pct = totalArea > 0 ? Math.round((poly.areaSqFt / totalArea) * 100) : 0;
+                    const deg = facingDeg[poly.facing.toUpperCase()] ?? null;
+                    return (
+                      <tr
+                        key={poly.id}
+                        className={idx % 2 === 0 ? 'bg-white' : 'bg-slate-50/60'}
+                        style={{ borderLeft: `3px solid ${poly.color}` }}
                       >
-                        {poly.areaSqFt.toLocaleString()} sq ft
-                      </text>
-                    )}
-                  </g>
-                );
-              })}
-            </svg>
-          </div>
+                        {/* Index */}
+                        <td className="px-3 py-2.5 text-slate-400 font-medium">{idx + 1}</td>
 
-          {/* Edge legend */}
-          <div className="mt-3 flex flex-wrap gap-3 text-[11px] text-slate-500">
-            <span className="flex items-center gap-1.5"><span className="inline-block w-6 border-t-2 border-slate-800 opacity-100" /> Boundary edge</span>
-            <span className="flex items-center gap-1.5"><span className="inline-block w-6 border-t border-slate-500 opacity-55" /> Shared edge (plane division)</span>
-            {reportEdges.some(e => e.type === 'ridge') && <span className="flex items-center gap-1.5"><span className="inline-block w-6 border-t-2 border-red-500" /> Ridge</span>}
-            {reportEdges.some(e => e.type === 'valley') && <span className="flex items-center gap-1.5"><span className="inline-block w-6 border-t-2 border-blue-500" /> Valley</span>}
-            {reportEdges.some(e => e.type === 'hip') && <span className="flex items-center gap-1.5"><span className="inline-block w-6 border-t-2 border-orange-500" /> Hip</span>}
+                        {/* Pitch badge */}
+                        <td className="px-4 py-2.5">
+                          <span
+                            className="inline-block font-bold text-[11px] px-2 py-0.5 rounded"
+                            style={{ backgroundColor: `${poly.color}22`, color: poly.color }}
+                          >
+                            {poly.pitch !== 'n/a' ? poly.pitch : '—'}
+                          </span>
+                        </td>
+
+                        {/* Facing + compass arrow */}
+                        <td className="px-4 py-2.5">
+                          <span className="flex items-center gap-1.5 text-slate-700 font-medium">
+                            {deg !== null && (
+                              <svg width="12" height="12" viewBox="0 0 12 12" style={{ transform: `rotate(${deg}deg)`, flexShrink: 0 }}>
+                                <path d="M6 1 L8.5 9 L6 7.5 L3.5 9 Z" fill={poly.color} />
+                              </svg>
+                            )}
+                            {poly.facing !== 'n/a' ? poly.facing : '—'}
+                          </span>
+                        </td>
+
+                        {/* Area */}
+                        <td className="px-4 py-2.5 text-right font-semibold text-slate-900">
+                          {poly.areaSqFt > 0 ? `${poly.areaSqFt.toLocaleString()} sq ft` : '—'}
+                        </td>
+
+                        {/* % + bar */}
+                        <td className="px-4 py-2.5 pr-4 text-right">
+                          <div className="flex items-center justify-end gap-2">
+                            <div className="w-20 h-1.5 rounded-full bg-slate-100 overflow-hidden">
+                              <div
+                                className="h-full rounded-full"
+                                style={{ width: `${pct}%`, backgroundColor: poly.color }}
+                              />
+                            </div>
+                            <span className="text-slate-600 w-8 text-right">{pct}%</span>
+                          </div>
+                        </td>
+
+                        {/* DSM badge */}
+                        <td className="px-4 py-2.5">
+                          {poly.isDsm && (
+                            <span className="text-[10px] font-semibold text-cyan-700 bg-cyan-50 border border-cyan-200 px-1.5 py-0.5 rounded">
+                              DSM
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+                {/* Footer totals */}
+                <tfoot>
+                  <tr className="border-t border-slate-200 bg-slate-50">
+                    <td colSpan={3} className="px-4 py-2 text-xs font-semibold text-slate-600">
+                      {sorted.length} segment{sorted.length !== 1 ? 's' : ''}
+                    </td>
+                    <td className="px-4 py-2 text-right text-xs font-bold text-slate-900">
+                      {totalArea.toLocaleString()} sq ft
+                    </td>
+                    <td colSpan={2} className="px-4 py-2 text-right text-xs font-semibold text-slate-500">100%</td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
           </div>
-        </div>
         );
       })()}
 
@@ -882,63 +869,39 @@ export default function WizardWorkflowReportView({
               {m.totalRakeFt > 0 && <span className="flex items-center gap-1"><span className="w-4 border-t-2 border-purple-500 inline-block" />Rake {Math.round(m.totalRakeFt)} ft</span>}
             </div>
 
-            {/* Inline unfolded diagram — uses pre-computed viewBox so no clipping */}
+            {/* Solar facet schematic — proportional plane layout */}
             {placedFacets.length > 0 && (() => {
-              // Prefer the server-computed viewBox (accounts for minX/minY correctly).
-              // Fall back to manual bounds if svg metadata wasn't stored.
-              let viewBox = solar.svg?.viewBox ?? '';
-              if (!viewBox) {
-                const minX = Math.min(...placedFacets.map(f => f.placement!.x));
-                const minY = Math.min(...placedFacets.map(f => f.placement!.y));
-                const maxX = Math.max(...placedFacets.map(f => f.placement!.x + f.placement!.w));
-                const maxY = Math.max(...placedFacets.map(f => f.placement!.y + f.placement!.h));
-                const vpad = 20;
-                viewBox = `${minX - vpad} ${minY - vpad} ${maxX - minX + vpad * 2} ${maxY - minY + vpad * 2}`;
-              }
-              // Expand viewBox to include actual polygon outline extremes (outlinePx can exceed placement rect)
-              if (!solar.svg?.viewBox) {
-                let exMinX = Infinity, exMinY = Infinity, exMaxX = -Infinity, exMaxY = -Infinity;
-                for (const f of placedFacets) {
-                  const p = f.placement!;
-                  if (p.outlinePx && p.outlinePx.length > 0) {
-                    for (const pt of p.outlinePx) {
-                      exMinX = Math.min(exMinX, p.x + pt.x); exMinY = Math.min(exMinY, p.y + pt.y);
-                      exMaxX = Math.max(exMaxX, p.x + pt.x); exMaxY = Math.max(exMaxY, p.y + pt.y);
-                    }
-                  } else {
-                    exMinX = Math.min(exMinX, p.x); exMinY = Math.min(exMinY, p.y);
-                    exMaxX = Math.max(exMaxX, p.x + p.w); exMaxY = Math.max(exMaxY, p.y + p.h);
-                  }
-                }
-                if (isFinite(exMinX)) {
-                  const vpad = 30;
-                  viewBox = `${exMinX - vpad} ${exMinY - vpad} ${exMaxX - exMinX + vpad * 2} ${exMaxY - exMinY + vpad * 2}`;
-                }
-              }
+              const xs = placedFacets.flatMap(f => [f.placement!.x, f.placement!.x + f.placement!.w]);
+              const ys = placedFacets.flatMap(f => [f.placement!.y, f.placement!.y + f.placement!.h]);
+              const pad = 24;
+              const vbX = Math.min(...xs) - pad;
+              const vbY = Math.min(...ys) - pad;
+              const vbW = Math.max(...xs) - Math.min(...xs) + pad * 2;
+              const vbH = Math.max(...ys) - Math.min(...ys) + pad * 2;
+              const FC = FACET_COLORS;
               return (
-                <div className="w-full mb-4 flex justify-center" data-pdf-keep-on-one-page>
-                  <div className="w-full flex justify-center" data-pdf-solar-structure-diagram-shrink>
-                    <svg viewBox={viewBox} overflow="visible" className="w-full h-auto rounded-lg border border-slate-200 bg-slate-50 block mx-auto">
-                      {placedFacets.map((f, i) => {
+                <div className="mb-4 rounded-xl border border-slate-200 bg-slate-50 p-3 overflow-hidden" data-pdf-keep-on-one-page data-pdf-no-scale>
+                  <p className="text-[10px] text-slate-400 uppercase tracking-wide font-semibold mb-2">Roof plane schematic — proportional to pitch &amp; area</p>
+                  <svg viewBox={`${vbX} ${vbY} ${vbW} ${vbH}`} className="w-full h-auto rounded-lg" style={{ maxHeight: 300 }} overflow="visible">
+                    {placedFacets.map((f, i) => {
                       const p = f.placement!;
                       const cx = p.x + p.w / 2;
                       const cy = p.y + p.h / 2;
-                      const color = FACET_COLORS[i % FACET_COLORS.length];
+                      const color = FC[i % FC.length];
                       const hasOutline = p.outlinePx && p.outlinePx.length >= 3;
-                      const shapePoints = hasOutline
+                      const pts = hasOutline
                         ? p.outlinePx!.map(pt => `${p.x + pt.x},${p.y + pt.y}`).join(' ')
-                        : `${p.x},${p.y} ${p.x + p.w},${p.y} ${p.x + p.w},${p.y + p.h} ${p.x},${p.y + p.h}`;
-                      const fontSize = Math.max(8, Math.min(13, p.w / 9));
+                        : `${p.x},${p.y} ${p.x+p.w},${p.y} ${p.x+p.w},${p.y+p.h} ${p.x},${p.y+p.h}`;
+                      const fs = Math.max(7, Math.min(11, p.w / 9, p.h / 3));
                       return (
                         <g key={f.index}>
-                          <polygon points={shapePoints} fill={`${color}22`} stroke={color} strokeWidth={1.5} strokeLinejoin="round" />
-                          <text x={cx} y={cy - fontSize * 0.6} textAnchor="middle" fontSize={fontSize} fontWeight="700" fill="#0f172a">{f.pitchLabel} · {f.facingLabel}</text>
-                          <text x={cx} y={cy + fontSize * 0.9} textAnchor="middle" fontSize={Math.max(7, fontSize - 1)} fill="#475569">{Math.round(f.actualAreaSqFt).toLocaleString()} sq ft</text>
+                          <polygon points={pts} fill={`${color}28`} stroke={color} strokeWidth={1.4} strokeLinejoin="round" />
+                          <text x={cx} y={cy - fs * 0.6} textAnchor="middle" fontSize={fs} fontWeight="600" fill="#0f172a" fontFamily="Inter,system-ui,sans-serif">{f.pitchLabel} · {f.facingLabel}</text>
+                          <text x={cx} y={cy + fs * 1.1} textAnchor="middle" fontSize={Math.max(6, fs - 1.5)} fill="#475569" fontFamily="Inter,system-ui,sans-serif">{Math.round(f.actualAreaSqFt).toLocaleString()} sq ft</text>
                         </g>
                       );
                     })}
-                    </svg>
-                  </div>
+                  </svg>
                 </div>
               );
             })()}
@@ -1006,12 +969,25 @@ export default function WizardWorkflowReportView({
                         className="w-20 h-20 object-cover rounded-lg border border-slate-200 shadow-sm"
                       />
                       {photo.depthMapUrl && (
-                        <img
-                          src={photo.depthMapUrl}
-                          alt="Depth map"
-                          className="w-20 h-20 object-cover rounded-lg border border-violet-200 shadow-sm"
-                          title="Depth Pro heat map"
-                        />
+                        <div className="relative w-20 h-20 shrink-0">
+                          <img
+                            src={photo.depthMapUrl}
+                            alt="Depth map"
+                            className="w-20 h-20 object-cover rounded-lg border border-violet-200 shadow-sm"
+                            title="Depth Pro heat map"
+                            onError={e => {
+                              const img = e.currentTarget as HTMLImageElement;
+                              img.style.display = 'none';
+                              const sib = img.nextElementSibling as HTMLElement | null;
+                              if (sib) sib.style.display = 'flex';
+                            }}
+                          />
+                          {/* shown only when image fails to load */}
+                          <div className="w-20 h-20 rounded-lg border border-violet-100 bg-violet-50 hidden flex-col items-center justify-center gap-0.5 absolute inset-0">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#8b5cf6" strokeWidth="1.5"><path d="M12 2a10 10 0 1 1 0 20A10 10 0 0 1 12 2z"/><path d="M12 16v-4m0-4h.01"/></svg>
+                            <span className="text-[8px] text-violet-400 text-center leading-tight px-1">Depth map<br/>unavailable</span>
+                          </div>
+                        </div>
                       )}
                     </div>
                   ) : (

@@ -41,6 +41,24 @@ interface ReplicatePrediction {
   error?: string;
 }
 
+/** Convert any URL to a base64 data URL so it renders in any context (other windows, html2canvas). */
+async function urlToDataUrl(url: string): Promise<string> {
+  if (!url || url.startsWith('data:')) return url;
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return url;
+    const blob = await res.blob();
+    return await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve(reader.result as string);
+      reader.onerror = () => reject(new Error('FileReader failed'));
+      reader.readAsDataURL(blob);
+    });
+  } catch {
+    return url; // fallback: keep original URL
+  }
+}
+
 async function callDepthPro(imageDataUrl: string): Promise<string> {
   const createRes = await fetch('/api/proxy-replicate?path=predictions', {
     method: 'POST',
@@ -73,12 +91,18 @@ async function callDepthPro(imageDataUrl: string): Promise<string> {
   if (pred.status !== 'succeeded' || !pred.output) throw new Error('DEPTH_TIMEOUT');
 
   const out = pred.output;
+  let rawUrl = '';
   if (typeof out === 'object' && !Array.isArray(out)) {
-    return (out as Record<string, string>).color_map ?? '';
+    rawUrl = (out as Record<string, string>).color_map ?? '';
+  } else if (typeof out === 'string') {
+    rawUrl = out;
+  } else if (Array.isArray(out)) {
+    rawUrl = out[0];
   }
-  if (typeof out === 'string') return out;
-  if (Array.isArray(out)) return out[0];
-  return '';
+
+  // Convert Replicate CDN URL → base64 data URL so it renders in any browser
+  // context (other windows, PDF export, html2canvas) without CORS issues.
+  return urlToDataUrl(rawUrl);
 }
 
 // ─── Depth-map → pitch extraction ─────────────────────────────────────────────

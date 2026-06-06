@@ -3,7 +3,22 @@
  * Does not expose key values.
  */
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { resolveGeminiApiKeyForServer, resolveOpenAiApiKey } from './resolveEnvKeys';
+
+function resolveOpenAiApiKey(): string {
+  return (
+    (process.env.OPENAI_API_KEY || '').trim() ||
+    (process.env.OPENAI_KEY || '').trim() ||
+    (process.env.VITE_OPENAI_API_KEY || '').trim()
+  );
+}
+
+function resolveGeminiApiKeyForServer(): string {
+  return (
+    (process.env.VITE_GOOGLE_AI_KEY || '').trim() ||
+    (process.env.GEMINI_API_KEY || '').trim() ||
+    (process.env.GOOGLE_GENERATIVE_AI_API_KEY || '').trim()
+  );
+}
 
 export default function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader('Access-Control-Allow-Origin', '*');

@@ -236,39 +236,59 @@ async function flushLayout(): Promise<void> {
 }
 
 /**
- * Rasterises the live wizard report DOM into a multi-page A4 PDF.
+ * Rasterises the live wizard report DOM into a PDF.
  *
- * Smart page breaks: block positions of every [data-pdf-keep-on-one-page] element
- * are measured in the cloned DOM after layout is applied. The slicing loop then
- * snaps page cut points to just before any keep-block, so no block ever splits
- * across pages regardless of how tall the content above it is.
+ * Strategy: single very-tall page when content fits within the PDF spec max
+ * (14,400 pt ≈ 200 inches). For longer reports we slice into A4 pages but
+ * WITHOUT the smart-break whitespace — slices fall every full page-height so
+ * there are no blank gaps and no mid-element cuts from spacing logic.
+ *
+ * Text-shift fix: we wait for document.fonts.ready so html2canvas always uses
+ * the correct Inter/system-UI font metrics when positioning text inside pills,
+ * badges and score circles. Without this, fallback fonts with different metrics
+ * cause text to render a few pixels below the coloured background.
  */
 export async function downloadWizardReportPdf(
   rootElement: HTMLElement,
   report: WizardWorkflowReportPayload
 ): Promise<void> {
-  const pdf = new jsPDF({
-    orientation: 'portrait',
-    unit: 'pt',
-    format: 'a4',
-    compress: false,
-  });
-  const pageWidth = pdf.internal.pageSize.getWidth();
-  const pageHeight = pdf.internal.pageSize.getHeight();
-  const margin = 20;
-  const contentW = pageWidth - margin * 2;
-  const contentH = pageHeight - margin * 2;
+  // A4 width in points (1 pt = 1/72 inch).
+  const PAGE_WIDTH_PT = 595.28;
+  const margin = 20; // pt on every side
+  const contentW = PAGE_WIDTH_PT - margin * 2;
+  // PDF spec hard cap: 14 400 pt (200 in). Beyond this jsPDF falls back to A4.
+  const PDF_MAX_PAGE_HEIGHT_PT = 14_400;
+
+  // We pass a dummy contentH large enough that no keep-block scaling fires.
+  const DUMMY_CONTENT_H = 99_999;
+
+  // ── Font pre-load ──────────────────────────────────────────────────────────
+  // Ensures html2canvas uses the correct font metrics so text sits centred
+  // inside coloured pills/circles instead of shifted down.
+  if (typeof document !== 'undefined' && document.fonts?.ready) {
+    await document.fonts.ready;
+  }
 
   await flushLayout();
   await waitForImages(rootElement);
   await flushLayout();
 
   const w0 = Math.max(1, rootElement.scrollWidth);
-  // Limit scale by width only — height is fine because we slice into pages
-  const scale = Math.min(PDF_HTML2CANVAS_SCALE_CAP, PDF_RASTER_MAX_EDGE_PX / w0);
+  const h0 = Math.max(1, rootElement.scrollHeight);
 
-  // Collected during onclone — positions in clone CSS px (before ×scale)
-  const keepBlocksClonePx: Array<{ top: number; bottom: number }> = [];
+  // ── Safe scale calculation ─────────────────────────────────────────────────
+  // Browsers silently truncate canvas when total pixels exceed ~268M (Chrome).
+  // Truncation causes partial capture + text/background misalignment in the PDF.
+  // We cap total canvas pixels at 200M to stay well within all browser limits,
+  // while keeping quality as high as possible (minimum 1.5x for readability).
+  const BROWSER_MAX_CANVAS_PX = 200_000_000;
+  let scale = Math.min(PDF_HTML2CANVAS_SCALE_CAP, PDF_RASTER_MAX_EDGE_PX / w0);
+  const canvasW = Math.ceil(w0 * scale);
+  const safeMaxH = Math.floor(BROWSER_MAX_CANVAS_PX / canvasW);
+  if (h0 * scale > safeMaxH) {
+    scale = Math.max(1.5, safeMaxH / h0);
+  }
+
   type LinkItem = { top: number; bottom: number; left: number; right: number; url: string };
   const linkItemsClonePx: LinkItem[] = [];
 
@@ -284,21 +304,11 @@ export async function downloadWizardReportPdf(
       scrollY: 0,
       onclone: (_clonedDoc, clonedEl) => {
         const el = clonedEl as HTMLElement;
-        applyPdfCloneLayout(el, contentW, contentH);
-        void el.offsetHeight; // force reflow so getBoundingClientRect is accurate
+        applyPdfCloneLayout(el, contentW, DUMMY_CONTENT_H);
+        void el.offsetHeight;
 
-        // Measure every keep-block's position relative to the cloned root.
-        // html2canvas places the clone off-screen at a fixed position, so
-        // getBoundingClientRect() is valid and relative subtraction gives layout offset.
-        const rootRect = el.getBoundingClientRect();
-        el.querySelectorAll<HTMLElement>(PDF_KEEP_ON_ONE_PAGE).forEach(block => {
-          const rect = block.getBoundingClientRect();
-          keepBlocksClonePx.push({
-            top: rect.top - rootRect.top,
-            bottom: rect.bottom - rootRect.top,
-          });
-        });
         // Collect clickable links for PDF annotations
+        const rootRect = el.getBoundingClientRect();
         el.querySelectorAll<HTMLElement>('[data-pdf-href]').forEach(link => {
           const url = link.getAttribute('data-pdf-href') ?? '';
           if (!url) return;
@@ -321,107 +331,84 @@ export async function downloadWizardReportPdf(
     throw new Error('Could not capture the report (empty canvas). Try refreshing the page.');
   }
 
-  // Convert clone CSS-px positions → canvas pixel positions
-  const keepBlocksCanvas = keepBlocksClonePx.map(b => ({
-    top: b.top * scale,
-    bottom: b.bottom * scale,
-  }));
-  const linkItemsCanvas = linkItemsClonePx.map(l => ({
-    ...l,
-    top: l.top * scale,
-    bottom: l.bottom * scale,
-    left: l.left * scale,
-    right: l.right * scale,
-  }));
+  // ── Page dimensions: canvas aspect ratio maps 1-to-1 onto PDF points ──────
+  // Image fills the full page (no margins) so there is zero ratio mismatch —
+  // every canvas pixel maps to exactly (PAGE_WIDTH_PT / canvas.width) pt both
+  // horizontally AND vertically. This eliminates the text-below-background
+  // shift that occurs when page and image aspect ratios differ even slightly.
+  const ptPerPx = PAGE_WIDTH_PT / canvas.width;          // exact pt per canvas px
+  const fullPageH = canvas.height * ptPerPx;             // total content height in pt
+  const pdfPerCanvasPx = ptPerPx;                        // same ratio, named clearly
 
-  const imgScaledW = contentW;
-  const imgScaledH = (canvas.height * imgScaledW) / canvas.width;
-  const pdfPerCanvasPx = imgScaledH / canvas.height;
-  const pageCanvasH = contentH / pdfPerCanvasPx;
+  const useSinglePage = fullPageH <= PDF_MAX_PAGE_HEIGHT_PT;
+  const pageHeightPt  = useSinglePage ? fullPageH : 841.89; // A4 for long reports
+  const pageCanvasPx  = useSinglePage ? canvas.height : pageHeightPt / ptPerPx;
 
-  // Track the canvas-Y where each PDF page starts (for link annotation placement)
-  const pageStartsCanvas: number[] = [];
+  const pdf = new jsPDF({
+    orientation: 'portrait',
+    unit: 'pt',
+    format: [PAGE_WIDTH_PT, pageHeightPt],
+    compress: false,
+  });
 
-  let yCanvas = 0;
-  let pageIdx = 0;
-
-  while (yCanvas < canvas.height - 0.5) {
-    pageStartsCanvas.push(yCanvas);
-    let yEnd = Math.min(yCanvas + pageCanvasH, canvas.height);
-
-    // Smart page break: if the natural cut point falls inside a keep-block,
-    // snap it to just before that block's top so the block starts fresh on
-    // the next page. This is the core mechanism that prevents splits.
-    for (const block of keepBlocksCanvas) {
-      const blockAlreadyStarted = block.top <= yCanvas + 2;
-      const cutInsideBlock = yEnd > block.top + 4 && yEnd < block.bottom - 4;
-      if (!blockAlreadyStarted && cutInsideBlock) {
-        // Leave whitespace at the bottom of this page and start fresh
-        const candidate = Math.max(yCanvas + 1, block.top);
-        if (candidate < yEnd) {
-          yEnd = candidate;
-        }
-        break;
-      }
-    }
-
-    const sliceCanvasH = yEnd - yCanvas;
-    if (!(sliceCanvasH > 0)) break;
-
-    const slicePdfH = sliceCanvasH * pdfPerCanvasPx;
-
-    const slice = document.createElement('canvas');
-    slice.width = canvas.width;
-    slice.height = Math.max(1, Math.ceil(sliceCanvasH));
-    const ctx = slice.getContext('2d');
-    if (!ctx) break;
+  // Helper: rasterise a vertical strip of the canvas into one PDF page
+  async function addStrip(yStart: number, yEnd: number): Promise<void> {
+    const stripH = Math.max(1, Math.ceil(yEnd - yStart));
+    const strip = document.createElement('canvas');
+    strip.width  = canvas.width;
+    strip.height = stripH;
+    const ctx = strip.getContext('2d');
+    if (!ctx) return;
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
     ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, slice.width, slice.height);
-    ctx.drawImage(canvas, 0, yCanvas, canvas.width, sliceCanvasH, 0, 0, slice.width, slice.height);
-
+    ctx.fillRect(0, 0, strip.width, strip.height);
+    ctx.drawImage(canvas, 0, yStart, canvas.width, stripH, 0, 0, strip.width, stripH);
     let data: string;
     try {
-      // JPEG at 0.97 quality — jsPDF embeds JPEG natively without re-compression, giving
-      // sharper results than PNG which jsPDF internally re-encodes.
-      data = slice.toDataURL('image/jpeg', 0.97);
+      data = strip.toDataURL('image/jpeg', 0.97);
     } catch (err) {
-      const hint =
-        err instanceof DOMException && err.name === 'SecurityError'
-          ? ' A cross-origin image blocked export (try again after photos/maps finish loading).'
-          : '';
+      const hint = err instanceof DOMException && err.name === 'SecurityError'
+        ? ' A cross-origin image blocked export.' : '';
       throw new Error(`Could not build PDF image data.${hint}`);
     }
-    if (pageIdx > 0) pdf.addPage();
-    pdf.addImage(data, 'JPEG', margin, margin, contentW, slicePdfH);
-
-    yCanvas = yEnd;
-    pageIdx++;
+    // Place image at (0,0) filling the full page width — ratio is exact
+    pdf.addImage(data, 'JPEG', 0, 0, PAGE_WIDTH_PT, stripH * ptPerPx);
   }
 
-  // Inject clickable link annotations onto the correct PDF pages
-  const canvasToPageX = (cx: number) => margin + (cx / canvas.width) * contentW;
-  const canvasToPageY = (cy: number, pageStart: number) =>
-    margin + (cy - pageStart) * pdfPerCanvasPx;
+  if (useSinglePage) {
+    await addStrip(0, canvas.height);
+  } else {
+    let yCanvas = 0;
+    let pageIdx = 0;
+    while (yCanvas < canvas.height - 0.5) {
+      const yEnd = Math.min(yCanvas + pageCanvasPx, canvas.height);
+      if (pageIdx > 0) pdf.addPage();
+      await addStrip(yCanvas, yEnd);
+      yCanvas = yEnd;
+      pageIdx++;
+    }
+  }
 
-  for (const link of linkItemsCanvas) {
-    // Find which page the top of this link falls on
+  // ── Link annotations ───────────────────────────────────────────────────────
+  const pageStartsCanvas: number[] = [];
+  for (let y = 0; y < canvas.height; y += pageCanvasPx) pageStartsCanvas.push(y);
+
+  for (const link of linkItemsClonePx) {
+    const lTop  = link.top  * scale;
+    const lLeft = link.left * scale;
+    const lW    = (link.right  - link.left) * scale * ptPerPx;
+    const lH    = (link.bottom - link.top)  * scale * ptPerPx;
+
     let pg = pageStartsCanvas.length - 1;
     for (let i = 0; i < pageStartsCanvas.length; i++) {
       const pageEnd = i + 1 < pageStartsCanvas.length ? pageStartsCanvas[i + 1] : canvas.height;
-      if (link.top >= pageStartsCanvas[i] && link.top < pageEnd) {
-        pg = i;
-        break;
-      }
+      if (lTop >= pageStartsCanvas[i] && lTop < pageEnd) { pg = i; break; }
     }
-    const pageStart = pageStartsCanvas[pg];
-    const x = canvasToPageX(link.left);
-    const y = canvasToPageY(link.top, pageStart);
-    const w = (link.right - link.left) / canvas.width * contentW;
-    const h = (link.bottom - link.top) * pdfPerCanvasPx;
+    const x = lLeft * ptPerPx;
+    const y = (lTop - pageStartsCanvas[pg]) * ptPerPx;
     pdf.setPage(pg + 1);
-    pdf.link(x, y, w, h, { url: link.url });
+    pdf.link(x, y, lW, lH, { url: link.url });
   }
 
   const slug = report.address

@@ -1,12 +1,4 @@
 import {
-  GoogleGenerativeAI,
-  HarmBlockThreshold,
-  HarmCategory,
-  SchemaType,
-} from '@google/generative-ai';
-import type { GenerateContentResult, Part, Schema } from '@google/generative-ai';
-import { readGeminiApiKey } from './googleAiKey';
-import {
   clearGeminiQuotaCooldown,
   enqueueGeminiRequest,
   GEMINI_QUOTA_ERROR,
@@ -16,6 +8,7 @@ import {
 } from './gemini429';
 import { callOpenAiFallbackJson, isOpenAiFallbackAvailable, type OpenAiFallbackTask } from './openaiFallback';
 import { ensureOpenAiServerProbe, shouldPreferOpenAiVision } from './aiProvider';
+import { callGeminiProxy, type GeminiSafetySetting, type GeminiProxyPart } from './geminiProxy';
 import type { AiRoofCue, Vec2 } from './roofStructure';
 import type { SolarBuildingInsights, SolarLatLng, SolarRoofSegment } from './solar';
 
@@ -24,33 +17,30 @@ const STATIC_MAP_URL_RE = /^https:\/\/maps\.googleapis\.com\/maps\/api\/staticma
 const GEMINI_MODEL_IDS = [
   'gemini-2.5-flash',
   'gemini-2.0-flash',
+  'gemini-2.0-flash-lite',
 ] as const;
 
-const SAFETY_RELAXED = [
-  { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
-  { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
-  { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
-  { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
-  // HARM_CATEGORY_CIVIC_INTEGRITY omitted — not supported on all model versions and causes 400 errors
+const SAFETY_RELAXED: GeminiSafetySetting[] = [
+  { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_ONLY_HIGH' },
+  { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_ONLY_HIGH' },
+  { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_ONLY_HIGH' },
+  { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_ONLY_HIGH' },
 ];
 
-const ROOF_CUE_SCHEMA: Schema = {
-  type: SchemaType.OBJECT,
+const ROOF_CUE_SCHEMA = {
+  type: 'OBJECT',
   properties: {
     cues: {
-      type: SchemaType.ARRAY,
+      type: 'ARRAY',
       items: {
-        type: SchemaType.OBJECT,
+        type: 'OBJECT',
         properties: {
-          type: {
-            type: SchemaType.STRING,
-            description: 'One of: ridge, hip, valley, eave, rake',
-          },
-          x1: { type: SchemaType.NUMBER },
-          y1: { type: SchemaType.NUMBER },
-          x2: { type: SchemaType.NUMBER },
-          y2: { type: SchemaType.NUMBER },
-          confidence: { type: SchemaType.NUMBER },
+          type: { type: 'STRING', description: 'One of: ridge, hip, valley, eave, rake' },
+          x1: { type: 'NUMBER' },
+          y1: { type: 'NUMBER' },
+          x2: { type: 'NUMBER' },
+          y2: { type: 'NUMBER' },
+          confidence: { type: 'NUMBER' },
         },
         required: ['type', 'x1', 'y1', 'x2', 'y2', 'confidence'],
       },
@@ -74,10 +64,10 @@ export interface RoofPhotoCueAnalysis {
   byType: Record<VisionCueRaw['type'], number>;
 }
 
-const ROOF_PHOTO_CUE_SCHEMA: Schema = {
-  type: SchemaType.OBJECT,
+const ROOF_PHOTO_CUE_SCHEMA= {
+  type: 'OBJECT',
   properties: {
-    qualityScore: { type: SchemaType.NUMBER },
+    qualityScore: { type: 'NUMBER' },
     cues: ROOF_CUE_SCHEMA.properties?.cues,
   },
   required: ['qualityScore', 'cues'],
@@ -142,10 +132,6 @@ async function urlToBase64(url: string): Promise<{ data: string; mimeType: strin
     if (proxied === url) throw first;
     return fetchOne(proxied);
   }
-}
-
-function readResponseText(result: GenerateContentResult): string {
-  return result.response.text();
 }
 
 function parseVisionCueJson(text: string): VisionCueRaw[] {
@@ -244,38 +230,80 @@ export async function deriveVisionRoofCuesFromStaticMap(
   staticMapUrl: string,
   solar: SolarBuildingInsights
 ): Promise<AiRoofCue[] | null> {
-  const apiKey = readGeminiApiKey();
-  if (!apiKey) return null;
-
   const imageData = await urlToBase64(staticMapUrl).catch(() => null);
   if (!imageData) return null;
 
-  const genAI = new GoogleGenerativeAI(apiKey);
-  const parts: Part[] = [
-    { inlineData: { mimeType: imageData.mimeType || 'image/png', data: imageData.data } } as Part,
-    { text: cuePrompt(solar) } as Part,
-  ];
+  const prompt = cuePrompt(solar) + '\n\nReturn JSON only.';
 
-  for (const modelId of GEMINI_MODEL_IDS) {
+  // ── OpenAI path: preferred when server key is configured ──
+  if (await shouldPreferOpenAiVision()) {
     try {
-      const model = genAI.getGenerativeModel({
-        model: modelId,
-        generationConfig: {
-          responseMimeType: 'application/json',
-          responseSchema: ROOF_CUE_SCHEMA,
-          temperature: 0.2,
-          maxOutputTokens: 1800,
-        },
-        safetySettings: SAFETY_RELAXED,
+      const result = await callOpenAiFallbackJson<{ cues?: VisionCueRaw[] }>({
+        task: 'roof_cues',
+        prompt,
+        image: imageData,
       });
-      const result = await model.generateContent(parts);
-      const raw = parseVisionCueJson(readResponseText(result));
-      const cues = raw
+      const cues = (Array.isArray(result?.cues) ? result.cues : [])
         .map(item => normalizeCueToMeters(item, solar))
         .filter((item): item is AiRoofCue => !!item);
       if (cues.length > 0) return cues;
     } catch {
-      // Try next model.
+      // Fall through to Gemini if OpenAI fails
+    }
+  }
+
+  // ── Quota paused → skip straight to OpenAI fallback ──
+  if (isGeminiQuotaPaused()) {
+    if (isOpenAiFallbackAvailable()) {
+      try {
+        const result = await callOpenAiFallbackJson<{ cues?: VisionCueRaw[] }>({
+          task: 'roof_cues',
+          prompt,
+          image: imageData,
+        });
+        const cues = (Array.isArray(result?.cues) ? result.cues : [])
+          .map(item => normalizeCueToMeters(item, solar))
+          .filter((item): item is AiRoofCue => !!item);
+        return cues.length > 0 ? cues : null;
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+
+  // Gemini via server proxy (no direct browser calls)
+  for (const modelId of GEMINI_MODEL_IDS) {
+    try {
+      const text = await callGeminiProxy({
+        model: modelId,
+        parts: [
+          { inlineData: { mimeType: imageData.mimeType || 'image/png', data: imageData.data } },
+          { text: cuePrompt(solar) },
+        ],
+        generationConfig: { responseMimeType: 'application/json', responseSchema: ROOF_CUE_SCHEMA, temperature: 0.2, maxOutputTokens: 1800 },
+        safetySettings: SAFETY_RELAXED,
+      });
+      const raw = parseVisionCueJson(text);
+      const cues = raw.map(item => normalizeCueToMeters(item, solar)).filter((item): item is AiRoofCue => !!item);
+      if (cues.length > 0) return cues;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED') || msg.includes('QuotaFailure')) {
+        triggerGeminiQuotaCooldown('[RoofVision] Gemini rate-limited on cue detection — pausing for 15 minutes.');
+        if (isOpenAiFallbackAvailable()) {
+          try {
+            const result = await callOpenAiFallbackJson<{ cues?: VisionCueRaw[] }>({
+              task: 'roof_cues', prompt, image: imageData,
+            });
+            const cues = (Array.isArray(result?.cues) ? result.cues : [])
+              .map(item => normalizeCueToMeters(item, solar))
+              .filter((item): item is AiRoofCue => !!item);
+            return cues.length > 0 ? cues : null;
+          } catch { return null; }
+        }
+        return null;
+      }
     }
   }
   return null;
@@ -289,13 +317,9 @@ export async function deriveVisionRoofCuesFromFile(
   file: File,
   slotLabel?: string
 ): Promise<RoofPhotoCueAnalysis | null> {
-  const apiKey = readGeminiApiKey();
-  if (!apiKey) return null;
-
   const imageData = await fileToBase64(file).catch(() => null);
   if (!imageData) return null;
 
-  const genAI = new GoogleGenerativeAI(apiKey);
   const prompt = `Analyze this single roof photo and extract roof geometry cues.
 Return strict JSON with:
 - qualityScore: 0..1 overall usability of this photo for roof geometry
@@ -304,28 +328,38 @@ Cue types: ridge, hip, valley, eave, rake.
 Keep 2-16 cues max. Skip tiny noisy lines.
 ${slotLabel ? `Capture slot: ${slotLabel}.` : ''}`;
 
-  const parts: Part[] = [
-    { inlineData: { mimeType: imageData.mimeType || 'image/jpeg', data: imageData.data } } as Part,
-    { text: prompt } as Part,
-  ];
+  // Try OpenAI first if preferred
+  if (await shouldPreferOpenAiVision()) {
+    try {
+      const result = await callOpenAiFallbackJson<RoofPhotoCueAnalysis>({
+        task: 'wizard_vision',
+        prompt: prompt + '\n\nReturn JSON only.',
+        image: imageData,
+      });
+      if (result && (result.cues.length > 0 || result.qualityScore > 0.25)) return result;
+    } catch { /* fall through to Gemini proxy */ }
+  }
 
+  // Gemini via server proxy
   for (const modelId of GEMINI_MODEL_IDS) {
     try {
-      const model = genAI.getGenerativeModel({
+      const text = await callGeminiProxy({
         model: modelId,
-        generationConfig: {
-          responseMimeType: 'application/json',
-          responseSchema: ROOF_PHOTO_CUE_SCHEMA,
-          temperature: 0.2,
-          maxOutputTokens: 1800,
-        },
+        parts: [
+          { inlineData: { mimeType: imageData.mimeType || 'image/jpeg', data: imageData.data } },
+          { text: prompt },
+        ],
+        generationConfig: { responseMimeType: 'application/json', responseSchema: ROOF_PHOTO_CUE_SCHEMA, temperature: 0.2, maxOutputTokens: 1800 },
         safetySettings: SAFETY_RELAXED,
       });
-      const result = await model.generateContent(parts);
-      const analysis = parsePhotoCueJson(readResponseText(result));
+      const analysis = parsePhotoCueJson(text);
       if (analysis.cues.length > 0 || analysis.qualityScore > 0.25) return analysis;
-    } catch {
-      // Try next model.
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED')) {
+        triggerGeminiQuotaCooldown('[RoofVision] Gemini rate-limited on file cues — pausing for 15 minutes.');
+        break;
+      }
     }
   }
   return null;
@@ -380,44 +414,44 @@ export interface CombinedRoofAnalysis {
 
 // ─── Wizard Schemas ───────────────────────────────────────────────────────────
 
-const OUTLINE_ANALYSIS_SCHEMA: Schema = {
-  type: SchemaType.OBJECT,
+const OUTLINE_ANALYSIS_SCHEMA= {
+  type: 'OBJECT',
   properties: {
-    qualityScore: { type: SchemaType.NUMBER },
-    coverage: { type: SchemaType.NUMBER },
-    areaEstimateSqFt: { type: SchemaType.NUMBER },
-    notes: { type: SchemaType.STRING },
+    qualityScore: { type: 'NUMBER' },
+    coverage: { type: 'NUMBER' },
+    areaEstimateSqFt: { type: 'NUMBER' },
+    notes: { type: 'STRING' },
   },
   required: ['qualityScore', 'coverage', 'areaEstimateSqFt', 'notes'],
 };
 
-const SEGMENT_ANALYSIS_SCHEMA: Schema = {
-  type: SchemaType.OBJECT,
+const SEGMENT_ANALYSIS_SCHEMA= {
+  type: 'OBJECT',
   properties: {
-    type: { type: SchemaType.STRING, description: 'Structural type: flat, gable, hip, shed, valley, dormer, or mansard' },
-    facingDirection: { type: SchemaType.STRING, description: 'Cardinal direction this slope faces: N, NE, E, SE, S, SW, W, NW, or flat' },
-    pitchEstimate: { type: SchemaType.STRING, description: 'Slope ratio: flat, 2/12, 3/12, 4/12, 5/12, 6/12, 8/12, 10/12, 12/12, or steep' },
-    confidence: { type: SchemaType.NUMBER },
-    notes: { type: SchemaType.STRING },
+    type: { type: 'STRING', description: 'Structural type: flat, gable, hip, shed, valley, dormer, or mansard' },
+    facingDirection: { type: 'STRING', description: 'Cardinal direction this slope faces: N, NE, E, SE, S, SW, W, NW, or flat' },
+    pitchEstimate: { type: 'STRING', description: 'Slope ratio: flat, 2/12, 3/12, 4/12, 5/12, 6/12, 8/12, 10/12, 12/12, or steep' },
+    confidence: { type: 'NUMBER' },
+    notes: { type: 'STRING' },
   },
   required: ['type', 'facingDirection', 'pitchEstimate', 'confidence', 'notes'],
 };
 
 /** Batch: classify ALL segments in one Gemini call (saves quota). */
-const BATCH_SEGMENT_ANALYSIS_SCHEMA: Schema = {
-  type: SchemaType.OBJECT,
+const BATCH_SEGMENT_ANALYSIS_SCHEMA= {
+  type: 'OBJECT',
   properties: {
     segments: {
-      type: SchemaType.ARRAY,
+      type: 'ARRAY',
       items: {
-        type: SchemaType.OBJECT,
+        type: 'OBJECT',
         properties: {
-          index: { type: SchemaType.NUMBER, description: '0-based segment index matching the input order' },
-          type: { type: SchemaType.STRING, description: 'Structural type: flat, gable, hip, shed, valley, dormer, or mansard' },
-          facingDirection: { type: SchemaType.STRING, description: 'Cardinal direction this slope faces: N, NE, E, SE, S, SW, W, NW, or flat' },
-          pitchEstimate: { type: SchemaType.STRING, description: 'Slope ratio: flat, 2/12, 3/12, 4/12, 5/12, 6/12, 8/12, 10/12, 12/12, or steep' },
-          confidence: { type: SchemaType.NUMBER },
-          notes: { type: SchemaType.STRING },
+          index: { type: 'NUMBER', description: '0-based segment index matching the input order' },
+          type: { type: 'STRING', description: 'Structural type: flat, gable, hip, shed, valley, dormer, or mansard' },
+          facingDirection: { type: 'STRING', description: 'Cardinal direction this slope faces: N, NE, E, SE, S, SW, W, NW, or flat' },
+          pitchEstimate: { type: 'STRING', description: 'Slope ratio: flat, 2/12, 3/12, 4/12, 5/12, 6/12, 8/12, 10/12, 12/12, or steep' },
+          confidence: { type: 'NUMBER' },
+          notes: { type: 'STRING' },
         },
         required: ['index', 'type', 'facingDirection', 'pitchEstimate', 'confidence', 'notes'],
       },
@@ -442,7 +476,7 @@ export async function analyzeAllRoofSegments(
     ? '\nPrioritize accurate pitch (ratio), slope-facing cardinal direction, and roof type for each segment; be specific to what the satellite image shows.'
     : '';
   const imgPart = buildImagePart(imageData);
-  const textPart: Part = {
+  const textPart: GeminiProxyPart = {
     text: `You are analyzing a north-up satellite image of a building rooftop.${imgPart ? '' : ' (No image provided — use coordinates only.)'}
 The user has drawn ${allSegmentsNormalized.length} roof segments:
 ${segDesc}${refinementStr}
@@ -457,62 +491,62 @@ For EACH segment, classify:
 
 Return a JSON object with a "segments" array containing one entry per segment.
 Return JSON only.`,
-  } as Part;
-  const parts: Part[] = [imgPart, textPart].filter(Boolean) as Part[];
+  } as GeminiProxyPart;
+  const parts: GeminiProxyPart[] = [imgPart, textPart].filter(Boolean) as GeminiProxyPart[];
   const { result, error } = await runGeminiWithSchema<{ segments: SegmentAnalysis[] }>(parts, BATCH_SEGMENT_ANALYSIS_SCHEMA, 0.25, 'segment_analysis');
   if (error) console.warn('[RoofVision] analyzeAllRoofSegments failed:', error);
   else if (!result) console.warn('[RoofVision] analyzeAllRoofSegments returned null');
   return result?.segments ?? null;
 }
 
-const STRUCTURAL_DETECTION_SCHEMA: Schema = {
-  type: SchemaType.OBJECT,
+const STRUCTURAL_DETECTION_SCHEMA= {
+  type: 'OBJECT',
   properties: {
     cues: {
-      type: SchemaType.ARRAY,
+      type: 'ARRAY',
       items: {
-        type: SchemaType.OBJECT,
+        type: 'OBJECT',
         properties: {
           type: {
-            type: SchemaType.STRING,
+            type: 'STRING',
             description: 'One of: ridge, hip, valley, eave, rake, step',
           },
-          x1: { type: SchemaType.NUMBER },
-          y1: { type: SchemaType.NUMBER },
-          x2: { type: SchemaType.NUMBER },
-          y2: { type: SchemaType.NUMBER },
-          confidence: { type: SchemaType.NUMBER },
-          estimatedLengthFt: { type: SchemaType.NUMBER },
+          x1: { type: 'NUMBER' },
+          y1: { type: 'NUMBER' },
+          x2: { type: 'NUMBER' },
+          y2: { type: 'NUMBER' },
+          confidence: { type: 'NUMBER' },
+          estimatedLengthFt: { type: 'NUMBER' },
         },
         required: ['type', 'x1', 'y1', 'x2', 'y2', 'confidence', 'estimatedLengthFt'],
       },
     },
-    roofType: { type: SchemaType.STRING },
-    predominantPitch: { type: SchemaType.STRING },
-    totalAreaSqFt: { type: SchemaType.NUMBER },
-    notes: { type: SchemaType.STRING },
+    roofType: { type: 'STRING' },
+    predominantPitch: { type: 'STRING' },
+    totalAreaSqFt: { type: 'NUMBER' },
+    notes: { type: 'STRING' },
   },
   required: ['cues', 'roofType', 'predominantPitch', 'totalAreaSqFt', 'notes'],
 };
 
-const COMBINED_ANALYSIS_SCHEMA: Schema = {
-  type: SchemaType.OBJECT,
+const COMBINED_ANALYSIS_SCHEMA= {
+  type: 'OBJECT',
   properties: {
     condition: {
-      type: SchemaType.STRING,
+      type: 'STRING',
       description: 'One of: Excellent, Good, Fair, Poor, Critical',
     },
-    condition_score: { type: SchemaType.NUMBER },
-    issues: { type: SchemaType.ARRAY, items: { type: SchemaType.STRING } },
+    condition_score: { type: 'NUMBER' },
+    issues: { type: 'ARRAY', items: { type: 'STRING' } },
     urgency: {
-      type: SchemaType.STRING,
+      type: 'STRING',
       description: 'One of: Low, Medium, High, Urgent',
     },
-    estimated_remaining_life: { type: SchemaType.STRING },
-    recommendation: { type: SchemaType.STRING },
-    marketing_message: { type: SchemaType.STRING },
-    structuralSummary: { type: SchemaType.STRING },
-    photoSummary: { type: SchemaType.STRING },
+    estimated_remaining_life: { type: 'STRING' },
+    recommendation: { type: 'STRING' },
+    marketing_message: { type: 'STRING' },
+    structuralSummary: { type: 'STRING' },
+    photoSummary: { type: 'STRING' },
   },
   required: [
     'condition', 'condition_score', 'issues', 'urgency',
@@ -557,15 +591,15 @@ function polygonToNormString(
     .join(' → ');
 }
 
-function buildImagePart(imageData: { data: string; mimeType: string } | null | undefined): Part | null {
+function buildImagePart(imageData: { data: string; mimeType: string } | null | undefined): GeminiProxyPart | null {
   if (!imageData || !imageData.data || imageData.data.length < 100) return null;
-  return { inlineData: { mimeType: imageData.mimeType || 'image/png', data: imageData.data } } as Part;
+  return { inlineData: { mimeType: imageData.mimeType || 'image/png', data: imageData.data } };
 }
 
 type GeminiResult<T> = { result: T; error: null } | { result: null; error: string };
 
 /** Extract text and image from Gemini Parts array for OpenAI fallback. */
-function extractPartsForOpenAi(parts: Part[]): { prompt: string; image: { data: string; mimeType: string } | null } {
+function extractPartsForOpenAi(parts: GeminiProxyPart[]): { prompt: string; image: { data: string; mimeType: string } | null } {
   let prompt = '';
   let image: { data: string; mimeType: string } | null = null;
   for (const part of parts) {
@@ -598,7 +632,7 @@ function shouldTryOpenAiAfterGeminiFail(lastError: string, allQuotaErrors: boole
 export { GEMINI_QUOTA_ERROR, formatGeminiQuotaUserMessage, isGeminiQuotaPaused };
 
 async function routeOpenAiFallback<T>(
-  validParts: Part[],
+  validParts: GeminiProxyPart[],
   task: OpenAiFallbackTask,
 ): Promise<GeminiResult<T>> {
   const { prompt, image } = extractPartsForOpenAi(validParts);
@@ -619,29 +653,21 @@ async function routeOpenAiFallback<T>(
 }
 
 async function runGeminiWithSchemaImpl<T>(
-  parts: Part[],
-  schema: Schema,
+  parts: GeminiProxyPart[],
+  schema: unknown,
   temperature = 0.25,
   openAiTask?: OpenAiFallbackTask,
 ): Promise<GeminiResult<T>> {
-  const validParts = parts.filter(Boolean) as Part[];
+  const validParts = parts.filter(Boolean) as GeminiProxyPart[];
   if (validParts.length === 0) return { result: null, error: 'NO_VALID_PARTS' };
 
-  const apiKey = readGeminiApiKey();
   const preferOpenAi = openAiTask ? await shouldPreferOpenAiVision() : false;
 
-  // ── OpenAI path when server key is configured (default on Vercel with OPENAI_API_KEY) ──
+  // ── OpenAI path when server key is configured ──
   if (openAiTask && preferOpenAi) {
     const oai = await routeOpenAiFallback<T>(validParts, openAiTask);
     if (oai.result !== null && oai.error === null) return oai;
     return oai.error ? oai : { result: null, error: 'OPENAI_FAILED' };
-  }
-
-  if (!apiKey) {
-    if (openAiTask && (await shouldPreferOpenAiVision())) {
-      return routeOpenAiFallback<T>(validParts, openAiTask);
-    }
-    return { result: null, error: 'NO_API_KEY' };
   }
 
   if (isGeminiQuotaPaused()) {
@@ -651,92 +677,60 @@ async function runGeminiWithSchemaImpl<T>(
     return { result: null, error: GEMINI_QUOTA_ERROR };
   }
 
-  const genAI = new GoogleGenerativeAI(apiKey);
+  // ── Gemini via server proxy (no direct browser calls) ──
   let lastError = 'ALL_MODELS_FAILED';
   let allQuotaErrors = true;
 
   for (const modelId of GEMINI_MODEL_IDS) {
-    // Try with responseSchema first
-    try {
-      const model = genAI.getGenerativeModel({
-        model: modelId,
-        generationConfig: {
-          responseMimeType: 'application/json',
-          responseSchema: schema,
-          temperature,
-          maxOutputTokens: 2000,
-        },
-        safetySettings: SAFETY_RELAXED,
-      });
-      const raw = await withTimeout(model.generateContent(validParts), 45_000, modelId);
-      const text = raw.response.text();
-      if (text && text.trim().length > 0) {
-        const cleaned = text.replace(/```json\n?/gi, '').replace(/```\n?/g, '').trim();
-        clearGeminiQuotaCooldown();
-        return { result: JSON.parse(cleaned) as T, error: null };
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      lastError = `${modelId}(schema): ${msg.slice(0, 200)}`;
-      if (!is429orQuota(err)) allQuotaErrors = false;
-
-      if (is429orQuota(err) || msg === GEMINI_QUOTA_ERROR) {
-        triggerGeminiQuotaCooldown('[RoofVision] Gemini rate-limited — pausing Gemini calls for 15 minutes.');
-        break;
-      }
-
-      // On 400 (schema rejected) retry same model with JSON-only mode (no schema)
-      if (msg.includes('400') || msg.includes('INVALID_ARGUMENT')) {
-        try {
-          const model = genAI.getGenerativeModel({
-            model: modelId,
-            generationConfig: {
-              responseMimeType: 'application/json',
-              temperature,
-              maxOutputTokens: 2000,
-            },
-            safetySettings: SAFETY_RELAXED,
-          });
-          const raw = await withTimeout(model.generateContent(validParts), 45_000, `${modelId}-json`);
-          const text = raw.response.text();
-          if (text && text.trim().length > 0) {
-            const cleaned = text.replace(/```json\n?/gi, '').replace(/```\n?/g, '').trim();
-            clearGeminiQuotaCooldown();
-            return { result: JSON.parse(cleaned) as T, error: null };
-          }
-        } catch (fallbackErr) {
-          lastError = `${modelId}(json): ${fallbackErr instanceof Error ? fallbackErr.message.slice(0, 200) : String(fallbackErr)}`;
-          if (!is429orQuota(fallbackErr)) allQuotaErrors = false;
-          if (is429orQuota(fallbackErr)) {
-            triggerGeminiQuotaCooldown('[RoofVision] Gemini rate-limited — pausing Gemini calls for 15 minutes.');
-            break;
-          }
+    for (const mode of ['structured', 'plain'] as const) {
+      try {
+        const generationConfig = mode === 'structured'
+          ? { responseMimeType: 'application/json', responseSchema: schema, temperature, maxOutputTokens: 2000 }
+          : { responseMimeType: 'application/json', temperature, maxOutputTokens: 2000 };
+        const text = await withTimeout(
+          callGeminiProxy({ model: modelId, parts: validParts, generationConfig, safetySettings: SAFETY_RELAXED }),
+          45_000,
+          modelId
+        );
+        if (text && text.trim().length > 0) {
+          const cleaned = text.replace(/```json\n?/gi, '').replace(/```\n?/g, '').trim();
+          clearGeminiQuotaCooldown();
+          return { result: JSON.parse(cleaned) as T, error: null };
         }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        lastError = `${modelId}(${mode}): ${msg.slice(0, 200)}`;
+        if (!is429orQuota(err)) allQuotaErrors = false;
+        if (is429orQuota(err) || msg === GEMINI_QUOTA_ERROR) {
+          triggerGeminiQuotaCooldown('[RoofVision] Gemini rate-limited — pausing Gemini calls for 15 minutes.');
+          // goto OpenAI fallback
+          if (openAiTask && isOpenAiFallbackAvailable()) {
+            const oai = await routeOpenAiFallback<T>(validParts, openAiTask);
+            if (oai.result !== null && oai.error === null) return oai;
+            if (oai.error) lastError = oai.error;
+          }
+          return { result: null, error: GEMINI_QUOTA_ERROR };
+        }
+        // On 400/schema-rejected: try plain mode (continue inner loop)
+        if (mode === 'structured' && (msg.includes('400') || msg.includes('INVALID_ARGUMENT'))) continue;
+        break; // other errors: next model
       }
     }
   }
 
-  // ── OpenAI fallback: quota/capacity failures (only when proxy is configured) ──
-  if (
-    openAiTask &&
-    isOpenAiFallbackAvailable() &&
-    shouldTryOpenAiAfterGeminiFail(lastError, allQuotaErrors)
-  ) {
+  // ── OpenAI fallback on capacity failures ──
+  if (openAiTask && isOpenAiFallbackAvailable() && shouldTryOpenAiAfterGeminiFail(lastError, allQuotaErrors)) {
     const oai = await routeOpenAiFallback<T>(validParts, openAiTask);
     if (oai.result !== null && oai.error === null) return oai;
     if (oai.error) lastError = oai.error;
   }
 
-  if (allQuotaErrors || isGeminiQuotaPaused()) {
-    return { result: null, error: GEMINI_QUOTA_ERROR };
-  }
-
-  return { result: null, error: lastError };
+  return { result: null, error: allQuotaErrors || isGeminiQuotaPaused() ? GEMINI_QUOTA_ERROR : lastError };
 }
 
 async function runGeminiWithSchema<T>(
-  parts: Part[],
-  schema: Schema,
+  parts: GeminiProxyPart[],
+  schema: unknown,
   temperature = 0.25,
   openAiTask?: OpenAiFallbackTask,
 ): Promise<GeminiResult<T>> {
@@ -756,7 +750,7 @@ export async function analyzeRoofOutline(
 ): Promise<OutlineAnalysis | null> {
   const outlineStr = outlineNormalized.map(p => `(${p.x.toFixed(3)},${p.y.toFixed(3)})`).join(' → ');
   const imgPart = buildImagePart(imageData);
-  const textPart: Part = {
+  const textPart: GeminiProxyPart = {
     text: `You are analyzing a north-up satellite image of a building rooftop.${imgPart ? '' : ' (No image provided — use coordinates only.)'}
 The user has drawn a boundary polygon with these normalized image coordinates (x=0 left, y=0 top):
 ${outlineStr}
@@ -768,8 +762,8 @@ Evaluate:
 4. notes: Brief feedback (≤2 sentences) on the outline.
 
 Return JSON only.`,
-  } as Part;
-  const parts: Part[] = [imgPart, textPart].filter(Boolean) as Part[];
+  } as GeminiProxyPart;
+  const parts: GeminiProxyPart[] = [imgPart, textPart].filter(Boolean) as GeminiProxyPart[];
   const { result, error } = await runGeminiWithSchema<OutlineAnalysis>(parts, OUTLINE_ANALYSIS_SCHEMA, 0.25, 'outline_analysis');
   if (error) console.warn('[RoofVision] analyzeRoofOutline failed:', error);
   return result;
@@ -791,7 +785,7 @@ export async function analyzeRoofSegment(
     ? '\nThe user re-ran this analysis after refining the polygon — prioritize accurate pitch (ratio), slope-facing cardinal direction, and roof type; be specific to what the satellite image shows.'
     : '';
   const imgPart = buildImagePart(imageData);
-  const textPart: Part = {
+  const textPart: GeminiProxyPart = {
     text: `You are analyzing a north-up satellite image of a building rooftop.${imgPart ? '' : ' (No image provided — use coordinates only.)'}
 Segment ${segmentIndex + 1} has been drawn with these normalized image coordinates:
 ${segStr}${contextStr}${refinementStr}
@@ -804,8 +798,8 @@ Classify this roof segment:
 - notes: 1 sentence describing what you see
 
 Return JSON only.`,
-  } as Part;
-  const parts: Part[] = [imgPart, textPart].filter(Boolean) as Part[];
+  } as GeminiProxyPart;
+  const parts: GeminiProxyPart[] = [imgPart, textPart].filter(Boolean) as GeminiProxyPart[];
   const { result, error } = await runGeminiWithSchema<SegmentAnalysis>(parts, SEGMENT_ANALYSIS_SCHEMA, 0.25, 'segment_analysis');
   if (error) console.warn('[RoofVision] analyzeRoofSegment failed:', error);
   else if (!result) console.warn('[RoofVision] analyzeRoofSegment returned null (all models failed)');
@@ -821,7 +815,7 @@ export async function detectRoofStructure(
     .map((seg, i) => `Segment ${i + 1}: ${seg.map(p => `(${p.x.toFixed(3)},${p.y.toFixed(3)})`).join(' → ')}`)
     .join('\n');
   const imgPart = buildImagePart(imageData);
-  const textPart: Part = {
+  const textPart: GeminiProxyPart = {
     text: `You are analyzing a north-up satellite image of a building rooftop where the user has traced ${allSegmentsNormalized.length} roof segment(s).${imgPart ? '' : ' (No image provided — infer structure from segment coordinates only.)'}
 
 ${segDesc}
@@ -840,8 +834,8 @@ Also return:
 - notes: key observations (1-2 sentences)
 
 Return 4-20 cues total. Return JSON only.`,
-  } as Part;
-  const parts: Part[] = [imgPart, textPart].filter(Boolean) as Part[];
+  } as GeminiProxyPart;
+  const parts: GeminiProxyPart[] = [imgPart, textPart].filter(Boolean) as GeminiProxyPart[];
   const { result, error } = await runGeminiWithSchema<StructuralDetection>(parts, STRUCTURAL_DETECTION_SCHEMA, 0.25, 'structure_detection');
   if (error) console.warn('[RoofVision] detectRoofStructure failed:', error);
   return result;
@@ -879,9 +873,9 @@ Structural notes: ${structuralData.notes}`;
     ? photoSummaries.map(p => `${p.slot}: quality=${(p.qualityScore * 100).toFixed(0)}%, ${p.cueCount} cues detected`).join('\n')
     : 'No additional photos analyzed.';
 
-  const parts: Part[] = [];
+  const parts: GeminiProxyPart[] = [];
   if (topImageData) {
-    parts.push({ inlineData: { mimeType: topImageData.mimeType, data: topImageData.data } } as Part);
+    parts.push({ inlineData: { mimeType: topImageData.mimeType, data: topImageData.data } } as GeminiProxyPart);
   }
   parts.push({
     text: `You are an expert roofing inspector performing a comprehensive roof assessment.
@@ -904,7 +898,7 @@ Based on all available data, provide a complete roof assessment:
 - photoSummary: 1-2 sentence summary of photo analysis findings
 
 Return JSON only.`,
-  } as Part);
+  } as GeminiProxyPart);
 
   const { result, error } = await runGeminiWithSchema<CombinedRoofAnalysis>(parts, COMBINED_ANALYSIS_SCHEMA, 0.3, 'segment_analysis');
   if (error) console.warn('[RoofVision] analyzeCombinedRoof failed:', error);

@@ -3,7 +3,14 @@
  * Keeps OPENAI_API_KEY off the client bundle and enables Gemini->OpenAI fallback.
  */
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { resolveOpenAiApiKey } from './resolveEnvKeys';
+
+function resolveOpenAiApiKey(): string {
+  return (
+    (process.env.OPENAI_API_KEY || '').trim() ||
+    (process.env.OPENAI_KEY || '').trim() ||
+    (process.env.VITE_OPENAI_API_KEY || '').trim()
+  );
+}
 
 export const config = {
   api: {

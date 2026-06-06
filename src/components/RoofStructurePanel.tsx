@@ -367,64 +367,80 @@ export default function RoofStructurePanel({ analysis, onClose, onApply }: RoofS
             ))}
           </div>
 
-          <div className="rounded-xl border border-slate-200 bg-slate-50 p-2 sm:p-3">
-            <svg
-              viewBox={analysis.svg.viewBox}
-              width={analysis.svg.width}
-              height={analysis.svg.height}
-              className="w-full h-auto rounded-lg bg-white border border-slate-200"
-              xmlns="http://www.w3.org/2000/svg"
-            >
-              {renderEdges(editableFacets, analysis.svg.pxPerFt, handleEdgeCycle)}
-
-              {editableFacets.map(facet => (
-                <g key={facet.index} transform={`translate(${facet.placement.x}, ${facet.placement.y})`}>
-                  <rect
-                    width={facet.placement.w}
-                    height={facet.placement.h}
-                    rx={3}
-                    fill={`${SECTION_COLORS[facet.index % SECTION_COLORS.length]}22`}
-                    stroke={SECTION_COLORS[facet.index % SECTION_COLORS.length]}
-                    strokeWidth={1.6}
-                  />
-                  <text
-                    x={facet.placement.w / 2}
-                    y={facet.placement.h / 2 - 6}
-                    textAnchor="middle"
-                    fontSize={10}
-                    fontWeight={600}
-                    fill="#0f172a"
-                    fontFamily="Inter, system-ui, sans-serif"
-                  >
-                    {facet.pitchLabel} · {facet.facingLabel}
-                  </text>
-                  <text
-                    x={facet.placement.w / 2}
-                    y={facet.placement.h / 2 + 8}
-                    textAnchor="middle"
-                    fontSize={9}
-                    fill="#475569"
-                    fontFamily="Inter, system-ui, sans-serif"
-                  >
-                    {Math.round(facet.actualAreaSqFt).toLocaleString()} sq ft
-                  </text>
-                </g>
-              ))}
-            </svg>
-
-            <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1.5 text-[11px] text-slate-600">
-              {(Object.keys(EDGE_STYLES) as FacetEdge['kind'][]).map(kind => (
-                <div key={kind} className="inline-flex items-center gap-1.5">
-                  <span
-                    className="inline-block w-6 border-t-2"
-                    style={{
-                      borderColor: EDGE_STYLES[kind].color,
-                      borderTopStyle: EDGE_STYLES[kind].dash ? 'dashed' : 'solid',
-                    }}
-                  />
-                  {EDGE_STYLES[kind].label}
-                </div>
-              ))}
+          {/* Facets table — replaces the old rectangle schematic */}
+          <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
+            <div className="px-4 py-3 bg-slate-50 border-b border-slate-100 flex items-center justify-between">
+              <h3 className="text-xs font-semibold text-slate-700 uppercase tracking-wide">Roof Planes</h3>
+              <span className="text-[11px] text-slate-400">{editableFacets.length} facets — click an edge type to reclassify</span>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="border-b border-slate-100">
+                    <th className="text-left px-3 py-2 font-semibold text-slate-500 w-8">#</th>
+                    <th className="text-left px-3 py-2 font-semibold text-slate-500">Pitch</th>
+                    <th className="text-left px-3 py-2 font-semibold text-slate-500">Facing</th>
+                    <th className="text-right px-3 py-2 font-semibold text-slate-500">Roof Area</th>
+                    <th className="text-right px-3 py-2 font-semibold text-slate-500">Ground Area</th>
+                    <th className="text-left px-3 py-2 font-semibold text-slate-500">Edges</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-50">
+                  {editableFacets.map((facet, i) => {
+                    const color = SECTION_COLORS[facet.index % SECTION_COLORS.length];
+                    return (
+                      <tr key={facet.index} className="hover:bg-slate-50/70">
+                        <td className="px-3 py-2.5">
+                          <span className="inline-flex items-center justify-center w-5 h-5 rounded-full text-[10px] font-bold text-white" style={{ backgroundColor: color }}>{i + 1}</span>
+                        </td>
+                        <td className="px-3 py-2.5">
+                          <span className="font-bold text-[11px] px-2 py-0.5 rounded" style={{ backgroundColor: `${color}20`, color }}>
+                            {facet.pitchLabel}
+                          </span>
+                        </td>
+                        <td className="px-3 py-2.5 text-slate-700 font-medium">{facet.facingLabel}</td>
+                        <td className="px-3 py-2.5 text-right font-semibold text-slate-900">{Math.round(facet.actualAreaSqFt).toLocaleString()} sq ft</td>
+                        <td className="px-3 py-2.5 text-right text-slate-500">{Math.round(facet.groundAreaSqFt).toLocaleString()} sq ft</td>
+                        <td className="px-3 py-2.5">
+                          <div className="flex flex-wrap gap-1">
+                            {facet.edges.map((edge, edgeIdx) => {
+                              const style = EDGE_STYLES[edge.kind];
+                              const lowConf = edge.confidence < 0.5;
+                              return (
+                                <button
+                                  key={edgeIdx}
+                                  type="button"
+                                  title={`${edge.side} edge — ${edge.kind}${lowConf ? ' (low confidence)' : ''} · click to reclassify`}
+                                  onClick={() => handleEdgeCycle(facet.index, edgeIdx)}
+                                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-[10px] font-medium transition-colors hover:opacity-80"
+                                  style={{
+                                    borderColor: lowConf ? '#f59e0b' : style.color,
+                                    color: lowConf ? '#b45309' : style.color,
+                                    backgroundColor: lowConf ? '#fef3c720' : `${style.color}15`,
+                                  }}
+                                >
+                                  <span className="capitalize">{edge.side[0]}</span>
+                                  <span>·</span>
+                                  <span className="capitalize">{edge.kind}</span>
+                                  {lowConf && <span title="low confidence">~</span>}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+                <tfoot>
+                  <tr className="border-t border-slate-200 bg-slate-50">
+                    <td colSpan={3} className="px-3 py-2 text-xs font-semibold text-slate-600">Total</td>
+                    <td className="px-3 py-2 text-right text-xs font-bold text-slate-900">{Math.round(editableFacets.reduce((s, f) => s + f.actualAreaSqFt, 0)).toLocaleString()} sq ft</td>
+                    <td className="px-3 py-2 text-right text-xs text-slate-500">{Math.round(editableFacets.reduce((s, f) => s + f.groundAreaSqFt, 0)).toLocaleString()} sq ft</td>
+                    <td />
+                  </tr>
+                </tfoot>
+              </table>
             </div>
           </div>
 
