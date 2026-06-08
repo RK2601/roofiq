@@ -678,6 +678,96 @@ export default function WizardWorkflowReportView({
         </div>
       </div>
 
+      {reportPolygons.length > 0 && (
+        <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm overflow-hidden">
+          <h4 className="text-sm font-semibold text-slate-800">Pitch and direction (schematic)</h4>
+          <p className="text-[11px] text-slate-500 mt-0.5 mb-3">
+            Topology-corrected diagram — shared edges drawn once, vertices snapped.
+          </p>
+          <div className="rounded-lg border border-slate-200 bg-slate-50 p-2 overflow-hidden">
+            <svg viewBox={`0 0 ${diagramWidth} ${diagramHeight}`} className="w-full h-auto max-h-[780px]">
+              {reportPolygons.map(poly => (
+                <g key={`fill-${poly.id}`}>
+                  <polygon
+                    points={poly.points.map(point => `${point.x},${point.y}`).join(' ')}
+                    fill={`${poly.color}24`}
+                    stroke="none"
+                  />
+                  <text
+                    x={poly.center.x}
+                    y={poly.center.y}
+                    textAnchor="middle"
+                    dominantBaseline="middle"
+                    fontSize="13"
+                    fontWeight="700"
+                    fill="#0f172a"
+                    fontFamily="Inter,system-ui,sans-serif"
+                  >
+                    {`${poly.pitch} · ${poly.facing}`}
+                  </text>
+                </g>
+              ))}
+
+              {/* Boundary/shared topology edges */}
+              {topoEdges.map((edge, idx) => {
+                const shared = edge.polyIndices.length > 1;
+                const ownerIdx = edge.polyIndices[0] ?? 0;
+                const ownerColor = reportPolygons[ownerIdx]?.color ?? '#334155';
+                return (
+                  <line
+                    key={`topo-${idx}`}
+                    x1={edge.x1}
+                    y1={edge.y1}
+                    x2={edge.x2}
+                    y2={edge.y2}
+                    stroke={shared ? '#94a3b8' : ownerColor}
+                    strokeWidth={shared ? 1.1 : 1.9}
+                    strokeLinecap="round"
+                  />
+                );
+              })}
+
+              {/* Structural edges */}
+              {reportEdges.map(edge => (
+                <line
+                  key={edge.id}
+                  x1={edge.x1}
+                  y1={edge.y1}
+                  x2={edge.x2}
+                  y2={edge.y2}
+                  stroke={edge.color}
+                  strokeWidth={edge.type === 'ridge' ? 2.2 : 1.8}
+                  strokeDasharray={edge.dash.length >= 2 ? `${edge.dash[0]} ${edge.dash[1]}` : undefined}
+                  strokeLinecap="round"
+                />
+              ))}
+            </svg>
+          </div>
+          <div className="mt-3 flex flex-wrap gap-x-5 gap-y-2 text-xs text-slate-600">
+            <span className="inline-flex items-center gap-1.5">
+              <span className="w-4 border-t-2 border-slate-800 inline-block" />
+              Boundary edge
+            </span>
+            <span className="inline-flex items-center gap-1.5">
+              <span className="w-4 border-t-[1.5px] border-slate-400 inline-block" />
+              Shared edge (plane division)
+            </span>
+            <span className="inline-flex items-center gap-1.5">
+              <span className="w-4 border-t-2 border-red-500 inline-block" />
+              Ridge
+            </span>
+            <span className="inline-flex items-center gap-1.5">
+              <span className="w-4 border-t-2 border-blue-500 inline-block" />
+              Valley
+            </span>
+            <span className="inline-flex items-center gap-1.5">
+              <span className="w-4 border-t-2 border-orange-500 inline-block" />
+              Hip
+            </span>
+          </div>
+        </div>
+      )}
+
       {reportPolygons.length > 0 && (() => {
         const totalArea = reportPolygons.reduce((s, p) => s + p.areaSqFt, 0);
         const sorted = [...reportPolygons].sort((a, b) => b.areaSqFt - a.areaSqFt);

@@ -708,6 +708,7 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
   }, []);
   const [quoteDraftSaved, setQuoteDraftSaved] = useState(false);
   const [projectSaving, setProjectSaving] = useState(false);
+  const [projectSaveError, setProjectSaveError] = useState<string | null>(null);
 
   /** Append one history run on the next persistence cycle (consumed by the auto-save effect). */
   const appendHistoryNextRef = useRef(false);
@@ -2720,6 +2721,7 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
 
   const handleSaveAndNew = useCallback(async () => {
     if (projectSaving) return;
+    setProjectSaveError(null);
     setProjectSaving(true);
     // Poll the ref (not state) so the closure always sees the latest value.
     await new Promise<void>(resolve => {
@@ -2731,6 +2733,11 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
       };
       check();
     });
+    if (persistStatusRef.current !== 'saved') {
+      setProjectSaving(false);
+      setProjectSaveError('Could not finish saving yet. Please wait a moment and click Save Project again.');
+      return;
+    }
     // Persist exactly one history entry on explicit user confirmation.
     appendHistoryNextRef.current = true;
     setHistorySaveNonce(n => n + 1);
@@ -2747,6 +2754,11 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
       };
       tick();
     });
+    if (persistStatusRef.current !== 'saved') {
+      setProjectSaving(false);
+      setProjectSaveError('Save failed before completion. Please retry. If this continues, check DB/API configuration.');
+      return;
+    }
 
     setProjectSaving(false);
     onSaveAndNew?.();
@@ -2987,7 +2999,10 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
             capturedAtIso: slot.capturedAtIso ?? null,
             depthPitchDeg: slot.depthPitchDeg ?? null,
             depthPitchRatio: slot.depthPitchRatio ?? null,
-            depthMapUrl: slot.depthMapUrl ?? null,
+            depthMapUrl:
+              slot.depthMapUrl && slot.depthMapUrl.length < 600_000
+                ? slot.depthMapUrl
+                : null,
             notes: slot.analysis?.cues.length
               ? `${slot.analysis.cues.length} cues · quality ${Math.round((slot.analysis.qualityScore ?? 0) * 100)}%`
               : null,
@@ -3028,7 +3043,8 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
           setPersistStatus('saved');
           onPersisted?.(saved.projectId);
         }
-      } catch {
+      } catch (err) {
+        console.error('[RoofWizard] Failed to persist workflow report:', err);
         if (!cancelled) setPersistStatus('error');
       }
       })();
@@ -4262,6 +4278,9 @@ export default function RoofMappingWizard({ apiKey, address, coordinates, solarD
                       ? <><Loader2 size={14} className="animate-spin" /> Saving…</>
                       : <><FolderOpen size={14} /> Save Project</>}
                   </button>
+                  {projectSaveError && (
+                    <p className="text-[11px] text-rose-300 leading-snug">{projectSaveError}</p>
+                  )}
 
                   <button onClick={runFinalAnalysis} className="text-xs text-slate-500 hover:text-white flex items-center gap-1.5 transition-colors">
                     <RotateCcw size={11} /> Re-run analysis
